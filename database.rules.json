@@ -1,0 +1,27 @@
+{
+  "rules": {
+    "country-meta": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "config": {
+      "prompts": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    },
+    "countries": {
+      ".read": "auth != null",
+      "$countryKey": {
+        "setup": { ".write": "auth != null" },
+        "runs":  { ".write": false }
+      }
+    },
+    "users": {
+      "$uid": {
+        ".read":  "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    }
+  }
+}

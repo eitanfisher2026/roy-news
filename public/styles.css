@@ -1,0 +1,180 @@
+* { box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Arial', sans-serif;
+  background: #0d1b2a;
+  margin: 0;
+  overscroll-behavior-y: contain;
+}
+
+[lang="he"], [dir="rtl"] {
+  font-family: 'Arial Hebrew', 'David', Arial, sans-serif;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0d1b2a; }
+::-webkit-scrollbar-thumb { background: #2a4060; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3a5580; }
+
+/* Lean border accents */
+.lean-government       { border-left: 4px solid #ef4444 !important; }
+.lean-pro-government   { border-left: 4px solid #f97316 !important; }
+.lean-opposition       { border-left: 4px solid #3b82f6 !important; }
+.lean-independent      { border-left: 4px solid #64748b !important; }
+.lean-pro-faction      { border-left: 4px solid #a855f7 !important; }
+.lean-israel           { border-left: 4px solid #06b6d4 !important; }
+
+[dir="rtl"] .lean-government,
+[dir="rtl"] .lean-pro-government,
+[dir="rtl"] .lean-opposition,
+[dir="rtl"] .lean-independent,
+[dir="rtl"] .lean-pro-faction,
+[dir="rtl"] .lean-israel {
+  border-left: none !important;
+  border-right: 4px solid;
+}
+[dir="rtl"] .lean-government     { border-right-color: #ef4444 !important; }
+[dir="rtl"] .lean-pro-government { border-right-color: #f97316 !important; }
+[dir="rtl"] .lean-opposition     { border-right-color: #3b82f6 !important; }
+[dir="rtl"] .lean-independent    { border-right-color: #64748b !important; }
+[dir="rtl"] .lean-pro-faction    { border-right-color: #a855f7 !important; }
+[dir="rtl"] .lean-israel         { border-right-color: #06b6d4 !important; }
+
+/* Tone badges */
+.tone-positive   { color: #4ade80; background: #052e16; }
+.tone-negative   { color: #f87171; background: #2a0a0a; }
+.tone-neutral    { color: #94a3b8; background: #1e293b; }
+.tone-alarmed    { color: #fb923c; background: #2a1505; }
+.tone-dismissive { color: #c084fc; background: #1e0d30; }
+
+/* Animations */
+@keyframes spin    { to { transform: rotate(360deg); } }
+@keyframes fadeIn  { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+@keyframes slideIn { from { opacity:0; transform:translateX(20px); } to { opacity:1; transform:none; } }
+@keyframes pulse   { 0%,100% { opacity:1; } 50% { opacity:.5; } }
+
+.spin     { animation: spin 0.9s linear infinite; }
+.fade-in  { animation: fadeIn 0.3s ease; }
+.slide-in { animation: slideIn 0.3s ease; }
+.pulse    { animation: pulse 1.5s ease infinite; }
+
+/* Core panel */
+.panel {
+  background: #132236;
+  border: 1px solid #1e3a5f;
+  border-radius: 12px;
+}
+
+/* Inputs */
+.input-field {
+  background: #0d1b2a;
+  border: 1px solid #2a4060;
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #e2e8f0;
+  width: 100%;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  font-size: 14px;
+}
+.input-field:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59,130,246,0.15);
+}
+.input-field::placeholder { color: #4a6280; }
+select.input-field { cursor: pointer; }
+
+/* Checkbox hover */
+.check-item { cursor: pointer; transition: background 0.1s; }
+.check-item:hover { background: #1a2d42 !important; }
+
+/* Progress bar */
+.progress-bar-track {
+  height: 6px;
+  background: #1a2d42;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #2563eb, #7c3aed);
+  transition: width 0.6s ease;
+}
+
+/* Error panel */
+.error-panel {
+  background: #1c0a0a;
+  border: 1px solid #7f1d1d;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+/* Version tag */
+.version-tag {
+  font-size: 10px;
+  color: #2a4060;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+/* ── Print / PDF export ────────────────────────────────────────────────────── */
+@media print {
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  body { background: #ffffff !important; color: #111 !important; margin: 0; }
+
+  .no-print { display: none !important; }
+
+  .print-root { background: #fff !important; }
+
+  /* Reset dark panels to white cards */
+  .panel,
+  [class*="panel"] {
+    background: #ffffff !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: 6px !important;
+    break-inside: avoid;
+  }
+
+  /* Override inline dark backgrounds on divs */
+  div[style*="background"] {
+    background: #ffffff !important;
+  }
+
+  /* Text colors */
+  * { color: #111 !important; }
+  .tone-positive   { color: #15803d !important; background: #f0fdf4 !important; }
+  .tone-negative   { color: #b91c1c !important; background: #fef2f2 !important; }
+  .tone-neutral    { color: #475569 !important; background: #f1f5f9 !important; }
+  .tone-alarmed    { color: #c2410c !important; background: #fff7ed !important; }
+  .tone-dismissive { color: #7e22ce !important; background: #faf5ff !important; }
+
+  /* Column layout: stack vertically for print */
+  .results-columns {
+    display: block !important;
+  }
+  .results-columns > * {
+    width: 100% !important;
+    margin-bottom: 24px !important;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  /* Lean borders */
+  .lean-government     { border-left: 4px solid #ef4444 !important; }
+  .lean-pro-government { border-left: 4px solid #f97316 !important; }
+  .lean-opposition     { border-left: 4px solid #3b82f6 !important; }
+  .lean-independent    { border-left: 4px solid #64748b !important; }
+  .lean-pro-faction    { border-left: 4px solid #a855f7 !important; }
+  .lean-israel         { border-left: 4px solid #06b6d4 !important; }
+
+  /* Print header */
+  .print-header {
+    display: block !important;
+    text-align: center;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid #e2e8f0;
+  }
+}

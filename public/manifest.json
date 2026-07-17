@@ -1,0 +1,12 @@
+{
+  "name": "Roy News",
+  "short_name": "Roy News",
+  "description": "Compare how any country's media covers the world — analyzed by AI",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d1b2a",
+  "theme_color": "#1a3050",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

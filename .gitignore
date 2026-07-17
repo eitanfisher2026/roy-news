@@ -1,0 +1,6 @@
+node_modules/
+.claude/
+.firebase/
+.env
+.env.local
+*.log

@@ -479,6 +479,41 @@ exports.setupCountry = onCall(
 // ─────────────────────────────────────────────────────────────────────────────
 // AGENT: Add More Sources (append to existing, exclude already-listed names)
 // ─────────────────────────────────────────────────────────────────────────────
+// Deliberately NOT the generic setup prompt: that one is built to name the
+// obvious major outlets for a country, which is exactly what's already in the
+// user's list by the time they're using "Add More". Reusing it just makes the
+// AI re-derive the same famous handful and then get excluded down to nothing.
+const ADD_SOURCES_PROMPT = `You are a media research expert helping expand an existing news-source list for "{{country}}".
+
+The user already has these outlets — do NOT suggest any of them again, and do not suggest rebrands/close variants of them:
+{{existingNames}}
+
+Find {{requestCount}} additional, genuinely different outlets not in that list. Go beyond the handful of most obvious major national outlets — consider regional/local papers and broadcasters, other national outlets not yet listed, niche or specialty outlets, wire services/news agencies, and outlets with a different political lean than what's already represented.
+
+Return ONLY a valid JSON array — no explanation, no markdown, just the raw JSON array starting with [.
+
+Each element must have exactly these fields:
+{
+  "id": "unique-kebab-case-id",
+  "name": "Publication name in English",
+  "nameOriginal": "Name in the country's primary language",
+  "type": "newspaper" or "tv" or "online" or "radio" or "news_agency",
+  "lean": "government" or "pro-government" or "opposition" or "independent" or "pro-faction",
+  "leanDescription": "One sentence in English describing the political position and ownership",
+  "rssUrl": "Full RSS/Atom feed URL (string) or null if unknown",
+  "websiteUrl": "Main website URL",
+  "languages": ["Arabic"],
+  "notes": "One sentence of important context: reach, influence, history"
+}
+
+Rules:
+- Include exactly {{requestCount}} sources, ALL different from the excluded list above
+- Prioritize sources that have RSS feeds
+- For the lean field, use exactly one of the 5 values listed above
+- Do not include sources you are not reasonably confident exist
+
+Country: {{country}}`;
+
 exports.addSources = onCall(
   { timeoutSeconds: 120, memory: '512MiB', region: 'us-central1' },
   async (request) => {
@@ -486,13 +521,17 @@ exports.addSources = onCall(
     const { country, countryKey, numSources: rawNum, filterNoRSS, existingNames } = request.data;
     if (!country || typeof country !== 'string') throw new HttpsError('invalid-argument', 'country required');
     const numSources = Math.min(Math.max(parseInt(rawNum) || 5, 1), 10);
+    // Ask for a few more than requested so losses to dedup/RSS validation
+    // don't zero out the result — the client still only shows `numSources`.
+    const requestCount = numSources + 3;
+    const existing = existingNames?.length ? existingNames : [];
+    const existingLower = existing.map(n => n.trim().toLowerCase());
 
     const ai = makeAI(request.data);
-    const customPrompts = await getCustomPrompts();
-    const excludeClause = existingNames?.length
-      ? `\n\nDo NOT include any of these already-listed sources: ${existingNames.join(', ')}`
-      : '';
-    const prompt = fillPrompt(customPrompts.setup || DEFAULT_PROMPTS.setup, { country, numSources }) + excludeClause;
+    const prompt = fillPrompt(ADD_SOURCES_PROMPT, {
+      country, requestCount,
+      existingNames: existing.length ? existing.join(', ') : '(none yet)',
+    });
 
     const { text, usage } = await callAI(ai, prompt, 3000);
     await recordCost(request, ai, usage?.input_tokens || 0, usage?.output_tokens || 0);
@@ -500,21 +539,29 @@ exports.addSources = onCall(
     try { sources = extractJson(text, '['); }
     catch (e) { throw new HttpsError('internal', 'Failed to parse sources: ' + e.message); }
 
+    const aiReturnedCount = sources.length;
+    // Safety net: the AI doesn't always follow the exclusion instruction.
+    sources = sources.filter(s => !existingLower.includes((s.name || '').trim().toLowerCase()));
+    const duplicatesSkipped = aiReturnedCount - sources.length;
+
     const validations = await Promise.all(
       sources.map(s => s.rssUrl ? validateRssUrl(s.rssUrl) : Promise.resolve(false))
     );
     sources = sources.map((s, i) => validations[i] ? s : { ...s, rssUrl: null });
+    const beforeRssFilter = sources.length;
     if (filterNoRSS) sources = sources.filter(s => s.rssUrl);
+    const rssFilteredCount = filterNoRSS ? beforeRssFilter - sources.length : 0;
+    sources = sources.slice(0, numSources);
 
     if (sources.length > 0 && countryKey) {
       try {
         const snap = await db.ref(`countries/${countryKey}/setup/sources`).once('value');
-        const existing = snap.val() || [];
-        await db.ref(`countries/${countryKey}/setup/sources`).set([...existing, ...sources]);
+        const existingStored = snap.val() || [];
+        await db.ref(`countries/${countryKey}/setup/sources`).set([...existingStored, ...sources]);
       } catch {}
     }
 
-    return { sources };
+    return { sources, duplicatesSkipped, rssFilteredCount };
   }
 );
 

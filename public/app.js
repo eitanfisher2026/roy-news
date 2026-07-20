@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.76';
+const VERSION = 'v1.77';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -561,8 +561,12 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
           onSelectionChange(new Set([...(selected || []), ...newSrcs.map(s => s.id)]));
         }
         setAddMsg(`✓ Added ${newSrcs.length} source${newSrcs.length !== 1 ? 's' : ''} · ${newSrcs.filter(s => s.rssUrl).length} with RSS`);
+      } else if (result.data.rssFilteredCount > 0) {
+        setAddMsg(`Found ${result.data.rssFilteredCount} new outlet${result.data.rssFilteredCount !== 1 ? 's' : ''}, but none had a working RSS feed — try again, or uncheck "Only sources with RSS".`);
+      } else if (result.data.duplicatesSkipped > 0) {
+        setAddMsg('The AI kept suggesting outlets you already have. Try again — it usually finds different ones on a second pass.');
       } else {
-        setAddMsg('No new sources found — all results were already in the list or filtered out.');
+        setAddMsg('No new sources found — try again, or try a smaller "how many to add" number.');
       }
       setActivePanel(null);
     } catch (e) {

@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.72';
+const VERSION = 'v1.73';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1953,15 +1953,16 @@ function ResultsView({ country, results, date, includeIsrael, usage, user, onNew
 
 // ─── Settings Page ────────────────────────────────────────────────────────────
 const GEMINI_MODELS = [
+  { id: 'gemini-2.5-flash-lite',  label: 'Gemini 2.5 Flash-Lite — Cheapest' },
   { id: 'gemini-2.5-flash',       label: 'Gemini 2.5 Flash — Fast & affordable' },
   { id: 'gemini-2.5-pro',         label: 'Gemini 2.5 Pro — Most capable' },
-  { id: 'gemini-3-flash-preview',  label: 'Gemini 3 Flash Preview — Newest' },
+  { id: 'gemini-3.1-flash-lite',  label: 'Gemini 3.1 Flash-Lite — Newest & cheap' },
 ];
 const OPENAI_MODELS = [
   { id: 'gpt-4o-mini',  label: 'GPT-4o Mini — Fast & affordable' },
-  { id: 'gpt-4o',       label: 'GPT-4o — Powerful' },
-  { id: 'gpt-4.1',      label: 'GPT-4.1 — Latest' },
-  { id: 'gpt-4.1-mini', label: 'GPT-4.1 Mini — Balanced' },
+  { id: 'gpt-5.4-nano', label: 'GPT-5.4 Nano — Cheapest' },
+  { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini — Fast & affordable' },
+  { id: 'gpt-5.4',      label: 'GPT-5.4 — Most capable' },
 ];
 const ANTHROPIC_MODELS = [
   { id: 'claude-sonnet-4-6',         label: 'Claude Sonnet 4.6 — Balanced & capable' },
@@ -1999,6 +2000,40 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
   const [showOpenAIKey, setShowOpenAIKey] = useState(false);
   const [showAnthropicKey, setShowAnthropicKey] = useState(false);
   const [aiSaveMsg,    setAiSaveMsg]    = useState('');
+
+  // Live model catalog per provider, fetched on demand — our hardcoded lists
+  // above go stale as providers ship new models, so this asks the provider directly.
+  const [liveModels, setLiveModels] = useState({});      // { [provider]: { models, cheapestId } }
+  const [liveModelsLoading, setLiveModelsLoading] = useState(null); // provider currently loading, or null
+  const [liveModelsErr, setLiveModelsErr] = useState({}); // { [provider]: message }
+
+  async function refreshModels(provider, apiKey) {
+    if (!apiKey?.trim() || liveModelsLoading) return;
+    setLiveModelsLoading(provider);
+    setLiveModelsErr(e => ({ ...e, [provider]: '' }));
+    try {
+      const result = await fns.httpsCallable('listProviderModels')({ provider, apiKey: apiKey.trim() });
+      setLiveModels(m => ({ ...m, [provider]: result.data }));
+    } catch (e) {
+      setLiveModelsErr(e2 => ({ ...e2, [provider]: e.message }));
+    }
+    setLiveModelsLoading(null);
+  }
+
+  function modelLabel(m, cheapestId) {
+    const price = m.price ? ` — $${m.price.in}/$${m.price.out} per M tokens` : '';
+    const cheap = m.id === cheapestId ? ' · 💰 cheapest' : '';
+    return `${m.label || m.id}${price}${cheap}`;
+  }
+
+  // Always include the currently-selected model, even if it fell out of the
+  // provider's live/fallback list, so the <select> never silently blanks it.
+  function modelOptions(models, currentId) {
+    if (currentId && !models.some(m => m.id === currentId)) {
+      return [{ id: currentId, label: currentId }, ...models];
+    }
+    return models;
+  }
 
   // Load AI settings from Firebase on mount
   useEffect(() => {
@@ -2445,11 +2480,22 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
                 <input type={showGeminiKey ? 'text' : 'password'} value={geminiKey} onChange={e => setGeminiKey(e.target.value)} placeholder="Paste your AIza… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
                 <button onClick={() => setShowGeminiKey(x => !x)} style={SMALL_BTN}>{showGeminiKey ? '🙈' : '👁'}</button>
               </div>
-              <div style={{ fontSize: 12, color: C.faint, marginBottom: 6, fontWeight: 600 }}>Model</div>
-              <input list="gemini-models-list" value={geminiModel} onChange={e => setGeminiModel(e.target.value)} placeholder="e.g. gemini-2.5-flash" className="input-field" style={{ fontSize: 13 }} />
-              <datalist id="gemini-models-list">
-                {GEMINI_MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-              </datalist>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Model</div>
+                <button onClick={() => refreshModels('gemini', geminiKey)} disabled={!geminiKey.trim() || liveModelsLoading === 'gemini'}
+                  style={{ ...SMALL_BTN, opacity: (!geminiKey.trim() || liveModelsLoading === 'gemini') ? 0.5 : 1 }}>
+                  {liveModelsLoading === 'gemini' ? 'Checking…' : '🔄 Refresh list'}
+                </button>
+              </div>
+              <select value={geminiModel} onChange={e => setGeminiModel(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
+                {modelOptions(liveModels.gemini?.models || GEMINI_MODELS, geminiModel).map(m =>
+                  <option key={m.id} value={m.id}>{modelLabel(m, liveModels.gemini?.cheapestId)}</option>
+                )}
+              </select>
+              <div style={{ fontSize: 11, color: C.faint, marginTop: 6 }}>
+                {liveModels.gemini ? `Showing ${liveModels.gemini.models.length} models live from your Gemini account.` : 'Showing a default list — press "Refresh list" to pull the current models from your Gemini account.'}
+              </div>
+              {liveModelsErr.gemini && <div style={{ color: '#f87171', fontSize: 11, marginTop: 6 }}>{liveModelsErr.gemini}</div>}
             </div>
           )}
 
@@ -2469,11 +2515,22 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
                 <input type={showOpenAIKey ? 'text' : 'password'} value={openaiKey} onChange={e => setOpenaiKey(e.target.value)} placeholder="Paste your sk-… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
                 <button onClick={() => setShowOpenAIKey(x => !x)} style={SMALL_BTN}>{showOpenAIKey ? '🙈' : '👁'}</button>
               </div>
-              <div style={{ fontSize: 12, color: C.faint, marginBottom: 6, fontWeight: 600 }}>Model</div>
-              <input list="openai-models-list" value={openaiModel} onChange={e => setOpenaiModel(e.target.value)} placeholder="e.g. gpt-4o-mini" className="input-field" style={{ fontSize: 13 }} />
-              <datalist id="openai-models-list">
-                {OPENAI_MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-              </datalist>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Model</div>
+                <button onClick={() => refreshModels('openai', openaiKey)} disabled={!openaiKey.trim() || liveModelsLoading === 'openai'}
+                  style={{ ...SMALL_BTN, opacity: (!openaiKey.trim() || liveModelsLoading === 'openai') ? 0.5 : 1 }}>
+                  {liveModelsLoading === 'openai' ? 'Checking…' : '🔄 Refresh list'}
+                </button>
+              </div>
+              <select value={openaiModel} onChange={e => setOpenaiModel(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
+                {modelOptions(liveModels.openai?.models || OPENAI_MODELS, openaiModel).map(m =>
+                  <option key={m.id} value={m.id}>{modelLabel(m, liveModels.openai?.cheapestId)}</option>
+                )}
+              </select>
+              <div style={{ fontSize: 11, color: C.faint, marginTop: 6 }}>
+                {liveModels.openai ? `Showing ${liveModels.openai.models.length} models live from your OpenAI account.` : 'Showing a default list — press "Refresh list" to pull the current models from your OpenAI account.'}
+              </div>
+              {liveModelsErr.openai && <div style={{ color: '#f87171', fontSize: 11, marginTop: 6 }}>{liveModelsErr.openai}</div>}
             </div>
           )}
 
@@ -2493,11 +2550,22 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
                 <input type={showAnthropicKey ? 'text' : 'password'} value={anthropicKey} onChange={e => setAnthropicKey(e.target.value)} placeholder="Paste your sk-ant-… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
                 <button onClick={() => setShowAnthropicKey(x => !x)} style={SMALL_BTN}>{showAnthropicKey ? '🙈' : '👁'}</button>
               </div>
-              <div style={{ fontSize: 12, color: C.faint, marginTop: 12, marginBottom: 6, fontWeight: 600 }}>Model</div>
-              <input list="anthropic-models-list" value={anthropicModel} onChange={e => setAnthropicModel(e.target.value)} placeholder="e.g. claude-sonnet-4-6" className="input-field" style={{ fontSize: 13 }} />
-              <datalist id="anthropic-models-list">
-                {ANTHROPIC_MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-              </datalist>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, marginBottom: 6 }}>
+                <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Model</div>
+                <button onClick={() => refreshModels('anthropic', anthropicKey)} disabled={!anthropicKey.trim() || liveModelsLoading === 'anthropic'}
+                  style={{ ...SMALL_BTN, opacity: (!anthropicKey.trim() || liveModelsLoading === 'anthropic') ? 0.5 : 1 }}>
+                  {liveModelsLoading === 'anthropic' ? 'Checking…' : '🔄 Refresh list'}
+                </button>
+              </div>
+              <select value={anthropicModel} onChange={e => setAnthropicModel(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
+                {modelOptions(liveModels.anthropic?.models || ANTHROPIC_MODELS, anthropicModel).map(m =>
+                  <option key={m.id} value={m.id}>{modelLabel(m, liveModels.anthropic?.cheapestId)}</option>
+                )}
+              </select>
+              <div style={{ fontSize: 11, color: C.faint, marginTop: 6 }}>
+                {liveModels.anthropic ? `Showing ${liveModels.anthropic.models.length} models live from your Anthropic account.` : 'Showing a default list — press "Refresh list" to pull the current models from your Anthropic account.'}
+              </div>
+              {liveModelsErr.anthropic && <div style={{ color: '#f87171', fontSize: 11, marginTop: 6 }}>{liveModelsErr.anthropic}</div>}
             </div>
           )}
 

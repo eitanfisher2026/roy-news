@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.77';
+const VERSION = 'v1.78';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -89,6 +89,9 @@ function formatLastLogin(ts) {
 // ─── Constants ────────────────────────────────────────────────────────────────
 const DEFAULT_TOPICS = ['Gaza', 'Iran & Nuclear', 'Hezbollah', 'Israel', 'USA', 'Economy', 'Internal Politics', 'Security & Terrorism', 'Refugees', 'Normalization'];
 
+// Kept in sync with functions/index.js's DEFAULT_PROMPTS by hand — this copy
+// only backs the Settings prompt-editor UI (initial text + "reset" display),
+// the server's copy is what actually runs.
 const DEFAULT_PROMPTS = {
   setup:
 `You are a media research expert. Research the news media landscape of "{{country}}".
@@ -100,7 +103,7 @@ Each element must have exactly these fields:
   "id": "unique-kebab-case-id",
   "name": "Publication name in English",
   "nameOriginal": "Name in the country's primary language",
-  "type": "newspaper" or "tv" or "online" or "radio" or "news_agency",
+  "type": "newspaper" or "tv" or "online" or "radio" or "news_agency" or "podcast",
   "lean": "government" or "pro-government" or "opposition" or "independent" or "pro-faction",
   "leanDescription": "One sentence in English describing the political position and ownership",
   "rssUrl": "Full RSS/Atom feed URL (string) or null if unknown",
@@ -111,8 +114,44 @@ Each element must have exactly these fields:
 
 Rules:
 - Include exactly {{numSources}} sources spanning the full political spectrum
+- Quality bar: only include outlets that are real, currently operating, and have a significant audience — a national newspaper/broadcaster, or the leading/most-cited outlet in their region or category. Do not include obscure blogs, low-circulation fringe sites, or defunct outlets just to fill a slot.
+- In "notes", state the outlet's approximate reach or standing in plain terms (e.g. "one of the country's 2-3 largest daily newspapers", "state broadcaster, primary TV news source", "leading English-language outlet for expats/foreign readers") — the person reading this may not know the country's media landscape and needs to judge legitimacy from this line alone
 - Prioritize sources that have RSS feeds
-- Be honest: if a country has no real opposition press, note that and include exile/diaspora sources
+- Be honest: if a country has no real opposition press, note that and include exile/diaspora sources — but still prefer the most established one available (largest readership/longest track record), not an obscure blog
+- For the lean field, use exactly one of the 5 values listed above
+- Do not include sources you are not reasonably confident exist
+
+Country: {{country}}`,
+
+  addSources:
+`You are a media research expert helping expand an existing news-source list for "{{country}}".
+
+The user already has these outlets — do NOT suggest any of them again, and do not suggest rebrands/close variants of them:
+{{existingNames}}
+
+Find {{requestCount}} additional, genuinely different outlets not in that list.{{locationClause}}{{mediaTypeClause}}{{orientationClause}}{{languageClause}} Go beyond the handful of most obvious major national outlets — consider regional/local papers and broadcasters, other national outlets not yet listed, niche or specialty outlets, wire services/news agencies, and outlets with a different political lean than what's already represented.
+
+Return ONLY a valid JSON array — no explanation, no markdown, just the raw JSON array starting with [.
+
+Each element must have exactly these fields:
+{
+  "id": "unique-kebab-case-id",
+  "name": "Publication name in English",
+  "nameOriginal": "Name in the country's primary language",
+  "type": "newspaper" or "tv" or "online" or "radio" or "news_agency" or "podcast",
+  "lean": "government" or "pro-government" or "opposition" or "independent" or "pro-faction",
+  "leanDescription": "One sentence in English describing the political position and ownership",
+  "rssUrl": "Full RSS/Atom feed URL (string) or null if unknown",
+  "websiteUrl": "Main website URL",
+  "languages": ["Arabic"],
+  "notes": "One sentence of important context: reach, influence, history"
+}
+
+Rules:
+- Include exactly {{requestCount}} sources, ALL different from the excluded list above
+- Quality bar — same as any first-pass list: only real, currently operating outlets with a significant audience (national reach, or the leading outlet in their region/category/niche). Going beyond the obvious major outlets does NOT mean lowering the bar — do not include obscure blogs, low-circulation fringe sites, or defunct outlets just to hit the count.
+- In "notes", state the outlet's approximate reach or standing in plain terms — the reader may not know this country's media landscape and needs to judge legitimacy from this line alone
+- Prioritize sources that have RSS feeds
 - For the lean field, use exactly one of the 5 values listed above
 - Do not include sources you are not reasonably confident exist
 
@@ -211,7 +250,7 @@ const COUNTRY_ALIASES = {
 };
 
 const LEAN_LABELS = { government: 'Government', 'pro-government': 'Pro-Government', opposition: 'Opposition', independent: 'Independent', 'pro-faction': 'Pro-Faction', various: 'Various' };
-const TYPE_LABELS  = { newspaper: 'Newspaper', tv: 'TV', online: 'Online', radio: 'Radio', news_agency: 'Agency' };
+const TYPE_LABELS  = { newspaper: 'Newspaper', tv: 'TV', online: 'Online', radio: 'Radio', news_agency: 'Agency', podcast: 'Podcast' };
 
 // ─── Shared styles ────────────────────────────────────────────────────────────
 const BTN = (bg, extra = {}) => ({ background: bg, color: 'white', border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 14, ...extra });
@@ -457,6 +496,22 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
   const [addFilterNoRSS, setAddFilterNoRSS] = useState(true);
   const [adding, setAdding] = useState(false);
   const [addMsg, setAddMsg] = useState('');
+  // City/location narrows the search but isn't persisted — a city typed for
+  // one country is meaningless as a default for the next one.
+  const [addLocation, setAddLocation] = useState('');
+  // Media type / orientation / language persist across sessions and countries.
+  const [addMediaType, setAddMediaType] = useState(() => {
+    try { return localStorage.getItem('roy-news-add-mediatype') || 'newspaper'; } catch { return 'newspaper'; }
+  });
+  const [addOrientation, setAddOrientation] = useState(() => {
+    try { return localStorage.getItem('roy-news-add-orientation') || 'independent'; } catch { return 'independent'; }
+  });
+  const [addLanguage, setAddLanguage] = useState(() => {
+    try { return localStorage.getItem('roy-news-add-language') || 'english'; } catch { return 'english'; }
+  });
+  function changeAddMediaType(v) { setAddMediaType(v); try { localStorage.setItem('roy-news-add-mediatype', v); } catch {} }
+  function changeAddOrientation(v) { setAddOrientation(v); try { localStorage.setItem('roy-news-add-orientation', v); } catch {} }
+  function changeAddLanguage(v) { setAddLanguage(v); try { localStorage.setItem('roy-news-add-language', v); } catch {} }
 
   // Refresh all
   const [refreshNum, setRefreshNum] = useState(() => {
@@ -550,6 +605,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
         country: country.name, countryKey: country.key,
         numSources: addNum, filterNoRSS: addFilterNoRSS,
         existingNames: sources.map(s => s.name),
+        location: addLocation, mediaType: addMediaType, orientation: addOrientation, language: addLanguage,
         ...await getAISettings(uid)
       });
       const newSrcs = result.data.sources || [];
@@ -631,7 +687,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
             {finding ? <Spinner size={12} /> : '🔍'}
           </button>
         </div>
-        <button onClick={() => { setActivePanel(p => p === 'addmore' ? null : 'addmore'); setAddMsg(''); }} disabled={isBusy}
+        <button onClick={() => { setActivePanel(p => p === 'addmore' ? null : 'addmore'); setAddMsg(''); setAddLocation(''); }} disabled={isBusy}
           style={{ ...SMALL_BTN, padding: '9px 18px', fontSize: 14, fontWeight: 700, borderWidth: 2, borderColor: activePanel === 'addmore' ? '#3b82f6' : '#5b7ba8', color: activePanel === 'addmore' ? '#60a5fa' : C.text }}>
           + Add More
         </button>
@@ -681,6 +737,41 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
             <input type="checkbox" checked={addFilterNoRSS} onChange={e => setAddFilterNoRSS(e.target.checked)} style={{ accentColor: '#3b82f6', width: 14, height: 14 }} />
             <span style={{ fontSize: 13, color: C.text }}>Only sources with RSS</span>
           </label>
+
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 6, fontWeight: 600 }}>City (optional — leave blank for the whole country)</div>
+          <input type="text" value={addLocation} onChange={e => setAddLocation(e.target.value)}
+            placeholder="e.g. Chicago" className="input-field" style={{ fontSize: 13, marginBottom: 12 }} />
+
+          <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+            <div style={{ flex: '1 1 140px' }}>
+              <div style={{ fontSize: 12, color: C.faint, marginBottom: 6, fontWeight: 600 }}>Media type</div>
+              <select value={addMediaType} onChange={e => changeAddMediaType(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
+                <option value="newspaper">Newspaper</option>
+                <option value="tv">TV</option>
+                <option value="radio">Radio</option>
+                <option value="podcast">Podcast</option>
+                <option value="other">Other / no preference</option>
+              </select>
+            </div>
+            <div style={{ flex: '1 1 140px' }}>
+              <div style={{ fontSize: 12, color: C.faint, marginBottom: 6, fontWeight: 600 }}>Orientation</div>
+              <select value={addOrientation} onChange={e => changeAddOrientation(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
+                <option value="government">Government</option>
+                <option value="pro-government">Pro-Government</option>
+                <option value="opposition">Opposition</option>
+                <option value="independent">Independent</option>
+                <option value="pro-faction">Pro-Faction</option>
+              </select>
+            </div>
+            <div style={{ flex: '1 1 140px' }}>
+              <div style={{ fontSize: 12, color: C.faint, marginBottom: 6, fontWeight: 600 }}>Language</div>
+              <select value={addLanguage} onChange={e => changeAddLanguage(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
+                <option value="english">English</option>
+                <option value="native">Native language</option>
+              </select>
+            </div>
+          </div>
+
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={handleAddMore} style={BTN('#2563eb')}>OK</button>
             <button onClick={() => setActivePanel(null)} style={{ ...BTN('#1e3a5f'), background: C.card }}>Cancel</button>
@@ -2131,6 +2222,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
   const [setupPrompt, setSetupPrompt] = useState('');
   const [analysisPrompt, setAnalysisPrompt] = useState('');
   const [periodPrompt, setPeriodPrompt] = useState('');
+  const [addSourcesPrompt, setAddSourcesPrompt] = useState('');
   const [promptSaving, setPromptSaving] = useState('');
   const [promptMsg, setPromptMsg] = useState('');
 
@@ -2225,10 +2317,12 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
       setSetupPrompt(val.setup || DEFAULT_PROMPTS.setup);
       setAnalysisPrompt(val.analysis || DEFAULT_PROMPTS.analysis);
       setPeriodPrompt(val.period || DEFAULT_PROMPTS.period);
+      setAddSourcesPrompt(val.addSources || DEFAULT_PROMPTS.addSources);
     } catch (e) {
       setSetupPrompt(DEFAULT_PROMPTS.setup);
       setAnalysisPrompt(DEFAULT_PROMPTS.analysis);
       setPeriodPrompt(DEFAULT_PROMPTS.period);
+      setAddSourcesPrompt(DEFAULT_PROMPTS.addSources);
     }
     setPromptsLoading(false);
   }
@@ -2251,6 +2345,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
       if (key === 'setup') setSetupPrompt(DEFAULT_PROMPTS.setup);
       else if (key === 'analysis') setAnalysisPrompt(DEFAULT_PROMPTS.analysis);
       else if (key === 'period') setPeriodPrompt(DEFAULT_PROMPTS.period);
+      else if (key === 'addSources') setAddSourcesPrompt(DEFAULT_PROMPTS.addSources);
       setPromptMsg('✓ Reset to built-in default');
       setTimeout(() => setPromptMsg(''), 2500);
     } catch (e) {
@@ -2748,6 +2843,33 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
                           {promptSaving === 'period' ? 'Saving…' : 'Save'}
                         </button>
                         <button onClick={() => resetPrompt('period')} style={{ ...SMALL_BTN, color: '#fb923c', borderColor: '#7c2d12' }}>
+                          Reset to Default
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Add New Resources prompt */}
+                  <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border }}>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: C.text, marginBottom: 4 }}>Add New Resources Prompt</div>
+                    <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.6 }}>
+                      Runs when a user clicks "+ Add More" on a country's source list.<br/>
+                      Variables: <span style={{ color: '#60a5fa', fontFamily: 'monospace' }}>{'{{country}}'}</span> <span style={{ color: '#60a5fa', fontFamily: 'monospace' }}>{'{{requestCount}}'}</span> <span style={{ color: '#60a5fa', fontFamily: 'monospace' }}>{'{{existingNames}}'}</span> <span style={{ color: '#60a5fa', fontFamily: 'monospace' }}>{'{{locationClause}}'}</span> <span style={{ color: '#60a5fa', fontFamily: 'monospace' }}>{'{{mediaTypeClause}}'}</span> <span style={{ color: '#60a5fa', fontFamily: 'monospace' }}>{'{{orientationClause}}'}</span> <span style={{ color: '#60a5fa', fontFamily: 'monospace' }}>{'{{languageClause}}'}</span> — the four *Clause variables are pre-built sentence fragments (empty string if that filter wasn't set) driven by the City/Media type/Orientation/Language fields in the Add More panel.
+                    </div>
+                    <textarea
+                      value={addSourcesPrompt}
+                      onChange={e => isAdmin && setAddSourcesPrompt(e.target.value)}
+                      readOnly={!isAdmin}
+                      className="input-field"
+                      style={{ height: 320, resize: 'vertical', fontSize: 12, fontFamily: 'monospace', lineHeight: 1.55, opacity: isAdmin ? 1 : 0.75, cursor: isAdmin ? 'text' : 'default' }}
+                    />
+                    {isAdmin && (
+                      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                        <button onClick={() => savePrompt('addSources', addSourcesPrompt)} disabled={promptSaving === 'addSources'}
+                          style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px' }}>
+                          {promptSaving === 'addSources' ? 'Saving…' : 'Save'}
+                        </button>
+                        <button onClick={() => resetPrompt('addSources')} style={{ ...SMALL_BTN, color: '#fb923c', borderColor: '#7c2d12' }}>
                           Reset to Default
                         </button>
                       </div>

@@ -215,7 +215,7 @@ Each element must have exactly these fields:
   "id": "unique-kebab-case-id",
   "name": "Publication name in English",
   "nameOriginal": "Name in the country's primary language",
-  "type": "newspaper" or "tv" or "online" or "radio" or "news_agency",
+  "type": "newspaper" or "tv" or "online" or "radio" or "news_agency" or "podcast",
   "lean": "government" or "pro-government" or "opposition" or "independent" or "pro-faction",
   "leanDescription": "One sentence in English describing the political position and ownership",
   "rssUrl": "Full RSS/Atom feed URL (string) or null if unknown",
@@ -307,7 +307,47 @@ Return ONLY valid JSON (no markdown, no explanation):
   }
 }
 
-Include groups for government (or pro-government), opposition, and independent. If a group does not meaningfully exist in {{country}}'s media landscape, omit it and note it in synthesis.blindSpots.`
+Include groups for government (or pro-government), opposition, and independent. If a group does not meaningfully exist in {{country}}'s media landscape, omit it and note it in synthesis.blindSpots.`,
+
+  // Deliberately NOT the setup prompt above: that one is built to name a
+  // country's obvious major outlets, which is exactly what's already in the
+  // user's list by the time they're using "Add More". Reusing it just makes
+  // the AI re-derive the same famous handful and then get excluded down to
+  // nothing. {{locationClause}}/{{mediaTypeClause}}/{{orientationClause}}/
+  // {{languageClause}} are pre-built sentence fragments (empty string if not
+  // applicable) — see addSources() for how they're assembled.
+  addSources: `You are a media research expert helping expand an existing news-source list for "{{country}}".
+
+The user already has these outlets — do NOT suggest any of them again, and do not suggest rebrands/close variants of them:
+{{existingNames}}
+
+Find {{requestCount}} additional, genuinely different outlets not in that list.{{locationClause}}{{mediaTypeClause}}{{orientationClause}}{{languageClause}} Go beyond the handful of most obvious major national outlets — consider regional/local papers and broadcasters, other national outlets not yet listed, niche or specialty outlets, wire services/news agencies, and outlets with a different political lean than what's already represented.
+
+Return ONLY a valid JSON array — no explanation, no markdown, just the raw JSON array starting with [.
+
+Each element must have exactly these fields:
+{
+  "id": "unique-kebab-case-id",
+  "name": "Publication name in English",
+  "nameOriginal": "Name in the country's primary language",
+  "type": "newspaper" or "tv" or "online" or "radio" or "news_agency" or "podcast",
+  "lean": "government" or "pro-government" or "opposition" or "independent" or "pro-faction",
+  "leanDescription": "One sentence in English describing the political position and ownership",
+  "rssUrl": "Full RSS/Atom feed URL (string) or null if unknown",
+  "websiteUrl": "Main website URL",
+  "languages": ["Arabic"],
+  "notes": "One sentence of important context: reach, influence, history"
+}
+
+Rules:
+- Include exactly {{requestCount}} sources, ALL different from the excluded list above
+- Quality bar — same as any first-pass list: only real, currently operating outlets with a significant audience (national reach, or the leading outlet in their region/category/niche). Going beyond the obvious major outlets does NOT mean lowering the bar — do not include obscure blogs, low-circulation fringe sites, or defunct outlets just to hit the count.
+- In "notes", state the outlet's approximate reach or standing in plain terms — the reader may not know this country's media landscape and needs to judge legitimacy from this line alone
+- Prioritize sources that have RSS feeds
+- For the lean field, use exactly one of the 5 values listed above
+- Do not include sources you are not reasonably confident exist
+
+Country: {{country}}`
 };
 
 function fillPrompt(template, vars) {
@@ -481,48 +521,14 @@ exports.setupCountry = onCall(
 // ─────────────────────────────────────────────────────────────────────────────
 // AGENT: Add More Sources (append to existing, exclude already-listed names)
 // ─────────────────────────────────────────────────────────────────────────────
-// Deliberately NOT the generic setup prompt: that one is built to name the
-// obvious major outlets for a country, which is exactly what's already in the
-// user's list by the time they're using "Add More". Reusing it just makes the
-// AI re-derive the same famous handful and then get excluded down to nothing.
-const ADD_SOURCES_PROMPT = `You are a media research expert helping expand an existing news-source list for "{{country}}".
-
-The user already has these outlets — do NOT suggest any of them again, and do not suggest rebrands/close variants of them:
-{{existingNames}}
-
-Find {{requestCount}} additional, genuinely different outlets not in that list. Go beyond the handful of most obvious major national outlets — consider regional/local papers and broadcasters, other national outlets not yet listed, niche or specialty outlets, wire services/news agencies, and outlets with a different political lean than what's already represented.
-
-Return ONLY a valid JSON array — no explanation, no markdown, just the raw JSON array starting with [.
-
-Each element must have exactly these fields:
-{
-  "id": "unique-kebab-case-id",
-  "name": "Publication name in English",
-  "nameOriginal": "Name in the country's primary language",
-  "type": "newspaper" or "tv" or "online" or "radio" or "news_agency",
-  "lean": "government" or "pro-government" or "opposition" or "independent" or "pro-faction",
-  "leanDescription": "One sentence in English describing the political position and ownership",
-  "rssUrl": "Full RSS/Atom feed URL (string) or null if unknown",
-  "websiteUrl": "Main website URL",
-  "languages": ["Arabic"],
-  "notes": "One sentence of important context: reach, influence, history"
-}
-
-Rules:
-- Include exactly {{requestCount}} sources, ALL different from the excluded list above
-- Quality bar — same as any first-pass list: only real, currently operating outlets with a significant audience (national reach, or the leading outlet in their region/category/niche). Going beyond the obvious major outlets does NOT mean lowering the bar — do not include obscure blogs, low-circulation fringe sites, or defunct outlets just to hit the count.
-- In "notes", state the outlet's approximate reach or standing in plain terms (e.g. "second-largest regional newspaper in the [region] area", "leading business-news outlet") — the reader may not know this country's media landscape and needs to judge legitimacy from this line alone
-- Prioritize sources that have RSS feeds
-- For the lean field, use exactly one of the 5 values listed above
-- Do not include sources you are not reasonably confident exist
-
-Country: {{country}}`;
+const ORIENTATION_LABELS = { government: 'government', 'pro-government': 'pro-government', opposition: 'opposition', independent: 'independent', 'pro-faction': 'pro-faction (aligned with a specific political party, movement, or armed faction — not the state itself, not neutral)' };
+const MEDIA_TYPE_LABELS = { newspaper: 'newspaper', tv: 'TV', radio: 'radio', podcast: 'podcast' };
 
 exports.addSources = onCall(
   { timeoutSeconds: 120, memory: '512MiB', region: 'us-central1' },
   async (request) => {
     await requireAuthorized(request);
-    const { country, countryKey, numSources: rawNum, filterNoRSS, existingNames } = request.data;
+    const { country, countryKey, numSources: rawNum, filterNoRSS, existingNames, location, mediaType, orientation, language } = request.data;
     if (!country || typeof country !== 'string') throw new HttpsError('invalid-argument', 'country required');
     const numSources = Math.min(Math.max(parseInt(rawNum) || 5, 1), 10);
     // Ask for a few more than requested so losses to dedup/RSS validation
@@ -531,10 +537,25 @@ exports.addSources = onCall(
     const existing = existingNames?.length ? existingNames : [];
     const existingLower = existing.map(n => n.trim().toLowerCase());
 
+    const locationClause = location?.trim()
+      ? ` Focus specifically on outlets based in or covering ${location.trim()}, ${country} — not the country as a whole.`
+      : '';
+    const mediaTypeClause = MEDIA_TYPE_LABELS[mediaType]
+      ? ` Only include ${MEDIA_TYPE_LABELS[mediaType]} outlets.`
+      : '';
+    const orientationClause = ORIENTATION_LABELS[orientation]
+      ? ` Every outlet must be classified as "${orientation}" per the lean definitions below (${ORIENTATION_LABELS[orientation]}).`
+      : '';
+    const languageClause = language === 'native'
+      ? ` Only include outlets that primarily publish in the country's own native/local language(s) — not English-language outlets aimed at foreigners or expats.`
+      : ` Only include outlets that primarily publish in English.`;
+
     const ai = makeAI(request.data);
-    const prompt = fillPrompt(ADD_SOURCES_PROMPT, {
+    const customPrompts = await getCustomPrompts();
+    const prompt = fillPrompt(customPrompts.addSources || DEFAULT_PROMPTS.addSources, {
       country, requestCount,
       existingNames: existing.length ? existing.join(', ') : '(none yet)',
+      locationClause, mediaTypeClause, orientationClause, languageClause,
     });
 
     const { text, usage } = await callAI(ai, prompt, 3000);
@@ -1086,7 +1107,7 @@ exports.savePromptTemplate = onCall(
   async (request) => {
     requireAdmin(await requireAuthorized(request));
     const { key, value } = request.data || {};
-    if (!['setup', 'analysis', 'period'].includes(key) || typeof value !== 'string') {
+    if (!['setup', 'analysis', 'period', 'addSources'].includes(key) || typeof value !== 'string') {
       throw new HttpsError('invalid-argument', 'valid key and value required');
     }
     await db.ref(`config/prompts/${key}`).set(value);
@@ -1099,7 +1120,7 @@ exports.resetPromptTemplate = onCall(
   async (request) => {
     requireAdmin(await requireAuthorized(request));
     const { key } = request.data || {};
-    if (!['setup', 'analysis', 'period'].includes(key)) throw new HttpsError('invalid-argument', 'valid key required');
+    if (!['setup', 'analysis', 'period', 'addSources'].includes(key)) throw new HttpsError('invalid-argument', 'valid key required');
     await db.ref(`config/prompts/${key}`).remove();
     return { ok: true };
   }

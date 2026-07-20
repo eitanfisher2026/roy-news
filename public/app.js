@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.78';
+const VERSION = 'v1.79';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2986,7 +2986,8 @@ function App() {
       const { page, step, pendingRunParams } = appStateRef.current;
       let handled = true;
       if (page === 'settings') setPage('main');
-      else if (step === 'results' || step === 'period-results') reset();
+      else if (step === 'results') backFromResults();
+      else if (step === 'period-results') backFromPeriodResults();
       else if (step === 'sources') { setStep('config'); setPendingRunParams(null); }
       else if (step === 'config') setStep('country');
       else if (step === 'loading') { cancelledRef.current = true; setLoadingConfig(null); setStep('config'); }
@@ -3050,6 +3051,20 @@ function App() {
     setPeriodDates({ startDate: null, endDate: null });
     setPendingRunParams(null);
     setErrors([]);
+  }
+
+  // "Back" from a results screen goes one step back to where that run was
+  // configured, not all the way to country — country/selectedSources/
+  // pendingRunParams stay intact so re-confirming re-runs the same setup.
+  function backFromResults() {
+    setStep('sources');
+    setResults(null);
+    setResultUsage(null);
+  }
+  function backFromPeriodResults() {
+    setStep('config');
+    setPeriodResult(null);
+    setResultUsage(null);
   }
 
   async function handleCountryConfirmed(c) {
@@ -3225,9 +3240,9 @@ function App() {
   } else if (step === 'sources') {
     content = <SourcesStep country={country} user={user} onConfirmed={srcs => { setSelectedSources(srcs); runFetchNews(srcs, pendingRunParams); }} onBack={() => setStep('config')} />;
   } else if (step === 'results') {
-    content = <ResultsView country={country} results={results} date={resultDate} includeIsrael={false} usage={resultUsage} user={user} onNewSearch={reset} onError={addError} />;
+    content = <ResultsView country={country} results={results} date={resultDate} includeIsrael={false} usage={resultUsage} user={user} onNewSearch={backFromResults} onError={addError} />;
   } else if (step === 'period-results') {
-    content = <PeriodResultView country={country} result={periodResult} startDate={periodDates.startDate} endDate={periodDates.endDate} usage={resultUsage} onNewSearch={reset} onError={addError} />;
+    content = <PeriodResultView country={country} result={periodResult} startDate={periodDates.startDate} endDate={periodDates.endDate} usage={resultUsage} onNewSearch={backFromPeriodResults} onError={addError} />;
   }
 
   return (

@@ -438,8 +438,11 @@ const GOOGLE_NEWS_PARAMS = {
   'united-state': { hl: 'en-US', gl: 'US', ceid: 'US:en' },
   'israel':       { hl: 'iw',    gl: 'IL', ceid: 'IL:iw' },
 };
+// Google typically returns up to ~100 items for a news search — pull that
+// whole pool before filtering by exact date, not just articleLimit's worth.
+const GOOGLE_NEWS_FETCH_POOL = 100;
 
-function deriveGoogleNewsUrl(source, countryKey, topics = [], date = null) {
+function deriveGoogleNewsUrl(source, countryKey, topics = []) {
   let domain = source.domain || null;
   if (!domain) {
     const toDomain = u => {
@@ -458,16 +461,13 @@ function deriveGoogleNewsUrl(source, countryKey, topics = [], date = null) {
       .map(p => p.includes(' ') ? `"${p}"` : p).join(' '))
     .filter(q => q.length > 0)
     .slice(0, 4);
-  let q = topicQueries.length > 0
+  // NOTE: news.google.com/rss/search does NOT honor after:/before: date
+  // operators (verified directly — results were identical with or without
+  // them). There's no real date-range filter available on this endpoint, so
+  // exact-date matching has to happen entirely by filtering the results below.
+  const q = topicQueries.length > 0
     ? `site:${domain} (${topicQueries.join(' OR ')})`
     : `site:${domain}`;
-  // Scope the search to the requested date only — Google's search date operators,
-  // supported in the news RSS search endpoint too.
-  if (date) {
-    const next = new Date(date + 'T00:00:00Z');
-    next.setUTCDate(next.getUTCDate() + 1);
-    q += ` after:${date} before:${next.toISOString().slice(0, 10)}`;
-  }
   const qs = new URLSearchParams({ q, hl: p.hl, gl: p.gl, ceid: p.ceid });
   return `https://news.google.com/rss/search?${qs}`;
 }
@@ -680,13 +680,19 @@ exports.fetchNews = onCall(
         catch (e) { rssError = e.message; }
       }
 
-      // Step 2: own RSS had nothing from that exact date — try a date-scoped Google News search
+      // Step 2: own RSS had nothing from that exact date — try Google News.
+      // Google's search endpoint has no real date-range filter (its after:/
+      // before: operators are silently ignored there), so instead we pull a
+      // much larger pool of its results and filter *those* down to the exact
+      // date ourselves — filtering after truncating to articleLimit would
+      // throw away date matches that just weren't near the top of Google's
+      // relevance ranking.
       if (articles.length === 0) {
-        const googleUrl = deriveGoogleNewsUrl(source, countryKey, topics, date);
+        const googleUrl = deriveGoogleNewsUrl(source, countryKey, topics);
         if (googleUrl) {
           try {
-            const googleArticles = await fetchRssWithRetry(googleUrl, articleLimit);
-            const dated = googleArticles.filter(a => matchesExactDate(a.date, date));
+            const googleArticles = await fetchRssWithRetry(googleUrl, GOOGLE_NEWS_FETCH_POOL);
+            const dated = googleArticles.filter(a => matchesExactDate(a.date, date)).slice(0, articleLimit);
             if (dated.length > 0) { articles = dated; rssError = null; usedGoogleNews = true; }
           } catch {}
         }
@@ -707,14 +713,14 @@ exports.fetchNews = onCall(
       }
       let relevantIndices = [...new Set(Object.values(topicKeywordMatches).flat())].sort((a, b) => a - b);
 
-      // Step 3: had exact-date articles but none matched any topic — try a
-      // date-scoped Google News search for this source+topic combination
+      // Step 3: had exact-date articles but none matched any topic — try
+      // Google News for this source+topic, same large-pool-then-filter approach
       if (relevantIndices.length === 0 && !usedGoogleNews) {
-        const googleUrl = deriveGoogleNewsUrl(source, countryKey, topics, date);
+        const googleUrl = deriveGoogleNewsUrl(source, countryKey, topics);
         if (googleUrl) {
           try {
-            const googleArticles = await fetchRssWithRetry(googleUrl, articleLimit);
-            const dated = googleArticles.filter(a => matchesExactDate(a.date, date));
+            const googleArticles = await fetchRssWithRetry(googleUrl, GOOGLE_NEWS_FETCH_POOL);
+            const dated = googleArticles.filter(a => matchesExactDate(a.date, date)).slice(0, articleLimit);
             if (dated.length > 0) {
               articles = dated;
               rssError = null;

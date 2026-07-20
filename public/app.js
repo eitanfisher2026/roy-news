@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.74';
+const VERSION = 'v1.75';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -431,7 +431,8 @@ function SetupConfigPanel({ numSources, onChange, filterNoRSS, onFilterChange, o
 }
 
 // ─── Shared Source Manager ────────────────────────────────────────────────────
-// Used in SourcesStep (selectable=true) and Settings → Country Management (selectable=false)
+// The only place source lists are managed — Settings → Country Management
+// intentionally does not embed this; it only lists/removes whole countries.
 function SourceManager({ country, user, sources, onSourcesChange, selectable = false, selected, onSelectionChange }) {
   const uid = user?.uid;
 
@@ -466,6 +467,24 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
 
   // Fix URL
   const [fixingSourceId, setFixingSourceId] = useState(null);
+
+  // Sources added in the most recent add/find action — shown at the top of
+  // the list with a temporary dashed marker until the next add or reload.
+  const [newlyAddedIds, setNewlyAddedIds] = useState(new Set());
+
+  // List sort order (display-only — doesn't change the stored source order)
+  const [sortBy, setSortBy] = useState('default'); // 'default' | 'name' | 'lean'
+  const LEAN_ORDER = ['government', 'pro-government', 'opposition', 'independent', 'pro-faction', 'various'];
+  function sortSources(list) {
+    if (sortBy === 'name') return [...list].sort((a, b) => a.name.localeCompare(b.name));
+    if (sortBy === 'lean') {
+      return [...list].sort((a, b) => {
+        const d = LEAN_ORDER.indexOf(a.lean) - LEAN_ORDER.indexOf(b.lean);
+        return d !== 0 ? d : a.name.localeCompare(b.name);
+      });
+    }
+    return list;
+  }
 
   // Hide/show selected-only toggle (persisted, selectable mode only)
   const [showOnlySelected, setShowOnlySelected] = useState(() => {
@@ -502,8 +521,9 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
   function handleAddFound() {
     const src = findResult?.source;
     if (!src) return;
-    const newSources = [...sources, src];
+    const newSources = [src, ...sources];
     onSourcesChange(newSources);
+    setNewlyAddedIds(new Set([src.id]));
     if (selectable && onSelectionChange) onSelectionChange(new Set([...(selected || []), src.id]));
     fns.httpsCallable('updateSources')({ countryKey: country.key, sources: newSources }).catch(() => {});
     setFindResult(null);
@@ -523,8 +543,9 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
       });
       const newSrcs = result.data.sources || [];
       if (newSrcs.length > 0) {
-        const merged = [...sources, ...newSrcs];
+        const merged = [...newSrcs, ...sources];
         onSourcesChange(merged);
+        setNewlyAddedIds(new Set(newSrcs.map(s => s.id)));
         if (selectable && onSelectionChange) {
           onSelectionChange(new Set([...(selected || []), ...newSrcs.map(s => s.id)]));
         }
@@ -646,14 +667,14 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
             <span style={{ fontSize: 13, color: C.text }}>Only sources with RSS</span>
           </label>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={handleAddMore} style={BTN('#2563eb')}>+ Add Sources</button>
+            <button onClick={handleAddMore} style={BTN('#2563eb')}>OK</button>
             <button onClick={() => setActivePanel(null)} style={{ ...BTN('#1e3a5f'), background: C.card }}>Cancel</button>
           </div>
         </div>
       )}
       {adding && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: C.muted, fontSize: 13, padding: '8px 0', marginBottom: 10 }}>
-          <Spinner size={14} /> Finding and validating new sources…
+        <div style={{ padding: '12px 14px', background: '#0a1526', border: '1px solid #1e4a6e', borderRadius: 9, marginBottom: 10 }}>
+          <ProgressBar durationSec={5 + addNum * 3} steps={['Searching for new outlets…', 'Verifying RSS feeds…', 'Finalizing…']} />
         </div>
       )}
       {addMsg && (
@@ -694,15 +715,28 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
         </div>
       )}
 
+      {/* Sort control */}
+      {sources.length > 1 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          <span style={{ color: C.faint, fontSize: 12 }}>Sort by</span>
+          <select value={sortBy} onChange={e => setSortBy(e.target.value)} className="input-field" style={{ fontSize: 12, padding: '4px 10px', width: 'auto' }}>
+            <option value="default">Default</option>
+            <option value="name">Name</option>
+            <option value="lean">Orientation</option>
+          </select>
+        </div>
+      )}
+
       {/* Source list */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {(selectable && showOnlySelected ? sources.filter(s => selected?.has(s.id)) : sources).map(src => {
+        {sortSources(selectable && showOnlySelected ? sources.filter(s => selected?.has(s.id)) : sources).map(src => {
           const active = !selectable || (selected?.has(src.id) ?? false);
           const health = rssHealth[src.id];
+          const isNew = newlyAddedIds.has(src.id);
           return (
             <div key={src.id} className={selectable ? `check-item ${getLeanCss(src.lean)}` : getLeanCss(src.lean)}
               onClick={selectable ? () => { const n = new Set(selected); n.has(src.id) ? n.delete(src.id) : n.add(src.id); onSelectionChange(n); } : undefined}
-              style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '12px 14px', background: active ? C.card : '#0f1e35', border: '1px solid ' + (active ? C.borderLight : C.border), borderRadius: 8, cursor: selectable ? 'pointer' : 'default' }}>
+              style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '12px 14px', background: active ? C.card : '#0f1e35', border: '1px solid ' + (active ? C.borderLight : C.border), borderRadius: 8, cursor: selectable ? 'pointer' : 'default', ...(isNew ? { outline: '2px dashed #3b82f6', outlineOffset: 2 } : {}) }}>
               {selectable && (
                 <input type="checkbox" checked={active} readOnly
                   style={{ marginTop: 3, accentColor: getLeanColor(src.lean), flexShrink: 0, pointerEvents: 'none' }} />
@@ -710,6 +744,9 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
                   <span style={{ fontWeight: 700, fontSize: 14, color: C.text }}>{src.name}</span>
+                  {isNew && (
+                    <span style={{ background: '#1e3a8a', color: '#93c5fd', border: '1px solid #3b82f6', borderRadius: 4, padding: '1px 7px', fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap' }}>NEW</span>
+                  )}
                   {src.nameOriginal && src.nameOriginal !== src.name && <span style={{ color: C.faint, fontSize: 12 }}>{src.nameOriginal}</span>}
                   <LeanBadge lean={src.lean} />
                   <TypeBadge type={src.type} />
@@ -1670,7 +1707,7 @@ function SourceColumn({ sourceResult, requestedDate }) {
         const hasArticles = articles?.length > 0;
         const rssUrl = source.rssUrl;
         const friendlyRssError = rssError
-          ? 'This source could not be reached. Go to Settings → Country Management and tap Refresh to update the source list.'
+          ? 'This source could not be reached. Go to Select Sources and use ⚙ Fix on this source.'
           : null;
         const relevantIndices = analysis?.relevantArticleIndices;
         const aiSpecifiedIndices = Array.isArray(relevantIndices);
@@ -1707,7 +1744,7 @@ function SourceColumn({ sourceResult, requestedDate }) {
                   </div>
                 )}
                 {!rssUrl && !rssError && (
-                  <div style={{ color: C.faint, fontSize: 12, fontStyle: 'italic', marginBottom: 8 }}>No news link available for this source. Go to Settings → Country Management and tap Refresh.</div>
+                  <div style={{ color: C.faint, fontSize: 12, fontStyle: 'italic', marginBottom: 8 }}>No news link available for this source. Go to Select Sources and use ⚙ Fix on this source.</div>
                 )}
                 {hasArticles && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -1943,7 +1980,7 @@ function ResultsView({ country, results, date, includeIsrael, usage, user, onNew
 
       {failedSourceIds.length > 0 && (
         <div className="no-print" style={{ padding: '7px 14px', background: '#1a0e00', border: '1px solid #7c3d00', borderRadius: 8, marginBottom: 12, fontSize: 12, color: '#fb923c' }}>
-          ℹ {failedSourceIds.map(id => results[id].source.name).join(', ')} could not be reached and were skipped. If this keeps happening, go to Settings → Country Management and tap Refresh to update the source list.
+          ℹ {failedSourceIds.map(id => results[id].source.name).join(', ')} could not be reached and were skipped. If this keeps happening, go to Select Sources and tap ↻ Refresh All to update the source list.
         </div>
       )}
 
@@ -2072,7 +2109,6 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
 
   const [countries, setCountries] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [openSourcesKey, setOpenSourcesKey] = useState(null);
   const [installMsg, setInstallMsg] = useState('');
 
   const [promptsOpen, setPromptsOpen] = useState(false);
@@ -2721,37 +2757,16 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
             ? <div style={{ color: C.faint, fontSize: 13 }}>No countries configured yet</div>
             : countries.map(c => {
               const lastRun = user?.uid ? localStorage.getItem(`roy-news-lastrun-${user.uid}-${c.countryKey}`) : null;
-              const isOpen = openSourcesKey === c.countryKey;
               return (
-                <div key={c.countryKey} style={{ background: C.card, borderRadius: 9, marginBottom: 7, border: '1px solid ' + (isOpen ? '#2563eb' : C.border), overflow: 'hidden' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '11px 14px' }}>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: 14, color: C.text }}>{c.country}</div>
-                      <div style={{ color: C.faint, fontSize: 11, marginTop: 2 }}>
-                        {c.sources?.length} sources · {lastRun ? `Last run: ${lastRun}` : (c.setupDate?.slice(0, 10) || '—')}
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: 7 }}>
-                      <button onClick={() => setOpenSourcesKey(isOpen ? null : c.countryKey)}
-                        style={{ ...SMALL_BTN, minWidth: 86, borderColor: isOpen ? '#2563eb' : C.border, color: isOpen ? '#60a5fa' : C.muted }}>
-                        {isOpen ? '✕ Close' : '📋 Resources'}
-                      </button>
-                      <button onClick={() => removeCountry(c.countryKey)}
-                        style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d' }}>Remove</button>
+                <div key={c.countryKey} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: C.card, borderRadius: 9, marginBottom: 7, border: '1px solid ' + C.border, padding: '11px 14px' }}>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 14, color: C.text }}>{c.country}</div>
+                    <div style={{ color: C.faint, fontSize: 11, marginTop: 2 }}>
+                      {c.sources?.length} sources · {lastRun ? `Last run: ${lastRun}` : (c.setupDate?.slice(0, 10) || '—')}
                     </div>
                   </div>
-
-                  {isOpen && (
-                    <div style={{ padding: '0 14px 14px' }}>
-                      <SourceManager
-                        country={{ name: c.country, key: c.countryKey }}
-                        user={user}
-                        sources={c.sources || []}
-                        onSourcesChange={newSources => setCountries(p => p.map(cc => cc.countryKey === c.countryKey ? { ...cc, sources: newSources } : cc))}
-                        selectable={false}
-                      />
-                    </div>
-                  )}
+                  <button onClick={() => removeCountry(c.countryKey)}
+                    style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d' }}>Remove</button>
                 </div>
               );
             })

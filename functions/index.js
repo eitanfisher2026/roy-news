@@ -439,7 +439,7 @@ const GOOGLE_NEWS_PARAMS = {
   'israel':       { hl: 'iw',    gl: 'IL', ceid: 'IL:iw' },
 };
 
-function deriveGoogleNewsUrl(source, countryKey, topics = []) {
+function deriveGoogleNewsUrl(source, countryKey, topics = [], date = null) {
   let domain = source.domain || null;
   if (!domain) {
     const toDomain = u => {
@@ -458,21 +458,28 @@ function deriveGoogleNewsUrl(source, countryKey, topics = []) {
       .map(p => p.includes(' ') ? `"${p}"` : p).join(' '))
     .filter(q => q.length > 0)
     .slice(0, 4);
-  const q = topicQueries.length > 0
+  let q = topicQueries.length > 0
     ? `site:${domain} (${topicQueries.join(' OR ')})`
     : `site:${domain}`;
+  // Scope the search to the requested date only — Google's search date operators,
+  // supported in the news RSS search endpoint too.
+  if (date) {
+    const next = new Date(date + 'T00:00:00Z');
+    next.setUTCDate(next.getUTCDate() + 1);
+    q += ` after:${date} before:${next.toISOString().slice(0, 10)}`;
+  }
   const qs = new URLSearchParams({ q, hl: p.hl, gl: p.gl, ceid: p.ceid });
   return `https://news.google.com/rss/search?${qs}`;
 }
 
-function isStale(articles) {
-  if (!articles.length) return false;
-  const newest = articles.reduce((best, a) => {
-    const t = a.date ? new Date(a.date).getTime() : 0;
-    return t > best ? t : best;
-  }, 0);
-  if (!newest) return false; // no parseable dates — don't assume stale
-  return newest < Date.now() - 3 * 24 * 60 * 60 * 1000;
+// Exact calendar-day match (UTC) between an RSS pubDate and the requested
+// "YYYY-MM-DD" date — the user wants only articles from that date, not a
+// rolling window of "whatever's most recent in the feed".
+function matchesExactDate(articleDate, requestedDate) {
+  if (!requestedDate || !articleDate) return false;
+  const d = new Date(articleDate);
+  if (isNaN(d)) return false;
+  return d.toISOString().slice(0, 10) === requestedDate;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -663,22 +670,25 @@ exports.fetchNews = onCall(
       let rssError = null;
       let usedGoogleNews = false;
 
-      // Step 1: try the source's own RSS feed
+      // Step 1: try the source's own RSS feed, kept to articles from the exact requested date
       if (source.rssUrl) {
-        try { articles = await fetchRssWithRetry(source.rssUrl, articleLimit); }
+        try {
+          const fetched = await fetchRssWithRetry(source.rssUrl, articleLimit);
+          articles = fetched.filter(a => matchesExactDate(a.date, date));
+          if (fetched.length > 0 && articles.length === 0) rssError = `No articles from ${date} in this feed's recent window`;
+        }
         catch (e) { rssError = e.message; }
       }
 
-      // Step 2: fall back to Google News if RSS failed or returned stale content
-      if (articles.length === 0 || isStale(articles)) {
-        const googleUrl = deriveGoogleNewsUrl(source, countryKey, topics);
+      // Step 2: own RSS had nothing from that exact date — try a date-scoped Google News search
+      if (articles.length === 0) {
+        const googleUrl = deriveGoogleNewsUrl(source, countryKey, topics, date);
         if (googleUrl) {
-          const hadStale = articles.length > 0;
           try {
             const googleArticles = await fetchRssWithRetry(googleUrl, articleLimit);
-            if (googleArticles.length > 0) { articles = googleArticles; rssError = null; usedGoogleNews = true; }
+            const dated = googleArticles.filter(a => matchesExactDate(a.date, date));
+            if (dated.length > 0) { articles = dated; rssError = null; usedGoogleNews = true; }
           } catch {}
-          if (hadStale && isStale(articles)) { articles = []; rssError = rssError || 'Stale feed — no recent articles found'; }
         }
       }
 
@@ -697,14 +707,16 @@ exports.fetchNews = onCall(
       }
       let relevantIndices = [...new Set(Object.values(topicKeywordMatches).flat())].sort((a, b) => a - b);
 
-      // Step 3: if RSS was fresh but had zero topic matches, try topic-targeted Google News
+      // Step 3: had exact-date articles but none matched any topic — try a
+      // date-scoped Google News search for this source+topic combination
       if (relevantIndices.length === 0 && !usedGoogleNews) {
-        const googleUrl = deriveGoogleNewsUrl(source, countryKey, topics);
+        const googleUrl = deriveGoogleNewsUrl(source, countryKey, topics, date);
         if (googleUrl) {
           try {
             const googleArticles = await fetchRssWithRetry(googleUrl, articleLimit);
-            if (googleArticles.length > 0) {
-              articles = googleArticles;
+            const dated = googleArticles.filter(a => matchesExactDate(a.date, date));
+            if (dated.length > 0) {
+              articles = dated;
               rssError = null;
               usedGoogleNews = true;
               for (const topic of topics) {

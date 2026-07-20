@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.75';
+const VERSION = 'v1.76';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -215,9 +215,13 @@ const TYPE_LABELS  = { newspaper: 'Newspaper', tv: 'TV', online: 'Online', radio
 
 // ─── Shared styles ────────────────────────────────────────────────────────────
 const BTN = (bg, extra = {}) => ({ background: bg, color: 'white', border: 'none', borderRadius: 8, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 14, ...extra });
-const SMALL_BTN = { background: '#1a2d42', color: '#94a3b8', border: '1px solid #2a4060', borderRadius: 6, padding: '5px 10px', cursor: 'pointer', fontSize: 12 };
-const BACK_BTN = { background: '#1a2d42', color: '#94a3b8', border: '1px solid #2a4060', borderRadius: 8, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 13 };
-const C = { bg: '#0d1b2a', panel: '#132236', card: '#1a2d42', border: '#1e3a5f', borderLight: '#2a4060', text: '#e2e8f0', muted: '#94a3b8', faint: '#4a6280' };
+const SMALL_BTN = { background: '#1a2d42', color: '#cbd5e1', border: '1px solid #5b7ba8', borderRadius: 6, padding: '6px 12px', cursor: 'pointer', fontSize: 13, fontWeight: 600 };
+const BACK_BTN = { background: '#1a2d42', color: '#cbd5e1', border: '1px solid #5b7ba8', borderRadius: 8, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 13 };
+// Colors chosen for readability on a dark background — border/borderLight/faint
+// were previously too low-contrast (verified against WCAG contrast ratios) and
+// read as "dimmed" or invisible, especially at the small font sizes used for
+// secondary text and button outlines throughout the app.
+const C = { bg: '#0d1b2a', panel: '#132236', card: '#1a2d42', border: '#3d5a82', borderLight: '#5b7ba8', text: '#e2e8f0', muted: '#94a3b8', faint: '#a8b8cc' };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // COMPONENTS
@@ -472,8 +476,15 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
   // the list with a temporary dashed marker until the next add or reload.
   const [newlyAddedIds, setNewlyAddedIds] = useState(new Set());
 
-  // List sort order (display-only — doesn't change the stored source order)
-  const [sortBy, setSortBy] = useState('default'); // 'default' | 'name' | 'lean'
+  // List sort order (display-only — doesn't change the stored source order).
+  // Persisted so it survives this session and the next one, not just per-country.
+  const [sortBy, setSortBy] = useState(() => {
+    try { return localStorage.getItem('roy-news-source-sort') || 'default'; } catch { return 'default'; }
+  });
+  function changeSortBy(v) {
+    setSortBy(v);
+    try { localStorage.setItem('roy-news-source-sort', v); } catch {}
+  }
   const LEAN_ORDER = ['government', 'pro-government', 'opposition', 'independent', 'pro-faction', 'various'];
   function sortSources(list) {
     if (sortBy === 'name') return [...list].sort((a, b) => a.name.localeCompare(b.name));
@@ -617,11 +628,11 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
           </button>
         </div>
         <button onClick={() => { setActivePanel(p => p === 'addmore' ? null : 'addmore'); setAddMsg(''); }} disabled={isBusy}
-          style={{ ...SMALL_BTN, borderColor: activePanel === 'addmore' ? '#3b82f6' : C.border, color: activePanel === 'addmore' ? '#60a5fa' : C.muted }}>
+          style={{ ...SMALL_BTN, padding: '9px 18px', fontSize: 14, fontWeight: 700, borderWidth: 2, borderColor: activePanel === 'addmore' ? '#3b82f6' : '#5b7ba8', color: activePanel === 'addmore' ? '#60a5fa' : C.text }}>
           + Add More
         </button>
         <button onClick={() => setActivePanel(p => p === 'refresh' ? null : 'refresh')} disabled={isBusy}
-          style={{ ...SMALL_BTN, borderColor: activePanel === 'refresh' ? '#3b82f6' : C.border, color: activePanel === 'refresh' ? '#60a5fa' : C.muted }}>
+          style={{ ...SMALL_BTN, padding: '9px 18px', fontSize: 14, fontWeight: 700, borderWidth: 2, borderColor: activePanel === 'refresh' ? '#3b82f6' : '#5b7ba8', color: activePanel === 'refresh' ? '#60a5fa' : C.text }}>
           ↻ Refresh All
         </button>
       </div>
@@ -719,7 +730,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
       {sources.length > 1 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
           <span style={{ color: C.faint, fontSize: 12 }}>Sort by</span>
-          <select value={sortBy} onChange={e => setSortBy(e.target.value)} className="input-field" style={{ fontSize: 12, padding: '4px 10px', width: 'auto' }}>
+          <select value={sortBy} onChange={e => changeSortBy(e.target.value)} className="input-field" style={{ fontSize: 12, padding: '4px 10px', width: 'auto' }}>
             <option value="default">Default</option>
             <option value="name">Name</option>
             <option value="lean">Orientation</option>

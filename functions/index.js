@@ -226,8 +226,10 @@ Each element must have exactly these fields:
 
 Rules:
 - Include exactly {{numSources}} sources spanning the full political spectrum
+- Quality bar: only include outlets that are real, currently operating, and have a significant audience — a national newspaper/broadcaster, or the leading/most-cited outlet in their region or category. Do not include obscure blogs, low-circulation fringe sites, or defunct outlets just to fill a slot.
+- In "notes", state the outlet's approximate reach or standing in plain terms (e.g. "one of the country's 2-3 largest daily newspapers", "state broadcaster, primary TV news source", "leading English-language outlet for expats/foreign readers") — the person reading this may not know the country's media landscape and needs to judge legitimacy from this line alone
 - Prioritize sources that have RSS feeds
-- Be honest: if a country has no real opposition press, note that and include exile/diaspora sources
+- Be honest: if a country has no real opposition press, note that and include exile/diaspora sources — but still prefer the most established one available (largest readership/longest track record), not an obscure blog
 - For the lean field, use exactly one of the 5 values listed above
 - Do not include sources you are not reasonably confident exist
 
@@ -508,6 +510,8 @@ Each element must have exactly these fields:
 
 Rules:
 - Include exactly {{requestCount}} sources, ALL different from the excluded list above
+- Quality bar — same as any first-pass list: only real, currently operating outlets with a significant audience (national reach, or the leading outlet in their region/category/niche). Going beyond the obvious major outlets does NOT mean lowering the bar — do not include obscure blogs, low-circulation fringe sites, or defunct outlets just to hit the count.
+- In "notes", state the outlet's approximate reach or standing in plain terms (e.g. "second-largest regional newspaper in the [region] area", "leading business-news outlet") — the reader may not know this country's media landscape and needs to judge legitimacy from this line alone
 - Prioritize sources that have RSS feeds
 - For the lean field, use exactly one of the 5 values listed above
 - Do not include sources you are not reasonably confident exist

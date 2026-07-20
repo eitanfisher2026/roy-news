@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.73';
+const VERSION = 'v1.74';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -80,6 +80,10 @@ function getToneLabel(tone) {
 function formatDisplayDate(dateStr) {
   if (!dateStr) return '';
   return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' });
+}
+function formatLastLogin(ts) {
+  if (!ts) return 'Never logged in';
+  return 'Last logged in: ' + new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -2083,6 +2087,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
   const [usersLoading, setUsersLoading] = useState(false);
   const [authUsers, setAuthUsers] = useState([]);
   const [ownerEmail, setOwnerEmail] = useState('');
+  const [ownerLastLogin, setOwnerLastLogin] = useState(null);
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserRole, setNewUserRole] = useState('user');
   const [userBusy, setUserBusy] = useState(false);
@@ -2093,6 +2098,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
     try {
       const result = await fns.httpsCallable('listAuthorizedUsers')();
       setOwnerEmail(result.data.owner || '');
+      setOwnerLastLogin(result.data.ownerLastLogin || null);
       setAuthUsers(result.data.users || []);
     } catch (e) {
       setUserMsg('⚠ Failed to load: ' + e.message);
@@ -2287,21 +2293,27 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
                   <div style={{ display: 'flex', justifyContent: 'center', padding: 20 }}><Spinner /></div>
                 ) : (
                   <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 10px', background: '#0f1e35', borderRadius: 7, marginBottom: 7 }}>
-                      <div style={{ fontSize: 13, color: C.text }}>{ownerEmail}</div>
-                      <span style={{ fontSize: 10, fontWeight: 700, color: '#4ade80', textTransform: 'uppercase', letterSpacing: 0.5 }}>Owner</span>
+                    <div style={{ padding: '8px 10px', background: '#0f1e35', borderRadius: 7, marginBottom: 7 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <div style={{ fontSize: 13, color: C.text }}>{ownerEmail}</div>
+                        <span style={{ fontSize: 10, fontWeight: 700, color: '#4ade80', textTransform: 'uppercase', letterSpacing: 0.5 }}>Owner</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{formatLastLogin(ownerLastLogin)}</div>
                     </div>
 
                     {authUsers.length === 0 ? (
                       <div style={{ color: C.faint, fontSize: 12, padding: '4px 10px 12px' }}>No other authorized users yet</div>
                     ) : authUsers.map(u => (
-                      <div key={u.email} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 10px', borderRadius: 7, marginBottom: 5 }}>
-                        <div style={{ fontSize: 13, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.email}</div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                          <span style={{ fontSize: 10, fontWeight: 700, color: u.role === 'admin' ? '#60a5fa' : C.faint, textTransform: 'uppercase', letterSpacing: 0.5 }}>{u.role}</span>
-                          <button onClick={() => handleRemoveUser(u.email)} disabled={userBusy}
-                            style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d', padding: '3px 8px', opacity: userBusy ? 0.5 : 1 }}>Remove</button>
+                      <div key={u.email} style={{ padding: '8px 10px', borderRadius: 7, marginBottom: 5 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <div style={{ fontSize: 13, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.email}</div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, color: u.role === 'admin' ? '#60a5fa' : C.faint, textTransform: 'uppercase', letterSpacing: 0.5 }}>{u.role}</span>
+                            <button onClick={() => handleRemoveUser(u.email)} disabled={userBusy}
+                              style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d', padding: '3px 8px', opacity: userBusy ? 0.5 : 1 }}>Remove</button>
+                          </div>
                         </div>
+                        <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{formatLastLogin(u.lastLogin)}</div>
                       </div>
                     ))}
 
@@ -2775,7 +2787,10 @@ function App() {
 
   // Auth state listener
   useEffect(() => {
-    return auth.onAuthStateChanged(u => setUser(u || null));
+    return auth.onAuthStateChanged(u => {
+      setUser(u || null);
+      if (u) db.ref(`users/${u.uid}/lastLogin`).set(Date.now()).catch(() => {});
+    });
   }, []);
 
   // Look up the caller's role once we know who's signed in
@@ -2784,7 +2799,16 @@ function App() {
     let cancelled = false;
     setRole(undefined);
     fns.httpsCallable('getMyRole')()
-      .then(r => { if (!cancelled) setRole(r.data.role || null); })
+      .then(r => {
+        if (cancelled) return;
+        setRole(r.data.role || null);
+        if (r.data.role) {
+          // Only write the shared, authorization-gated index once we're confirmed
+          // authorized — otherwise this write races the authorizedUids mirror
+          // (also set by getMyRole) and gets denied by rules.
+          db.ref(`usersByEmail/${user.email.trim().toLowerCase().replace(/\./g, ',')}`).set(user.uid).catch(() => {});
+        }
+      })
       .catch(() => { if (!cancelled) setRole(null); });
     return () => { cancelled = true; };
   }, [user]);

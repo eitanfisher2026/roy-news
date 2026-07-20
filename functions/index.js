@@ -15,6 +15,13 @@ function sanitizeEmailKey(email) {
   return email.trim().toLowerCase().replace(/\./g, ',');
 }
 
+// Looks up a user's uid from their email via the usersByEmail index — null
+// if they've never signed in (the index is written client-side on login).
+async function resolveUidByEmail(email) {
+  const snap = await db.ref(`usersByEmail/${sanitizeEmailKey(String(email || ''))}`).once('value');
+  return snap.val() || null;
+}
+
 async function getRole(email) {
   if (!email) return null;
   const normalized = email.trim().toLowerCase();
@@ -936,6 +943,13 @@ exports.getCosts = onCall(
   }
 );
 
+async function lastLoginForEmail(email) {
+  const uid = await resolveUidByEmail(email);
+  if (!uid) return null;
+  const snap = await db.ref(`users/${uid}/lastLogin`).once('value');
+  return snap.val() || null;
+}
+
 exports.listAuthorizedUsers = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
@@ -943,8 +957,12 @@ exports.listAuthorizedUsers = onCall(
     requireAdmin(role);
     const snap = await db.ref('authorizedUsers').once('value');
     const val = snap.val() || {};
-    const users = Object.values(val).sort((a, b) => (a.email || '').localeCompare(b.email || ''));
-    return { owner: OWNER_EMAIL, users };
+    const users = await Promise.all(
+      Object.values(val).map(async u => ({ ...u, lastLogin: await lastLoginForEmail(u.email) }))
+    );
+    users.sort((a, b) => (a.email || '').localeCompare(b.email || ''));
+    const ownerLastLogin = await lastLoginForEmail(OWNER_EMAIL);
+    return { owner: OWNER_EMAIL, ownerLastLogin, users };
   }
 );
 
@@ -975,14 +993,10 @@ exports.removeAuthorizedUser = onCall(
     if (!rawEmail || typeof rawEmail !== 'string') throw new HttpsError('invalid-argument', 'email required');
     const email = rawEmail.trim().toLowerCase();
     await db.ref(`authorizedUsers/${sanitizeEmailKey(email)}`).remove();
-    // Best-effort: revoke read access immediately for any uid we know maps to this
-    // email (from prior usage), instead of waiting for their next getMyRole call.
-    try {
-      const snap = await db.ref('userCosts').once('value');
-      const val = snap.val() || {};
-      const uids = Object.entries(val).filter(([, u]) => (u.email || '').toLowerCase() === email).map(([uid]) => uid);
-      await Promise.all(uids.map(uid => db.ref(`authorizedUids/${uid}`).remove()));
-    } catch {}
+    // Best-effort: revoke read access immediately for the uid we know maps to this
+    // email (from prior logins), instead of waiting for their next getMyRole call.
+    const uid = await resolveUidByEmail(email).catch(() => null);
+    if (uid) await db.ref(`authorizedUids/${uid}`).remove().catch(() => {});
     return { ok: true };
   }
 );

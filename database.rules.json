@@ -29,6 +29,10 @@
       ".read": false,
       ".write": false
     },
+    "usersByEmail": {
+      ".read": false,
+      ".write": "auth != null && root.child('authorizedUids').child(auth.uid).exists()"
+    },
     "users": {
       "$uid": {
         ".read":  "auth != null && auth.uid === $uid",

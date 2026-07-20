@@ -8,6 +8,51 @@ const Parser = require('rss-parser');
 admin.initializeApp();
 const db = admin.database();
 
+// ─── Access control ───────────────────────────────────────────────────────────
+const OWNER_EMAIL = 'eitanfisher100@gmail.com';
+
+function sanitizeEmailKey(email) {
+  return email.trim().toLowerCase().replace(/\./g, ',');
+}
+
+async function getRole(email) {
+  if (!email) return null;
+  const normalized = email.trim().toLowerCase();
+  if (normalized === OWNER_EMAIL) return 'admin';
+  const snap = await db.ref(`authorizedUsers/${sanitizeEmailKey(normalized)}`).once('value');
+  const rec = snap.val();
+  return rec ? rec.role : null;
+}
+
+async function requireAuthorized(request) {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'Login required');
+  const role = await getRole(request.auth.token.email);
+  if (!role) {
+    throw new HttpsError('permission-denied',
+      'Your account is not authorized to use Roy News.\n\nHow to fix: ask the administrator to add your email in Settings → Manage Users.'
+    );
+  }
+  return role;
+}
+
+function requireAdmin(role) {
+  if (role !== 'admin') throw new HttpsError('permission-denied', 'Administrator access required.');
+}
+
+// ─── Cost tracking (per user, per month, per AI provider) ─────────────────────
+async function recordCost(request, ai, inputTokens, outputTokens, isTranslation = false) {
+  const costUsd = calcCostUsd(ai, inputTokens, outputTokens, isTranslation);
+  if (costUsd > 0 && request.auth) {
+    const uid = request.auth.uid;
+    const month = new Date().toISOString().slice(0, 7); // YYYY-MM
+    await Promise.all([
+      db.ref(`userCosts/${uid}/email`).set(request.auth.token.email || null),
+      db.ref(`userCosts/${uid}/costs/${month}/${ai.type}`).set(admin.database.ServerValue.increment(costUsd)),
+    ]).catch(() => {}); // never fail the user-facing request over a cost-logging hiccup
+  }
+  return costUsd;
+}
+
 const rssParser = new Parser({
   timeout: 12000,
   headers: { 'User-Agent': 'Mozilla/5.0 (compatible; RoyNewsBot/1.0; +https://roy-news.web.app)' },
@@ -16,7 +61,10 @@ const rssParser = new Parser({
 
 // ─── AI pricing ($ per million tokens) ───────────────────────────────────────
 const PRICING = {
-  anthropic: { analysis: { in: 3, out: 15 }, translate: { in: 0.80, out: 4 } },
+  anthropic: {
+    'claude-sonnet-4-6':          { in: 3, out: 15 },
+    'claude-haiku-4-5-20251001':  { in: 0.80, out: 4 },
+  },
   gemini: {
     'gemini-2.5-flash':          { in: 0.30, out: 2.50 },
     'gemini-2.5-pro':            { in: 1.25, out: 10.00 },
@@ -32,7 +80,7 @@ const PRICING = {
 
 // ─── AI abstraction ───────────────────────────────────────────────────────────
 function makeAI(data, forTranslation = false) {
-  const { provider, geminiApiKey, geminiModel, openaiApiKey, openaiModel } = data || {};
+  const { provider, geminiApiKey, geminiModel, openaiApiKey, openaiModel, anthropicApiKey, anthropicModel } = data || {};
 
   if (provider === 'gemini' && geminiApiKey) {
     const DEPRECATED = { 'gemini-2.0-flash': 'gemini-2.5-flash', 'gemini-2.0-flash-lite': 'gemini-2.5-flash' };
@@ -44,9 +92,13 @@ function makeAI(data, forTranslation = false) {
     const model = forTranslation ? 'gpt-4o-mini' : (openaiModel || 'gpt-4o-mini');
     return { type: 'openai', client: new OpenAI({ apiKey: openaiApiKey }), model };
   }
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
-  if (!anthropicKey) throw new HttpsError('internal', 'Anthropic API key not configured');
-  return { type: 'anthropic', client: new Anthropic({ apiKey: anthropicKey }), model: forTranslation ? 'claude-haiku-4-5-20251001' : 'claude-sonnet-4-6' };
+  if (provider === 'anthropic' && anthropicApiKey) {
+    const model = forTranslation ? 'claude-haiku-4-5-20251001' : (anthropicModel || 'claude-sonnet-4-6');
+    return { type: 'anthropic', client: new Anthropic({ apiKey: anthropicApiKey }), model };
+  }
+  throw new HttpsError('failed-precondition',
+    'No AI provider configured.\n\nHow to fix: open Settings → AI Provider and add your Gemini, OpenAI, or Anthropic API key.'
+  );
 }
 
 async function callAI(ai, prompt, maxTokens) {
@@ -111,7 +163,8 @@ function calcCostUsd(ai, inputTokens, outputTokens, isTranslation = false) {
     const p = PRICING.openai[model] || PRICING.openai['gpt-4o-mini'];
     return (inputTokens * p.in + outputTokens * p.out) / 1_000_000;
   }
-  const p = isTranslation ? PRICING.anthropic.translate : PRICING.anthropic.analysis;
+  const model = isTranslation ? 'claude-haiku-4-5-20251001' : ai.model;
+  const p = PRICING.anthropic[model] || PRICING.anthropic['claude-sonnet-4-6'];
   return (inputTokens * p.in + outputTokens * p.out) / 1_000_000;
 }
 
@@ -356,7 +409,7 @@ function isStale(articles) {
 exports.setupCountry = onCall(
   { timeoutSeconds: 120, memory: '512MiB', region: 'us-central1' },
   async (request) => {
-    if (!request.auth) throw new HttpsError('unauthenticated', 'Login required');
+    await requireAuthorized(request);
     const { country, numSources: rawNumSources, filterNoRSS } = request.data;
     if (!country || typeof country !== 'string') throw new HttpsError('invalid-argument', 'country required');
     const numSources = Math.min(Math.max(parseInt(rawNumSources) || 7, 1), 15);
@@ -365,7 +418,8 @@ exports.setupCountry = onCall(
     const customPrompts = await getCustomPrompts();
     const prompt = fillPrompt(customPrompts.setup || DEFAULT_PROMPTS.setup, { country, numSources });
 
-    const { text } = await callAI(ai, prompt, 3000);
+    const { text, usage } = await callAI(ai, prompt, 3000);
+    await recordCost(request, ai, usage?.input_tokens || 0, usage?.output_tokens || 0);
 
     let sources;
     try {
@@ -398,7 +452,7 @@ exports.setupCountry = onCall(
 exports.addSources = onCall(
   { timeoutSeconds: 120, memory: '512MiB', region: 'us-central1' },
   async (request) => {
-    if (!request.auth) throw new HttpsError('unauthenticated', 'Login required');
+    await requireAuthorized(request);
     const { country, countryKey, numSources: rawNum, filterNoRSS, existingNames } = request.data;
     if (!country || typeof country !== 'string') throw new HttpsError('invalid-argument', 'country required');
     const numSources = Math.min(Math.max(parseInt(rawNum) || 5, 1), 10);
@@ -410,7 +464,8 @@ exports.addSources = onCall(
       : '';
     const prompt = fillPrompt(customPrompts.setup || DEFAULT_PROMPTS.setup, { country, numSources }) + excludeClause;
 
-    const { text } = await callAI(ai, prompt, 3000);
+    const { text, usage } = await callAI(ai, prompt, 3000);
+    await recordCost(request, ai, usage?.input_tokens || 0, usage?.output_tokens || 0);
     let sources;
     try { sources = extractJson(text, '['); }
     catch (e) { throw new HttpsError('internal', 'Failed to parse sources: ' + e.message); }
@@ -439,7 +494,7 @@ exports.addSources = onCall(
 exports.findSource = onCall(
   { timeoutSeconds: 60, memory: '256MiB', region: 'us-central1' },
   async (request) => {
-    if (!request.auth) throw new HttpsError('unauthenticated', 'Login required');
+    await requireAuthorized(request);
     const { country, sourceName } = request.data;
     if (!country || !sourceName) throw new HttpsError('invalid-argument', 'country and sourceName required');
 
@@ -460,7 +515,8 @@ Return ONLY valid JSON (no markdown, no explanation):
 }
 If this outlet does not exist in ${country} or you are not confident it exists, return: null`;
 
-    const { text } = await callAI(ai, prompt, 600);
+    const { text, usage } = await callAI(ai, prompt, 600);
+    await recordCost(request, ai, usage?.input_tokens || 0, usage?.output_tokens || 0);
     let source = null;
     try {
       if (!text.trim().toLowerCase().startsWith('null')) {
@@ -485,7 +541,7 @@ If this outlet does not exist in ${country} or you are not confident it exists, 
 exports.fetchNews = onCall(
   { timeoutSeconds: 300, memory: '1GiB', region: 'us-central1' },
   async (request) => {
-    if (!request.auth) throw new HttpsError('unauthenticated', 'Login required');
+    await requireAuthorized(request);
     const { country, countryKey, selectedSources, topics, date, summaryWords, maxArticles } = request.data;
     const summaryLen = `~${Math.min(Math.max(summaryWords || 100, 30), 300)}-word summary`;
     const articleLimit = Math.min(Math.max(parseInt(maxArticles) || 25, 10), 50);
@@ -626,7 +682,7 @@ exports.fetchNews = onCall(
       }
     }
 
-    const costUsd = calcCostUsd(ai, totalInputTokens, totalOutputTokens);
+    const costUsd = await recordCost(request, ai, totalInputTokens, totalOutputTokens);
     const rssCount = sourceResults.filter(r => !r.error && r.articles?.length > 0 && !r.usedGoogleNews).length;
     const googleNewsCount = sourceResults.filter(r => !r.error && r.articles?.length > 0 && r.usedGoogleNews).length;
     return { results: allResults, date, usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens, costUsd, provider: ai.type, model: ai.model, rssCount, googleNewsCount } };
@@ -654,7 +710,7 @@ ${JSON.stringify(batch)}`;
 exports.fixSourceUrl = onCall(
   { timeoutSeconds: 60, memory: '256MiB', region: 'us-central1' },
   async (request) => {
-    if (!request.auth) throw new HttpsError('unauthenticated', 'Login required');
+    await requireAuthorized(request);
     const { country, countryKey, sourceName } = request.data;
     if (!country || !sourceName) throw new HttpsError('invalid-argument', 'country and sourceName required');
 
@@ -664,7 +720,8 @@ Return ONLY valid JSON: { "rssUrl": "https://..." }
 The URL must be a real, publicly accessible RSS/Atom feed that exists right now.
 If you are not confident a working URL exists, return: { "rssUrl": null }`;
 
-    const { text } = await callAI(ai, prompt, 200);
+    const { text, usage } = await callAI(ai, prompt, 200);
+    await recordCost(request, ai, usage?.input_tokens || 0, usage?.output_tokens || 0);
     let rssUrl = null;
     try {
       const parsed = extractJson(text, '{');
@@ -691,7 +748,7 @@ If you are not confident a working URL exists, return: { "rssUrl": null }`;
 exports.translateResults = onCall(
   { timeoutSeconds: 120, memory: '256MiB', region: 'us-central1' },
   async (request) => {
-    if (!request.auth) throw new HttpsError('unauthenticated', 'Login required');
+    await requireAuthorized(request);
     const { texts } = request.data;
     if (!Array.isArray(texts) || texts.length === 0) throw new HttpsError('invalid-argument', 'texts array required');
 
@@ -713,7 +770,7 @@ exports.translateResults = onCall(
       }
     }
 
-    const costUsd = calcCostUsd(ai, totalInputTokens, totalOutputTokens, true);
+    const costUsd = await recordCost(request, ai, totalInputTokens, totalOutputTokens, true);
     return { translations: allTranslations, usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens, costUsd, provider: ai.type, model: ai.model } };
   }
 );
@@ -724,7 +781,7 @@ exports.translateResults = onCall(
 exports.fetchPeriodSummary = onCall(
   { timeoutSeconds: 120, memory: '512MiB', region: 'us-central1' },
   async (request) => {
-    if (!request.auth) throw new HttpsError('unauthenticated', 'Login required');
+    await requireAuthorized(request);
     const { country, countryKey, topics, startDate, endDate, periodReportWords: rawReportWords, persona } = request.data;
     if (!country || !topics?.length || !startDate || !endDate) {
       throw new HttpsError('invalid-argument', 'country, topics, startDate, endDate required');
@@ -750,10 +807,148 @@ exports.fetchPeriodSummary = onCall(
       throw new HttpsError('internal', 'Failed to parse period summary from AI: ' + e.message);
     }
 
-    const costUsd = calcCostUsd(ai, usage?.input_tokens || 0, usage?.output_tokens || 0);
+    const costUsd = await recordCost(request, ai, usage?.input_tokens || 0, usage?.output_tokens || 0);
     return {
       result,
       usage: { inputTokens: usage?.input_tokens || 0, outputTokens: usage?.output_tokens || 0, costUsd, provider: ai.type, model: ai.model }
     };
+  }
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Access control — who's allowed to use the app, and the admin panel behind it
+// ─────────────────────────────────────────────────────────────────────────────
+exports.getMyRole = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    if (!request.auth) throw new HttpsError('unauthenticated', 'Login required');
+    const role = await getRole(request.auth.token.email);
+    // Mirror the authorization result into a uid-keyed index so database rules
+    // (which can't call getRole themselves) can gate reads without exposing
+    // authorizedUsers/userCosts to clients.
+    await db.ref(`authorizedUids/${request.auth.uid}`).set(role ? true : null).catch(() => {});
+    return { role };
+  }
+);
+
+// costs shape per user: { "YYYY-MM": { gemini: 1.23, openai: 0.45, anthropic: 0 } }
+exports.getCosts = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    const role = await requireAuthorized(request);
+    const { scope } = request.data || {};
+    if (scope === 'all') {
+      requireAdmin(role);
+      const snap = await db.ref('userCosts').once('value');
+      const val = snap.val() || {};
+      const users = Object.entries(val).map(([uid, u]) => ({ uid, email: u.email || null, costs: u.costs || {} }));
+      return { users };
+    }
+    const snap = await db.ref(`userCosts/${request.auth.uid}/costs`).once('value');
+    return { costs: snap.val() || {} };
+  }
+);
+
+exports.listAuthorizedUsers = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    const role = await requireAuthorized(request);
+    requireAdmin(role);
+    const snap = await db.ref('authorizedUsers').once('value');
+    const val = snap.val() || {};
+    const users = Object.values(val).sort((a, b) => (a.email || '').localeCompare(b.email || ''));
+    return { owner: OWNER_EMAIL, users };
+  }
+);
+
+exports.addAuthorizedUser = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    const role = await requireAuthorized(request);
+    requireAdmin(role);
+    const { email: rawEmail, role: newRole } = request.data || {};
+    if (!rawEmail || typeof rawEmail !== 'string') throw new HttpsError('invalid-argument', 'email required');
+    const email = rawEmail.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpsError('invalid-argument', 'Invalid email address');
+    if (email === OWNER_EMAIL) throw new HttpsError('invalid-argument', 'That email is already the owner');
+    const finalRole = newRole === 'admin' ? 'admin' : 'user';
+    await db.ref(`authorizedUsers/${sanitizeEmailKey(email)}`).set({
+      email, role: finalRole, addedAt: new Date().toISOString(), addedBy: request.auth.token.email
+    });
+    return { ok: true };
+  }
+);
+
+exports.removeAuthorizedUser = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    const role = await requireAuthorized(request);
+    requireAdmin(role);
+    const { email: rawEmail } = request.data || {};
+    if (!rawEmail || typeof rawEmail !== 'string') throw new HttpsError('invalid-argument', 'email required');
+    const email = rawEmail.trim().toLowerCase();
+    await db.ref(`authorizedUsers/${sanitizeEmailKey(email)}`).remove();
+    // Best-effort: revoke read access immediately for any uid we know maps to this
+    // email (from prior usage), instead of waiting for their next getMyRole call.
+    try {
+      const snap = await db.ref('userCosts').once('value');
+      const val = snap.val() || {};
+      const uids = Object.entries(val).filter(([, u]) => (u.email || '').toLowerCase() === email).map(([uid]) => uid);
+      await Promise.all(uids.map(uid => db.ref(`authorizedUids/${uid}`).remove()));
+    } catch {}
+    return { ok: true };
+  }
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared-data writes — routed through here (instead of direct client writes) so
+// every mutation to global data passes through the same authorization check.
+// ─────────────────────────────────────────────────────────────────────────────
+exports.updateSources = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { countryKey, sources } = request.data || {};
+    if (!countryKey || !Array.isArray(sources)) throw new HttpsError('invalid-argument', 'countryKey and sources required');
+    await db.ref(`countries/${countryKey}/setup/sources`).set(sources);
+    return { ok: true };
+  }
+);
+
+exports.deleteCountry = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { countryKey } = request.data || {};
+    if (!countryKey) throw new HttpsError('invalid-argument', 'countryKey required');
+    await Promise.all([
+      db.ref(`countries/${countryKey}`).remove(),
+      db.ref(`country-meta/${countryKey}`).remove(),
+    ]);
+    return { ok: true };
+  }
+);
+
+exports.savePromptTemplate = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    const { key, value } = request.data || {};
+    if (!['setup', 'analysis', 'period'].includes(key) || typeof value !== 'string') {
+      throw new HttpsError('invalid-argument', 'valid key and value required');
+    }
+    await db.ref(`config/prompts/${key}`).set(value);
+    return { ok: true };
+  }
+);
+
+exports.resetPromptTemplate = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    const { key } = request.data || {};
+    if (!['setup', 'analysis', 'period'].includes(key)) throw new HttpsError('invalid-argument', 'valid key required');
+    await db.ref(`config/prompts/${key}`).remove();
+    return { ok: true };
   }
 );

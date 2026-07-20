@@ -1,21 +1,33 @@
 {
   "rules": {
     "country-meta": {
-      ".read": "auth != null",
-      ".write": "auth != null"
+      ".read": "auth != null && root.child('authorizedUids').child(auth.uid).exists()",
+      ".write": false
     },
     "config": {
       "prompts": {
-        ".read": "auth != null",
-        ".write": "auth != null"
+        ".read": "auth != null && root.child('authorizedUids').child(auth.uid).exists()",
+        ".write": false
       }
     },
     "countries": {
-      ".read": "auth != null",
+      ".read": "auth != null && root.child('authorizedUids').child(auth.uid).exists()",
       "$countryKey": {
-        "setup": { ".write": "auth != null" },
+        "setup": { ".write": false },
         "runs":  { ".write": false }
       }
+    },
+    "authorizedUsers": {
+      ".read": false,
+      ".write": false
+    },
+    "authorizedUids": {
+      ".read": false,
+      ".write": false
+    },
+    "userCosts": {
+      ".read": false,
+      ".write": false
     },
     "users": {
       "$uid": {

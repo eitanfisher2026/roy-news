@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.68';
+const VERSION = 'v1.72';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -25,13 +25,12 @@ const DEPRECATED_GEMINI = { 'gemini-2.0-flash': 'gemini-2.5-flash', 'gemini-2.0-
 
 function normalizeAI(saved) {
   if (!saved?.provider) return null;
-  if (!saved.keyMode || saved.keyMode === 'global') return { provider: 'anthropic' };
   if (DEPRECATED_GEMINI[saved.geminiModel]) saved.geminiModel = DEPRECATED_GEMINI[saved.geminiModel];
   return saved;
 }
 
 async function getAISettings(uid) {
-  if (!uid) return { provider: 'anthropic' };
+  if (!uid) return { provider: null };
   try {
     const snap = await db.ref(`users/${uid}/ai`).once('value');
     const result = normalizeAI(snap.val());
@@ -42,7 +41,7 @@ async function getAISettings(uid) {
     const result = normalizeAI(JSON.parse(localStorage.getItem(`roy-news-ai-${uid}`)));
     if (result) return result;
   } catch {}
-  return { provider: 'anthropic' };
+  return { provider: null };
 }
 
 function getUserPrefs(uid) {
@@ -378,6 +377,23 @@ function LoginScreen() {
   );
 }
 
+// ─── Access Restricted Screen ──────────────────────────────────────────────────
+function AccessRestrictedScreen({ user, onSignOut }) {
+  return (
+    <div className="fade-in" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', padding: 24, background: C.bg, textAlign: 'center' }}>
+      <div style={{ fontSize: 52, marginBottom: 10 }}>🔒</div>
+      <h1 style={{ fontSize: 24, fontWeight: 800, margin: '0 0 8px', color: C.text }}>Access Restricted</h1>
+      <div style={{ color: C.muted, fontSize: 14, maxWidth: 340, marginBottom: 4 }}>
+        {user.email} isn't authorized to use Roy News yet.
+      </div>
+      <div style={{ color: C.faint, fontSize: 13, maxWidth: 340, marginBottom: 24, lineHeight: 1.6 }}>
+        Ask the administrator to add your email in Settings → Manage Users.
+      </div>
+      <button onClick={onSignOut} style={{ ...BTN('#7f1d1d'), padding: '9px 20px' }}>Sign Out</button>
+    </div>
+  );
+}
+
 // ─── Setup Config Panel (shared between CountryStep new + refresh) ────────────
 function SetupConfigPanel({ numSources, onChange, filterNoRSS, onFilterChange, onStart, onCancel, startLabel = '⚡ Start AI Setup' }) {
   return (
@@ -485,7 +501,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
     const newSources = [...sources, src];
     onSourcesChange(newSources);
     if (selectable && onSelectionChange) onSelectionChange(new Set([...(selected || []), src.id]));
-    db.ref(`countries/${country.key}/setup/sources`).set(newSources).catch(() => {});
+    fns.httpsCallable('updateSources')({ countryKey: country.key, sources: newSources }).catch(() => {});
     setFindResult(null);
     setFindQuery('');
   }
@@ -557,7 +573,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
     if (selectable && onSelectionChange) {
       const n = new Set(selected); n.delete(id); onSelectionChange(n);
     }
-    db.ref(`countries/${country.key}/setup/sources`).set(newSources).catch(() => {});
+    fns.httpsCallable('updateSources')({ countryKey: country.key, sources: newSources }).catch(() => {});
   }
 
   return (
@@ -772,15 +788,10 @@ function CountryStep({ onCountryConfirmed, onError, user }) {
           const countriesSnap = await db.ref('countries').once('value');
           if (cancelledRef.current) return;
           const countries = countriesSnap.val() || {};
-          const updates = {};
           list = Object.values(countries)
             .filter(c => c.setup)
-            .map(c => {
-              updates[c.setup.countryKey] = { country: c.setup.country, countryKey: c.setup.countryKey, setupDate: c.setup.setupDate || new Date().toISOString() };
-              return { name: c.setup.country, key: c.setup.countryKey, date: (c.setup.setupDate || '').slice(0, 10) };
-            })
+            .map(c => ({ name: c.setup.country, key: c.setup.countryKey, date: (c.setup.setupDate || '').slice(0, 10) }))
             .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-          if (Object.keys(updates).length > 0) db.ref('country-meta').update(updates).catch(() => {});
         } catch {}
       }
       if (!cancelledRef.current) {
@@ -1952,8 +1963,12 @@ const OPENAI_MODELS = [
   { id: 'gpt-4.1',      label: 'GPT-4.1 — Latest' },
   { id: 'gpt-4.1-mini', label: 'GPT-4.1 Mini — Balanced' },
 ];
+const ANTHROPIC_MODELS = [
+  { id: 'claude-sonnet-4-6',         label: 'Claude Sonnet 4.6 — Balanced & capable' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 — Fast & affordable' },
+];
 
-function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
+function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
   const [persona, setPersona] = useState('');
   const [personaSaved, setPersonaSaved] = useState(false);
 
@@ -1973,14 +1988,16 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
     setTimeout(() => setPersonaSaved(false), 2000);
   }
 
-  const [keyMode,      setKeyMode]      = useState('global');
-  const [aiProvider,   setAiProvider]   = useState('anthropic');
+  const [aiProvider,   setAiProvider]   = useState('gemini');
   const [geminiKey,    setGeminiKey]    = useState('');
   const [geminiModel,  setGeminiModel]  = useState('gemini-2.5-flash');
   const [openaiKey,    setOpenaiKey]    = useState('');
   const [openaiModel,  setOpenaiModel]  = useState('gpt-4o-mini');
+  const [anthropicKey, setAnthropicKey] = useState('');
+  const [anthropicModel, setAnthropicModel] = useState('claude-sonnet-4-6');
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [showOpenAIKey, setShowOpenAIKey] = useState(false);
+  const [showAnthropicKey, setShowAnthropicKey] = useState(false);
   const [aiSaveMsg,    setAiSaveMsg]    = useState('');
 
   // Load AI settings from Firebase on mount
@@ -1993,22 +2010,24 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
         try {
           const ls = JSON.parse(localStorage.getItem(`roy-news-ai-${user.uid}`));
           if (ls?.provider) {
-            setKeyMode(ls.keyMode || 'global');
-            setAiProvider(ls.provider || 'anthropic');
+            setAiProvider(ls.provider === 'anthropic' || ls.provider === 'gemini' || ls.provider === 'openai' ? ls.provider : 'gemini');
             setGeminiKey(ls.geminiApiKey || '');
             setGeminiModel(ls.geminiModel || 'gemini-2.5-flash');
             setOpenaiKey(ls.openaiApiKey || '');
             setOpenaiModel(ls.openaiModel || 'gpt-4o-mini');
+            setAnthropicKey(ls.anthropicApiKey || '');
+            setAnthropicModel(ls.anthropicModel || 'claude-sonnet-4-6');
           }
         } catch {}
         return;
       }
-      setKeyMode(d.keyMode || 'global');
-      setAiProvider(d.provider || 'anthropic');
+      setAiProvider(d.provider === 'anthropic' || d.provider === 'gemini' || d.provider === 'openai' ? d.provider : 'gemini');
       setGeminiKey(d.geminiApiKey || '');
       setGeminiModel(d.geminiModel || 'gemini-2.5-flash');
       setOpenaiKey(d.openaiApiKey || '');
       setOpenaiModel(d.openaiModel || 'gpt-4o-mini');
+      setAnthropicKey(d.anthropicApiKey || '');
+      setAnthropicModel(d.anthropicModel || 'claude-sonnet-4-6');
     }).catch(() => {});
   }, [user?.uid]);
 
@@ -2024,6 +2043,87 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
   const [periodPrompt, setPeriodPrompt] = useState('');
   const [promptSaving, setPromptSaving] = useState('');
   const [promptMsg, setPromptMsg] = useState('');
+
+  const [usersOpen, setUsersOpen] = useState(false);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [authUsers, setAuthUsers] = useState([]);
+  const [ownerEmail, setOwnerEmail] = useState('');
+  const [newUserEmail, setNewUserEmail] = useState('');
+  const [newUserRole, setNewUserRole] = useState('user');
+  const [userBusy, setUserBusy] = useState(false);
+  const [userMsg, setUserMsg] = useState('');
+
+  async function loadAuthUsers() {
+    setUsersLoading(true);
+    try {
+      const result = await fns.httpsCallable('listAuthorizedUsers')();
+      setOwnerEmail(result.data.owner || '');
+      setAuthUsers(result.data.users || []);
+    } catch (e) {
+      setUserMsg('⚠ Failed to load: ' + e.message);
+    }
+    setUsersLoading(false);
+  }
+
+  async function handleAddUser() {
+    const email = newUserEmail.trim();
+    if (!email || userBusy) return;
+    setUserBusy(true);
+    setUserMsg('');
+    try {
+      await fns.httpsCallable('addAuthorizedUser')({ email, role: newUserRole });
+      setNewUserEmail('');
+      setNewUserRole('user');
+      setUserMsg('✓ Added');
+      await loadAuthUsers();
+      setTimeout(() => setUserMsg(''), 2500);
+    } catch (e) {
+      setUserMsg('⚠ ' + e.message);
+    }
+    setUserBusy(false);
+  }
+
+  async function handleRemoveUser(email) {
+    if (!window.confirm(`Remove access for ${email}?`)) return;
+    setUserBusy(true);
+    try {
+      await fns.httpsCallable('removeAuthorizedUser')({ email });
+      await loadAuthUsers();
+    } catch (e) {
+      setUserMsg('⚠ ' + e.message);
+    }
+    setUserBusy(false);
+  }
+
+  const [costsOpen, setCostsOpen] = useState(false);
+  const [costsLoading, setCostsLoading] = useState(false);
+  const [myCosts, setMyCosts] = useState(null);   // { 'YYYY-MM': { gemini: 1.2, openai: 0.4 } }
+  const [allCosts, setAllCosts] = useState(null);  // [{ uid, email, costs }]
+  const [costsMsg, setCostsMsg] = useState('');
+
+  async function loadCosts() {
+    setCostsLoading(true);
+    setCostsMsg('');
+    try {
+      if (isAdmin) {
+        const result = await fns.httpsCallable('getCosts')({ scope: 'all' });
+        setAllCosts(result.data.users || []);
+      } else {
+        const result = await fns.httpsCallable('getCosts')();
+        setMyCosts(result.data.costs || {});
+      }
+    } catch (e) {
+      setCostsMsg('⚠ Failed to load: ' + e.message);
+    }
+    setCostsLoading(false);
+  }
+
+  function userTotal(costs) {
+    return Object.values(costs || {}).reduce((sum, byProvider) => sum + Object.values(byProvider || {}).reduce((s, v) => s + v, 0), 0);
+  }
+  function formatUsd(n) {
+    return '$' + (n || 0).toFixed(4);
+  }
 
   async function loadPrompts() {
     setPromptsLoading(true);
@@ -2044,7 +2144,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
   async function savePrompt(key, value) {
     setPromptSaving(key);
     try {
-      await db.ref(`config/prompts/${key}`).set(value);
+      await fns.httpsCallable('savePromptTemplate')({ key, value });
       setPromptMsg('✓ Saved — will take effect on the next run');
       setTimeout(() => setPromptMsg(''), 3500);
     } catch (e) {
@@ -2055,7 +2155,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
 
   async function resetPrompt(key) {
     try {
-      await db.ref(`config/prompts/${key}`).remove();
+      await fns.httpsCallable('resetPromptTemplate')({ key });
       if (key === 'setup') setSetupPrompt(DEFAULT_PROMPTS.setup);
       else if (key === 'analysis') setAnalysisPrompt(DEFAULT_PROMPTS.analysis);
       else if (key === 'period') setPeriodPrompt(DEFAULT_PROMPTS.period);
@@ -2068,7 +2168,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
 
   async function saveAISettings() {
     if (!user?.uid) return;
-    await db.ref(`users/${user.uid}/ai`).set({ keyMode, provider: aiProvider, geminiApiKey: geminiKey, geminiModel, openaiApiKey: openaiKey, openaiModel });
+    await db.ref(`users/${user.uid}/ai`).set({ provider: aiProvider, geminiApiKey: geminiKey, geminiModel, openaiApiKey: openaiKey, openaiModel, anthropicApiKey: anthropicKey, anthropicModel });
     setAiSaveMsg('✓ Saved');
     setTimeout(() => setAiSaveMsg(''), 2500);
   }
@@ -2098,7 +2198,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
 
   async function removeCountry(key) {
     if (!window.confirm(`Remove ${key}?`)) return;
-    await db.ref(`countries/${key}`).remove();
+    await fns.httpsCallable('deleteCountry')({ countryKey: key });
     setCountries(p => p.filter(c => c.countryKey !== key));
   }
 
@@ -2128,6 +2228,150 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
             </div>
           </div>
         )}
+
+        {/* Manage Users (admin only) */}
+        {isAdmin && (
+          <div style={{ marginBottom: 28 }}>
+            <button
+              onClick={() => { setUsersOpen(o => { if (!o) loadAuthUsers(); return !o; }); }}
+              style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: '12px 14px', background: usersOpen ? C.card : '#0f1e35', border: '1px solid ' + (usersOpen ? C.borderLight : C.border), borderRadius: 9, cursor: 'pointer', color: C.text }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 16 }}>👥</span>
+                <div style={{ textAlign: 'left' }}>
+                  <div style={{ fontWeight: 700, fontSize: 13 }}>Manage Users</div>
+                  <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>Add or remove people who can use Roy News</div>
+                </div>
+              </div>
+              <span style={{ color: C.faint, fontSize: 12 }}>{usersOpen ? '▲ Hide' : '▼ Show'}</span>
+            </button>
+
+            {usersOpen && (
+              <div style={{ marginTop: 12 }}>
+                {usersLoading ? (
+                  <div style={{ display: 'flex', justifyContent: 'center', padding: 20 }}><Spinner /></div>
+                ) : (
+                  <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 10px', background: '#0f1e35', borderRadius: 7, marginBottom: 7 }}>
+                      <div style={{ fontSize: 13, color: C.text }}>{ownerEmail}</div>
+                      <span style={{ fontSize: 10, fontWeight: 700, color: '#4ade80', textTransform: 'uppercase', letterSpacing: 0.5 }}>Owner</span>
+                    </div>
+
+                    {authUsers.length === 0 ? (
+                      <div style={{ color: C.faint, fontSize: 12, padding: '4px 10px 12px' }}>No other authorized users yet</div>
+                    ) : authUsers.map(u => (
+                      <div key={u.email} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 10px', borderRadius: 7, marginBottom: 5 }}>
+                        <div style={{ fontSize: 13, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.email}</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: u.role === 'admin' ? '#60a5fa' : C.faint, textTransform: 'uppercase', letterSpacing: 0.5 }}>{u.role}</span>
+                          <button onClick={() => handleRemoveUser(u.email)} disabled={userBusy}
+                            style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d', padding: '3px 8px', opacity: userBusy ? 0.5 : 1 }}>Remove</button>
+                        </div>
+                      </div>
+                    ))}
+
+                    <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                      <input type="email" value={newUserEmail} onChange={e => setNewUserEmail(e.target.value)}
+                        placeholder="name@example.com" className="input-field" style={{ flex: 1, fontSize: 13 }}
+                        onKeyDown={e => { if (e.key === 'Enter') handleAddUser(); }} />
+                      <select value={newUserRole} onChange={e => setNewUserRole(e.target.value)} className="input-field" style={{ fontSize: 13, width: 100 }}>
+                        <option value="user">User</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                      <button onClick={handleAddUser} disabled={!newUserEmail.trim() || userBusy} style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px', opacity: (!newUserEmail.trim() || userBusy) ? 0.5 : 1 }}>
+                        Add
+                      </button>
+                    </div>
+
+                    {userMsg && (
+                      <div style={{ fontSize: 12, color: userMsg.startsWith('✓') ? '#4ade80' : '#f87171', marginTop: 10 }}>{userMsg}</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Usage & Costs */}
+        <div style={{ marginBottom: 28 }}>
+          <button
+            onClick={() => { setCostsOpen(o => { if (!o) loadCosts(); return !o; }); }}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: '12px 14px', background: costsOpen ? C.card : '#0f1e35', border: '1px solid ' + (costsOpen ? C.borderLight : C.border), borderRadius: 9, cursor: 'pointer', color: C.text }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 16 }}>💰</span>
+              <div style={{ textAlign: 'left' }}>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>Usage & Costs</div>
+                <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>{isAdmin ? 'Your AI spend and everyone else\'s, by month and provider' : 'Your AI spend, by month and provider'}</div>
+              </div>
+            </div>
+            <span style={{ color: C.faint, fontSize: 12 }}>{costsOpen ? '▲ Hide' : '▼ Show'}</span>
+          </button>
+
+          {costsOpen && (
+            <div style={{ marginTop: 12 }}>
+              {costsLoading ? (
+                <div style={{ display: 'flex', justifyContent: 'center', padding: 20 }}><Spinner /></div>
+              ) : isAdmin ? (
+                (allCosts || []).length === 0 ? (
+                  <div style={{ color: C.faint, fontSize: 12, padding: '4px 10px' }}>No usage recorded yet</div>
+                ) : (
+                  <>
+                    {[...allCosts].sort((a, b) => userTotal(b.costs) - userTotal(a.costs)).map(u => (
+                      <div key={u.uid} style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginBottom: 10 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                          <div style={{ fontWeight: 600, fontSize: 13, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {u.email || u.uid}{user?.uid === u.uid && <span style={{ color: C.faint, fontWeight: 400 }}> (you)</span>}
+                          </div>
+                          <div style={{ fontWeight: 700, fontSize: 13, color: '#4ade80', flexShrink: 0, marginLeft: 10 }}>{formatUsd(userTotal(u.costs))}</div>
+                        </div>
+                        {Object.entries(u.costs || {}).sort((a, b) => b[0].localeCompare(a[0])).map(([month, byProvider]) => (
+                          <div key={month} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 0', borderTop: '1px solid ' + C.border, fontSize: 12 }}>
+                            <div style={{ color: C.faint }}>{month}</div>
+                            <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                              {Object.entries(byProvider || {}).map(([provider, cost]) => (
+                                <span key={provider} style={{ color: C.muted }}>{provider}: {formatUsd(cost)}</span>
+                              ))}
+                              <span style={{ color: C.text, fontWeight: 600 }}>{formatUsd(Object.values(byProvider || {}).reduce((s, v) => s + v, 0))}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                    <div style={{ fontSize: 12, color: C.faint, textAlign: 'right' }}>
+                      Grand total: {formatUsd(allCosts.reduce((s, u) => s + userTotal(u.costs), 0))}
+                    </div>
+                  </>
+                )
+              ) : (
+                !myCosts || Object.keys(myCosts).length === 0 ? (
+                  <div style={{ color: C.faint, fontSize: 12, padding: '4px 10px' }}>No usage recorded yet</div>
+                ) : (
+                  <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border }}>
+                    {Object.entries(myCosts).sort((a, b) => b[0].localeCompare(a[0])).map(([month, byProvider]) => (
+                      <div key={month} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 0', borderTop: '1px solid ' + C.border, fontSize: 13 }}>
+                        <div style={{ color: C.text }}>{month}</div>
+                        <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
+                          {Object.entries(byProvider || {}).map(([provider, cost]) => (
+                            <span key={provider} style={{ color: C.faint, fontSize: 12 }}>{provider}: {formatUsd(cost)}</span>
+                          ))}
+                          <span style={{ color: '#4ade80', fontWeight: 600 }}>{formatUsd(Object.values(byProvider || {}).reduce((s, v) => s + v, 0))}</span>
+                        </div>
+                      </div>
+                    ))}
+                    <div style={{ fontSize: 12, color: C.faint, textAlign: 'right', marginTop: 8, paddingTop: 8, borderTop: '1px solid ' + C.border }}>
+                      Total: {formatUsd(userTotal(myCosts))}
+                    </div>
+                  </div>
+                )
+              )}
+              {costsMsg && (
+                <div style={{ fontSize: 12, color: '#f87171', marginTop: 10 }}>{costsMsg}</div>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Your Profile */}
         <div style={{ marginBottom: 28 }}>
@@ -2166,91 +2410,95 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
         {/* AI Provider */}
         <div style={{ marginBottom: 28 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 14, textTransform: 'uppercase', letterSpacing: 0.5 }}>AI Provider</div>
-
-          {/* Global / Local toggle */}
-          <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
-            {[
-              { id: 'global', label: 'Global (App\'s AI)', sub: 'Uses app\'s built-in Claude key — no setup' },
-              { id: 'local',  label: 'My Own Key',         sub: 'Enter your Gemini or OpenAI key' },
-            ].map(opt => (
-              <button key={opt.id} onClick={() => setKeyMode(opt.id)}
-                style={{ flex: 1, padding: '10px 12px', borderRadius: 9, cursor: 'pointer', textAlign: 'left', background: keyMode === opt.id ? '#0f2a4a' : '#0f1e35', border: '2px solid ' + (keyMode === opt.id ? '#3b82f6' : C.border), transition: 'all 0.15s' }}>
-                <div style={{ fontWeight: 700, fontSize: 13, color: keyMode === opt.id ? '#60a5fa' : C.muted }}>{opt.label}</div>
-                <div style={{ fontSize: 11, color: C.faint, marginTop: 3 }}>{opt.sub}</div>
-                {keyMode === opt.id && <div style={{ fontSize: 10, color: '#4ade80', fontWeight: 700, marginTop: 4 }}>● ACTIVE</div>}
-              </button>
-            ))}
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 14, lineHeight: 1.6 }}>
+            Roy News runs on your own API key — pick a provider and paste your key below.
           </div>
 
-          {keyMode === 'global' && (
-            <div style={{ padding: '12px 14px', background: '#0a1e10', border: '1px solid #14532d', borderRadius: 9, marginBottom: 10 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, color: '#4ade80' }}>✓ Using app's Claude (Anthropic)</div>
-              <div style={{ fontSize: 12, color: '#86efac', marginTop: 4 }}>Model: claude-sonnet-4-6 · No API key needed</div>
+          {[
+            { id: 'gemini',    name: 'Gemini (Google)',   desc: 'Google AI Studio · Your API key' },
+            { id: 'openai',    name: 'ChatGPT (OpenAI)',  desc: 'OpenAI API · Your API key' },
+            { id: 'anthropic', name: 'Claude (Anthropic)', desc: 'Anthropic API · Your API key' },
+          ].map(p => (
+            <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: aiProvider === p.id ? C.card : '#0f1e35', border: '1px solid ' + (aiProvider === p.id ? '#3b82f6' : C.border), borderRadius: 8, cursor: 'pointer', marginBottom: 7 }}>
+              <input type="radio" name="aiprovider" value={p.id} checked={aiProvider === p.id} onChange={() => setAiProvider(p.id)} style={{ accentColor: '#3b82f6', flexShrink: 0 }} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 13, color: C.text }}>{p.name}</div>
+                <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{p.desc}</div>
+              </div>
+              {aiProvider === p.id && <span style={{ color: '#4ade80', fontSize: 11, fontWeight: 700 }}>Active</span>}
+            </label>
+          ))}
+
+          {aiProvider === 'gemini' && (
+            <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Google AI Studio API Key</div>
+                <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
+                  style={{ fontSize: 12, color: '#60a5fa', fontWeight: 600, textDecoration: 'none', padding: '4px 10px', background: '#0f2a4a', border: '1px solid #1e3a5f', borderRadius: 6, whiteSpace: 'nowrap' }}>
+                  🔑 Get API Key ↗
+                </a>
+              </div>
+              <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
+                Tap "Get API Key" → create a key on Google AI Studio → come back and paste it below
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                <input type={showGeminiKey ? 'text' : 'password'} value={geminiKey} onChange={e => setGeminiKey(e.target.value)} placeholder="Paste your AIza… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
+                <button onClick={() => setShowGeminiKey(x => !x)} style={SMALL_BTN}>{showGeminiKey ? '🙈' : '👁'}</button>
+              </div>
+              <div style={{ fontSize: 12, color: C.faint, marginBottom: 6, fontWeight: 600 }}>Model</div>
+              <input list="gemini-models-list" value={geminiModel} onChange={e => setGeminiModel(e.target.value)} placeholder="e.g. gemini-2.5-flash" className="input-field" style={{ fontSize: 13 }} />
+              <datalist id="gemini-models-list">
+                {GEMINI_MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+              </datalist>
             </div>
           )}
 
-          {keyMode === 'local' && (
-            <>
-              {[
-                { id: 'gemini',  name: 'Gemini (Google)',   desc: 'Google AI Studio · Your API key' },
-                { id: 'openai',  name: 'ChatGPT (OpenAI)',  desc: 'OpenAI API · Your API key' },
-              ].map(p => (
-                <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: aiProvider === p.id ? C.card : '#0f1e35', border: '1px solid ' + (aiProvider === p.id ? '#3b82f6' : C.border), borderRadius: 8, cursor: 'pointer', marginBottom: 7 }}>
-                  <input type="radio" name="aiprovider" value={p.id} checked={aiProvider === p.id} onChange={() => setAiProvider(p.id)} style={{ accentColor: '#3b82f6', flexShrink: 0 }} />
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: 13, color: C.text }}>{p.name}</div>
-                    <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{p.desc}</div>
-                  </div>
-                  {aiProvider === p.id && <span style={{ color: '#4ade80', fontSize: 11, fontWeight: 700 }}>Active</span>}
-                </label>
-              ))}
+          {aiProvider === 'openai' && (
+            <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>OpenAI API Key</div>
+                <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer"
+                  style={{ fontSize: 12, color: '#60a5fa', fontWeight: 600, textDecoration: 'none', padding: '4px 10px', background: '#0f2a4a', border: '1px solid #1e3a5f', borderRadius: 6, whiteSpace: 'nowrap' }}>
+                  🔑 Get API Key ↗
+                </a>
+              </div>
+              <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
+                Tap "Get API Key" → create a key on OpenAI Platform → come back and paste it below
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                <input type={showOpenAIKey ? 'text' : 'password'} value={openaiKey} onChange={e => setOpenaiKey(e.target.value)} placeholder="Paste your sk-… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
+                <button onClick={() => setShowOpenAIKey(x => !x)} style={SMALL_BTN}>{showOpenAIKey ? '🙈' : '👁'}</button>
+              </div>
+              <div style={{ fontSize: 12, color: C.faint, marginBottom: 6, fontWeight: 600 }}>Model</div>
+              <input list="openai-models-list" value={openaiModel} onChange={e => setOpenaiModel(e.target.value)} placeholder="e.g. gpt-4o-mini" className="input-field" style={{ fontSize: 13 }} />
+              <datalist id="openai-models-list">
+                {OPENAI_MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+              </datalist>
+            </div>
+          )}
 
-              {aiProvider === 'gemini' && (
-                <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                    <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Google AI Studio API Key</div>
-                    <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
-                      style={{ fontSize: 12, color: '#60a5fa', fontWeight: 600, textDecoration: 'none', padding: '4px 10px', background: '#0f2a4a', border: '1px solid #1e3a5f', borderRadius: 6, whiteSpace: 'nowrap' }}>
-                      🔑 Get API Key ↗
-                    </a>
-                  </div>
-                  <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
-                    Tap "Get API Key" → create a key on Google AI Studio → come back and paste it below
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-                    <input type={showGeminiKey ? 'text' : 'password'} value={geminiKey} onChange={e => setGeminiKey(e.target.value)} placeholder="Paste your AIza… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
-                    <button onClick={() => setShowGeminiKey(x => !x)} style={SMALL_BTN}>{showGeminiKey ? '🙈' : '👁'}</button>
-                  </div>
-                  <div style={{ fontSize: 12, color: C.faint, marginBottom: 6, fontWeight: 600 }}>Model</div>
-                  <select value={geminiModel} onChange={e => setGeminiModel(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
-                    {GEMINI_MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-                  </select>
-                </div>
-              )}
-
-              {aiProvider === 'openai' && (
-                <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                    <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>OpenAI API Key</div>
-                    <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer"
-                      style={{ fontSize: 12, color: '#60a5fa', fontWeight: 600, textDecoration: 'none', padding: '4px 10px', background: '#0f2a4a', border: '1px solid #1e3a5f', borderRadius: 6, whiteSpace: 'nowrap' }}>
-                      🔑 Get API Key ↗
-                    </a>
-                  </div>
-                  <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
-                    Tap "Get API Key" → create a key on OpenAI Platform → come back and paste it below
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-                    <input type={showOpenAIKey ? 'text' : 'password'} value={openaiKey} onChange={e => setOpenaiKey(e.target.value)} placeholder="Paste your sk-… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
-                    <button onClick={() => setShowOpenAIKey(x => !x)} style={SMALL_BTN}>{showOpenAIKey ? '🙈' : '👁'}</button>
-                  </div>
-                  <div style={{ fontSize: 12, color: C.faint, marginBottom: 6, fontWeight: 600 }}>Model</div>
-                  <select value={openaiModel} onChange={e => setOpenaiModel(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
-                    {OPENAI_MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-                  </select>
-                </div>
-              )}
-            </>
+          {aiProvider === 'anthropic' && (
+            <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Anthropic API Key</div>
+                <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer"
+                  style={{ fontSize: 12, color: '#60a5fa', fontWeight: 600, textDecoration: 'none', padding: '4px 10px', background: '#0f2a4a', border: '1px solid #1e3a5f', borderRadius: 6, whiteSpace: 'nowrap' }}>
+                  🔑 Get API Key ↗
+                </a>
+              </div>
+              <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
+                Tap "Get API Key" → create a key on the Anthropic Console → come back and paste it below
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input type={showAnthropicKey ? 'text' : 'password'} value={anthropicKey} onChange={e => setAnthropicKey(e.target.value)} placeholder="Paste your sk-ant-… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
+                <button onClick={() => setShowAnthropicKey(x => !x)} style={SMALL_BTN}>{showAnthropicKey ? '🙈' : '👁'}</button>
+              </div>
+              <div style={{ fontSize: 12, color: C.faint, marginTop: 12, marginBottom: 6, fontWeight: 600 }}>Model</div>
+              <input list="anthropic-models-list" value={anthropicModel} onChange={e => setAnthropicModel(e.target.value)} placeholder="e.g. claude-sonnet-4-6" className="input-field" style={{ fontSize: 13 }} />
+              <datalist id="anthropic-models-list">
+                {ANTHROPIC_MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+              </datalist>
+            </div>
           )}
 
           <button onClick={saveAISettings} style={{ ...BTN('#2563eb'), marginTop: 6 }}>
@@ -2282,7 +2530,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
               <span style={{ fontSize: 16 }}>🧠</span>
               <div style={{ textAlign: 'left' }}>
                 <div style={{ fontWeight: 700, fontSize: 13 }}>Prompt Templates</div>
-                <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>Edit the instructions sent to the AI</div>
+                <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>{isAdmin ? 'Edit the instructions sent to the AI' : 'View the instructions sent to the AI'}</div>
               </div>
             </div>
             <span style={{ color: C.faint, fontSize: 12 }}>{promptsOpen ? '▲ Hide' : '▼ Show'}</span>
@@ -2303,19 +2551,22 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
                     </div>
                     <textarea
                       value={setupPrompt}
-                      onChange={e => setSetupPrompt(e.target.value)}
+                      onChange={e => isAdmin && setSetupPrompt(e.target.value)}
+                      readOnly={!isAdmin}
                       className="input-field"
-                      style={{ height: 260, resize: 'vertical', fontSize: 12, fontFamily: 'monospace', lineHeight: 1.55 }}
+                      style={{ height: 260, resize: 'vertical', fontSize: 12, fontFamily: 'monospace', lineHeight: 1.55, opacity: isAdmin ? 1 : 0.75, cursor: isAdmin ? 'text' : 'default' }}
                     />
-                    <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                      <button onClick={() => savePrompt('setup', setupPrompt)} disabled={promptSaving === 'setup'}
-                        style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px' }}>
-                        {promptSaving === 'setup' ? 'Saving…' : 'Save'}
-                      </button>
-                      <button onClick={() => resetPrompt('setup')} style={{ ...SMALL_BTN, color: '#fb923c', borderColor: '#7c2d12' }}>
-                        Reset to Default
-                      </button>
-                    </div>
+                    {isAdmin && (
+                      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                        <button onClick={() => savePrompt('setup', setupPrompt)} disabled={promptSaving === 'setup'}
+                          style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px' }}>
+                          {promptSaving === 'setup' ? 'Saving…' : 'Save'}
+                        </button>
+                        <button onClick={() => resetPrompt('setup')} style={{ ...SMALL_BTN, color: '#fb923c', borderColor: '#7c2d12' }}>
+                          Reset to Default
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   {/* Analysis prompt */}
@@ -2327,19 +2578,22 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
                     </div>
                     <textarea
                       value={analysisPrompt}
-                      onChange={e => setAnalysisPrompt(e.target.value)}
+                      onChange={e => isAdmin && setAnalysisPrompt(e.target.value)}
+                      readOnly={!isAdmin}
                       className="input-field"
-                      style={{ height: 320, resize: 'vertical', fontSize: 12, fontFamily: 'monospace', lineHeight: 1.55 }}
+                      style={{ height: 320, resize: 'vertical', fontSize: 12, fontFamily: 'monospace', lineHeight: 1.55, opacity: isAdmin ? 1 : 0.75, cursor: isAdmin ? 'text' : 'default' }}
                     />
-                    <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                      <button onClick={() => savePrompt('analysis', analysisPrompt)} disabled={promptSaving === 'analysis'}
-                        style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px' }}>
-                        {promptSaving === 'analysis' ? 'Saving…' : 'Save'}
-                      </button>
-                      <button onClick={() => resetPrompt('analysis')} style={{ ...SMALL_BTN, color: '#fb923c', borderColor: '#7c2d12' }}>
-                        Reset to Default
-                      </button>
-                    </div>
+                    {isAdmin && (
+                      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                        <button onClick={() => savePrompt('analysis', analysisPrompt)} disabled={promptSaving === 'analysis'}
+                          style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px' }}>
+                          {promptSaving === 'analysis' ? 'Saving…' : 'Save'}
+                        </button>
+                        <button onClick={() => resetPrompt('analysis')} style={{ ...SMALL_BTN, color: '#fb923c', borderColor: '#7c2d12' }}>
+                          Reset to Default
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   {/* Period prompt */}
@@ -2351,19 +2605,22 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
                     </div>
                     <textarea
                       value={periodPrompt}
-                      onChange={e => setPeriodPrompt(e.target.value)}
+                      onChange={e => isAdmin && setPeriodPrompt(e.target.value)}
+                      readOnly={!isAdmin}
                       className="input-field"
-                      style={{ height: 320, resize: 'vertical', fontSize: 12, fontFamily: 'monospace', lineHeight: 1.55 }}
+                      style={{ height: 320, resize: 'vertical', fontSize: 12, fontFamily: 'monospace', lineHeight: 1.55, opacity: isAdmin ? 1 : 0.75, cursor: isAdmin ? 'text' : 'default' }}
                     />
-                    <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                      <button onClick={() => savePrompt('period', periodPrompt)} disabled={promptSaving === 'period'}
-                        style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px' }}>
-                        {promptSaving === 'period' ? 'Saving…' : 'Save'}
-                      </button>
-                      <button onClick={() => resetPrompt('period')} style={{ ...SMALL_BTN, color: '#fb923c', borderColor: '#7c2d12' }}>
-                        Reset to Default
-                      </button>
-                    </div>
+                    {isAdmin && (
+                      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                        <button onClick={() => savePrompt('period', periodPrompt)} disabled={promptSaving === 'period'}
+                          style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px' }}>
+                          {promptSaving === 'period' ? 'Saving…' : 'Save'}
+                        </button>
+                        <button onClick={() => resetPrompt('period')} style={{ ...SMALL_BTN, color: '#fb923c', borderColor: '#7c2d12' }}>
+                          Reset to Default
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   {promptMsg && (
@@ -2430,6 +2687,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut }) {
 // ─────────────────────────────────────────────────────────────────────────────
 function App() {
   const [user, setUser] = useState(undefined); // undefined=checking, null=logged out, object=logged in
+  const [role, setRole] = useState(undefined); // undefined=checking, null=not authorized, 'admin'|'user'=authorized
   const [page, setPage] = useState('main');
   const [step, setStep] = useState('country');
   const [country, setCountry] = useState(null);
@@ -2451,6 +2709,17 @@ function App() {
   useEffect(() => {
     return auth.onAuthStateChanged(u => setUser(u || null));
   }, []);
+
+  // Look up the caller's role once we know who's signed in
+  useEffect(() => {
+    if (!user) { setRole(undefined); return; }
+    let cancelled = false;
+    setRole(undefined);
+    fns.httpsCallable('getMyRole')()
+      .then(r => { if (!cancelled) setRole(r.data.role || null); })
+      .catch(() => { if (!cancelled) setRole(null); });
+    return () => { cancelled = true; };
+  }, [user]);
 
   // Capture PWA install prompt — pick up early-fired event or listen for future one
   useEffect(() => {
@@ -2686,12 +2955,23 @@ function App() {
   if (!user) {
     return <LoginScreen />;
   }
+  if (role === undefined) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', flexDirection: 'column', gap: 12, color: '#9ca3af', background: C.bg }}>
+        <div style={{ fontSize: '2rem' }}>📰</div>
+        <div>Loading…</div>
+      </div>
+    );
+  }
+  if (role === null) {
+    return <AccessRestrictedScreen user={user} onSignOut={() => auth.signOut()} />;
+  }
 
   function handleSignOut() { auth.signOut(); reset(); setPage('main'); }
 
   let content;
   if (page === 'settings') {
-    content = <SettingsPage onBack={() => setPage('main')} deferredInstall={deferredInstall} user={user} onSignOut={handleSignOut} />;
+    content = <SettingsPage onBack={() => setPage('main')} deferredInstall={deferredInstall} user={user} onSignOut={handleSignOut} isAdmin={role === 'admin'} />;
   } else if (step === 'loading' && loadingConfig) {
     content = <CancelableLoader {...loadingConfig} onCancel={cancel} />;
   } else if (step === 'country') {

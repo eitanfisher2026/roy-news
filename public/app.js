@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.84';
+const VERSION = 'v1.85';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3060,7 +3060,43 @@ function ScheduledReportsPanel({ user, countries }) {
   const [viewingRun, setViewingRun] = useState(null); // { scheduleId, run }
   const [busyId, setBusyId] = useState(null);
 
+  const [sourcesExpandedId, setSourcesExpandedId] = useState(null);
+  const [sourceBusyId, setSourceBusyId] = useState(null);
+  const [addingSourceFor, setAddingSourceFor] = useState(null); // scheduleId currently showing the "add source" picker
+  const [pickSourceId, setPickSourceId] = useState('');
+
   const selectedCountry = countries.find(c => c.countryKey === newCountryKey) || null;
+
+  function scheduleCountry(s) {
+    return countries.find(c => c.countryKey === s.countryKey) || null;
+  }
+
+  // Swap a schedule's source list by pushing the full new sourceIds array —
+  // updateSchedule already accepts sourceIds as one of its editable fields
+  // (see functions/index.js), so "replace" is just remove-then-add against
+  // the same array, no new backend endpoint needed.
+  async function setScheduleSources(schedule, nextSourceIds) {
+    setSourceBusyId(schedule.id);
+    try {
+      await fns.httpsCallable('updateSchedule')({ scheduleId: schedule.id, sourceIds: nextSourceIds });
+      setSchedules(prev => prev.map(s => s.id === schedule.id ? { ...s, sourceIds: nextSourceIds } : s));
+    } catch (e) {
+      alert('Could not update sources: ' + e.message);
+    }
+    setSourceBusyId(null);
+  }
+
+  function removeSource(schedule, sourceId) {
+    if (schedule.sourceIds.length <= 1) { alert('A schedule needs at least one source — add a replacement first.'); return; }
+    setScheduleSources(schedule, schedule.sourceIds.filter(id => id !== sourceId));
+  }
+
+  function addSource(schedule, sourceId) {
+    if (!sourceId || schedule.sourceIds.includes(sourceId)) return;
+    setScheduleSources(schedule, [...schedule.sourceIds, sourceId]);
+    setAddingSourceFor(null);
+    setPickSourceId('');
+  }
 
   async function loadSchedules() {
     setLoading(true);
@@ -3216,6 +3252,51 @@ function ScheduledReportsPanel({ user, countries }) {
                         style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 18, padding: '0 4px', opacity: 0.7 }}>×</button>
                     </div>
                   </div>
+                  <button onClick={() => setSourcesExpandedId(id => id === s.id ? null : s.id)}
+                    style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <span>{sourcesExpandedId === s.id ? '▾' : '▸'}</span><span>Sources ({s.sourceIds.length})</span>
+                  </button>
+                  {sourcesExpandedId === s.id && (() => {
+                    const sc = scheduleCountry(s);
+                    const byId = new Map((sc?.sources || []).map(src => [src.id, src]));
+                    const availableToAdd = (sc?.sources || []).filter(src => src.rssUrl && !s.sourceIds.includes(src.id));
+                    return (
+                      <div style={{ marginTop: 8 }}>
+                        {s.sourceIds.map(id => {
+                          const src = byId.get(id);
+                          return (
+                            <div key={id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '6px 8px', background: C.bg, borderRadius: 6, marginBottom: 5, fontSize: 11 }}>
+                              <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <span style={{ color: C.text }}>{src ? src.name : `(removed source: ${id})`}</span>
+                                {src && (src.rssUrl
+                                  ? <span style={{ color: '#4ade80' }}>✓ feed ok</span>
+                                  : <span style={{ color: '#fb923c' }}>⚠ no feed</span>)}
+                                {!src && <span style={{ color: '#f87171' }}>⚠ no longer in source list</span>}
+                              </div>
+                              <button onClick={() => removeSource(s, id)} disabled={sourceBusyId === s.id}
+                                style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 15, padding: '0 4px', opacity: 0.7, flexShrink: 0 }}>×</button>
+                            </div>
+                          );
+                        })}
+                        {addingSourceFor === s.id ? (
+                          <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                            <select value={pickSourceId} onChange={e => setPickSourceId(e.target.value)} className="input-field" style={{ fontSize: 12, flex: 1 }}>
+                              <option value="">Select a source to add…</option>
+                              {availableToAdd.map(src => <option key={src.id} value={src.id}>{src.name}</option>)}
+                            </select>
+                            <button onClick={() => addSource(s, pickSourceId)} disabled={!pickSourceId || sourceBusyId === s.id}
+                              style={{ ...SMALL_BTN, fontSize: 11, opacity: (!pickSourceId || sourceBusyId === s.id) ? 0.5 : 1 }}>Add</button>
+                            <button onClick={() => { setAddingSourceFor(null); setPickSourceId(''); }} style={{ ...SMALL_BTN, fontSize: 11 }}>Cancel</button>
+                          </div>
+                        ) : (
+                          <button onClick={() => setAddingSourceFor(s.id)} disabled={sourceBusyId === s.id || availableToAdd.length === 0}
+                            style={{ ...SMALL_BTN, fontSize: 11, marginTop: 4, opacity: availableToAdd.length === 0 ? 0.5 : 1 }}>
+                            + Add source
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
                   <button onClick={() => toggleExpand(s)}
                     style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
                     <span>{expandedId === s.id ? '▾' : '▸'}</span><span>Report history</span>

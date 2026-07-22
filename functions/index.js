@@ -1280,6 +1280,12 @@ function articleKey(article) {
 async function archiveSourceArticles(countryKey, sourceId, rssUrl) {
   let articles;
   try { articles = await fetchRssWithRetry(rssUrl, 30); } catch { return; }
+
+  // Lightweight per-source poll record (timestamp + count only, not article
+  // content) — lets the UI show "last refreshed" / item count as a feed
+  // health signal without scanning the full articleArchive tree.
+  try { await db.ref(`articleArchiveMeta/${countryKey}/${sourceId}`).set({ lastPolledAt: Date.now(), articleCount: articles.length }); } catch {}
+
   if (articles.length === 0) return;
 
   // Group by the publisher's own calendar day so we only touch the archive

@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.85';
+const VERSION = 'v1.86';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3064,11 +3064,35 @@ function ScheduledReportsPanel({ user, countries }) {
   const [sourceBusyId, setSourceBusyId] = useState(null);
   const [addingSourceFor, setAddingSourceFor] = useState(null); // scheduleId currently showing the "add source" picker
   const [pickSourceId, setPickSourceId] = useState('');
+  // Fetched fresh (not from the once-at-load `countries` prop) whenever a
+  // schedule's Sources section is opened, so a feed fixed on the Sources page
+  // shows up here without needing a full app reload, and so we can show each
+  // source's poll history (item count / last refreshed) alongside it.
+  const [liveSources, setLiveSources] = useState({}); // countryKey -> sources[]
+  const [archiveMeta, setArchiveMeta] = useState({}); // countryKey -> { [sourceId]: { lastPolledAt, articleCount } }
+  const [metaLoading, setMetaLoading] = useState(null);
 
   const selectedCountry = countries.find(c => c.countryKey === newCountryKey) || null;
 
   function scheduleCountry(s) {
     return countries.find(c => c.countryKey === s.countryKey) || null;
+  }
+
+  function sourcesForCountry(countryKey) {
+    return liveSources[countryKey] || scheduleCountry({ countryKey })?.sources || [];
+  }
+
+  async function loadCountrySourcesLive(countryKey) {
+    setMetaLoading(countryKey);
+    try {
+      const [srcSnap, metaSnap] = await Promise.all([
+        db.ref(`countries/${countryKey}/setup/sources`).once('value'),
+        db.ref(`articleArchiveMeta/${countryKey}`).once('value')
+      ]);
+      setLiveSources(prev => ({ ...prev, [countryKey]: srcSnap.val() || [] }));
+      setArchiveMeta(prev => ({ ...prev, [countryKey]: metaSnap.val() || {} }));
+    } catch {}
+    setMetaLoading(null);
   }
 
   // Swap a schedule's source list by pushing the full new sourceIds array —
@@ -3252,26 +3276,43 @@ function ScheduledReportsPanel({ user, countries }) {
                         style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 18, padding: '0 4px', opacity: 0.7 }}>×</button>
                     </div>
                   </div>
-                  <button onClick={() => setSourcesExpandedId(id => id === s.id ? null : s.id)}
-                    style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <button onClick={() => {
+                    const next = sourcesExpandedId === s.id ? null : s.id;
+                    setSourcesExpandedId(next);
+                    if (next) loadCountrySourcesLive(s.countryKey);
+                  }} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
                     <span>{sourcesExpandedId === s.id ? '▾' : '▸'}</span><span>Sources ({s.sourceIds.length})</span>
                   </button>
                   {sourcesExpandedId === s.id && (() => {
-                    const sc = scheduleCountry(s);
-                    const byId = new Map((sc?.sources || []).map(src => [src.id, src]));
-                    const availableToAdd = (sc?.sources || []).filter(src => src.rssUrl && !s.sourceIds.includes(src.id));
+                    if (metaLoading === s.countryKey) {
+                      return <div style={{ display: 'flex', justifyContent: 'center', padding: 10 }}><Spinner size={14} /></div>;
+                    }
+                    const allSources = sourcesForCountry(s.countryKey);
+                    const byId = new Map(allSources.map(src => [src.id, src]));
+                    const meta = archiveMeta[s.countryKey] || {};
+                    // Every other source in the country, not just ones with a
+                    // verified feed — a source can be added and its feed fixed
+                    // afterward on the Sources page (see removeSource's mirror:
+                    // remove is always allowed regardless of feed status too).
+                    const availableToAdd = allSources.filter(src => !s.sourceIds.includes(src.id));
                     return (
                       <div style={{ marginTop: 8 }}>
                         {s.sourceIds.map(id => {
                           const src = byId.get(id);
+                          const m = meta[id];
                           return (
                             <div key={id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '6px 8px', background: C.bg, borderRadius: 6, marginBottom: 5, fontSize: 11 }}>
-                              <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                                 <span style={{ color: C.text }}>{src ? src.name : `(removed source: ${id})`}</span>
                                 {src && (src.rssUrl
                                   ? <span style={{ color: '#4ade80' }}>✓ feed ok</span>
                                   : <span style={{ color: '#fb923c' }}>⚠ no feed</span>)}
                                 {!src && <span style={{ color: '#f87171' }}>⚠ no longer in source list</span>}
+                                {m ? (
+                                  <span style={{ color: C.faint }}>{m.articleCount} item{m.articleCount !== 1 ? 's' : ''} · refreshed {new Date(m.lastPolledAt).toLocaleString()}</span>
+                                ) : src?.rssUrl ? (
+                                  <span style={{ color: C.faint }}>not polled yet</span>
+                                ) : null}
                               </div>
                               <button onClick={() => removeSource(s, id)} disabled={sourceBusyId === s.id}
                                 style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 15, padding: '0 4px', opacity: 0.7, flexShrink: 0 }}>×</button>
@@ -3282,15 +3323,17 @@ function ScheduledReportsPanel({ user, countries }) {
                           <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                             <select value={pickSourceId} onChange={e => setPickSourceId(e.target.value)} className="input-field" style={{ fontSize: 12, flex: 1 }}>
                               <option value="">Select a source to add…</option>
-                              {availableToAdd.map(src => <option key={src.id} value={src.id}>{src.name}</option>)}
+                              {availableToAdd.map(src => <option key={src.id} value={src.id}>{src.name}{src.rssUrl ? '' : ' (no feed yet)'}</option>)}
                             </select>
                             <button onClick={() => addSource(s, pickSourceId)} disabled={!pickSourceId || sourceBusyId === s.id}
                               style={{ ...SMALL_BTN, fontSize: 11, opacity: (!pickSourceId || sourceBusyId === s.id) ? 0.5 : 1 }}>Add</button>
                             <button onClick={() => { setAddingSourceFor(null); setPickSourceId(''); }} style={{ ...SMALL_BTN, fontSize: 11 }}>Cancel</button>
                           </div>
+                        ) : availableToAdd.length === 0 ? (
+                          <div style={{ color: C.faint, fontSize: 11, marginTop: 4 }}>Every source in {s.country} is already in this schedule.</div>
                         ) : (
-                          <button onClick={() => setAddingSourceFor(s.id)} disabled={sourceBusyId === s.id || availableToAdd.length === 0}
-                            style={{ ...SMALL_BTN, fontSize: 11, marginTop: 4, opacity: availableToAdd.length === 0 ? 0.5 : 1 }}>
+                          <button onClick={() => setAddingSourceFor(s.id)} disabled={sourceBusyId === s.id}
+                            style={{ ...SMALL_BTN, fontSize: 11, marginTop: 4 }}>
                             + Add source
                           </button>
                         )}

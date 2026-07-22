@@ -17,6 +17,10 @@
         "runs":  { ".write": false }
       }
     },
+    "articleArchiveMeta": {
+      ".read": "auth != null && root.child('authorizedUids').child(auth.uid).exists()",
+      ".write": false
+    },
     "authorizedUsers": {
       ".read": false,
       ".write": false

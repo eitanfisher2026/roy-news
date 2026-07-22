@@ -1,4 +1,5 @@
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
+const { onSchedule } = require('firebase-functions/v2/scheduler');
 const admin = require('firebase-admin');
 const Anthropic = require('@anthropic-ai/sdk');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -47,16 +48,21 @@ function requireAdmin(role) {
 }
 
 // ─── Cost tracking (per user, per month, per AI provider) ─────────────────────
+// Shared by live onCall requests and the background scheduled-report job —
+// both attribute cost to a uid, they just get it from different places
+// (request.auth vs. a schedule's stored creator).
+async function persistCost(uid, email, ai, costUsd) {
+  if (costUsd <= 0 || !uid) return;
+  const month = new Date().toISOString().slice(0, 7); // YYYY-MM
+  await Promise.all([
+    db.ref(`userCosts/${uid}/email`).set(email || null),
+    db.ref(`userCosts/${uid}/costs/${month}/${ai.type}`).set(admin.database.ServerValue.increment(costUsd)),
+  ]).catch(() => {}); // never fail the caller over a cost-logging hiccup
+}
+
 async function recordCost(request, ai, inputTokens, outputTokens, isTranslation = false) {
   const costUsd = calcCostUsd(ai, inputTokens, outputTokens, isTranslation);
-  if (costUsd > 0 && request.auth) {
-    const uid = request.auth.uid;
-    const month = new Date().toISOString().slice(0, 7); // YYYY-MM
-    await Promise.all([
-      db.ref(`userCosts/${uid}/email`).set(request.auth.token.email || null),
-      db.ref(`userCosts/${uid}/costs/${month}/${ai.type}`).set(admin.database.ServerValue.increment(costUsd)),
-    ]).catch(() => {}); // never fail the user-facing request over a cost-logging hiccup
-  }
+  if (request.auth) await persistCost(request.auth.uid, request.auth.token.email, ai, costUsd);
   return costUsd;
 }
 
@@ -1240,5 +1246,325 @@ exports.resetPromptTemplate = onCall(
     if (!['setup', 'analysis', 'period', 'addSources'].includes(key)) throw new HttpsError('invalid-argument', 'valid key required');
     await db.ref(`config/prompts/${key}`).remove();
     return { ok: true };
+  }
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scheduled Reports — reliable daily/weekly topic digests
+//
+// The live fetchNews path checks a source's RSS feed at one point in time,
+// which is unreliable for high-volume outlets: their feed only exposes a
+// small rolling window of recent items, so a topic published earlier in the
+// day can already have scrolled off by the time anyone checks. A schedule
+// can't just re-run that same live check on a timer — it would inherit the
+// exact same blind spot.
+//
+// Instead: a frequent poller (pollArchivedSources) continuously archives
+// each source's feed into our own permanent store, often enough that no
+// article can rotate out of the feed's small window between polls. The
+// report generator (generateScheduledReports) then reads a full day (or
+// week) out of that archive — a complete record of what was actually
+// published, not a lucky snapshot.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Stable per-article key for dedup — RTDB keys can't contain '.', '#', '$',
+// '[', ']', '/', so this hashes the link (or title, if no link) rather than
+// using either directly.
+function articleKey(article) {
+  const basis = (article.link || article.title || '').trim();
+  let hash = 5381;
+  for (let i = 0; i < basis.length; i++) hash = ((hash * 33) ^ basis.charCodeAt(i)) >>> 0;
+  return 'a' + hash.toString(36);
+}
+
+async function archiveSourceArticles(countryKey, sourceId, rssUrl) {
+  let articles;
+  try { articles = await fetchRssWithRetry(rssUrl, 30); } catch { return; }
+  if (articles.length === 0) return;
+
+  // Group by the publisher's own calendar day so we only touch the archive
+  // nodes that are actually relevant, instead of one read/write per article.
+  const byDay = {};
+  for (const a of articles) {
+    const day = publisherLocalDateStr(a.date);
+    if (!day) continue;
+    (byDay[day] = byDay[day] || []).push(a);
+  }
+
+  for (const [day, dayArticles] of Object.entries(byDay)) {
+    const ref = db.ref(`articleArchive/${countryKey}/${sourceId}/${day}`);
+    let existing = {};
+    try { existing = (await ref.once('value')).val() || {}; } catch { continue; }
+    const updates = {};
+    for (const a of dayArticles) {
+      const key = articleKey(a);
+      if (!existing[key]) {
+        updates[key] = { title: a.title, text: a.text, link: a.link, date: a.date, archivedAt: new Date().toISOString() };
+      }
+    }
+    if (Object.keys(updates).length > 0) {
+      try { await ref.update(updates); } catch {}
+    }
+  }
+}
+
+exports.pollArchivedSources = onSchedule(
+  { schedule: 'every 15 minutes', region: 'us-central1', memory: '256MiB', timeoutSeconds: 300, timeZone: 'Etc/UTC' },
+  async () => {
+    const schedulesSnap = await db.ref('schedules').once('value');
+    const schedules = Object.values(schedulesSnap.val() || {}).filter(s => s.enabled);
+    if (schedules.length === 0) return;
+
+    const sourceIdsByCountry = {};
+    for (const s of schedules) {
+      const set = sourceIdsByCountry[s.countryKey] || (sourceIdsByCountry[s.countryKey] = new Set());
+      (s.sourceIds || []).forEach(id => set.add(id));
+    }
+
+    for (const [countryKey, sourceIdSet] of Object.entries(sourceIdsByCountry)) {
+      let sources = [];
+      try { sources = (await db.ref(`countries/${countryKey}/setup/sources`).once('value')).val() || []; } catch { continue; }
+      const bySourceId = Object.fromEntries(sources.map(s => [s.id, s]));
+      await Promise.all([...sourceIdSet].map(sourceId => {
+        const source = bySourceId[sourceId];
+        if (!source?.rssUrl) return Promise.resolve();
+        return archiveSourceArticles(countryKey, sourceId, source.rssUrl);
+      }));
+    }
+  }
+);
+
+// ─── Date-window helpers for the scheduled report period ─────────────────────
+function isoDateUTC(d) { return d.toISOString().slice(0, 10); }
+function addDaysUTC(dateStr, delta) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + delta);
+  return isoDateUTC(d);
+}
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+// Always ends yesterday (UTC) — the last calendar day the poller has had a
+// full day to archive. "Today" is deliberately excluded, same reasoning as
+// the point-in-time date warning: it's still in progress.
+function reportPeriodFor(frequency) {
+  const periodEnd = addDaysUTC(isoDateUTC(new Date()), -1);
+  const periodStart = frequency === 'weekly' ? addDaysUTC(periodEnd, -6) : periodEnd;
+  const dayKeys = [];
+  for (let d = periodStart; ; d = addDaysUTC(d, 1)) {
+    dayKeys.push(d);
+    if (d === periodEnd) break;
+  }
+  return { periodStart, periodEnd, dayKeys };
+}
+
+async function readArchivedArticles(countryKey, sourceId, dayKeys) {
+  const snaps = await Promise.all(dayKeys.map(day => db.ref(`articleArchive/${countryKey}/${sourceId}/${day}`).once('value')));
+  const articles = [];
+  for (const snap of snaps) {
+    const val = snap.val();
+    if (val) articles.push(...Object.values(val));
+  }
+  return articles;
+}
+
+function scheduleIsDue(schedule, now) {
+  if (now.getUTCHours() !== schedule.hourUtc) return false;
+  if (schedule.frequency === 'weekly' && WEEKDAYS[now.getUTCDay()] !== schedule.startDay) return false;
+  return true;
+}
+
+exports.generateScheduledReports = onSchedule(
+  { schedule: 'every 60 minutes', region: 'us-central1', memory: '512MiB', timeoutSeconds: 540, timeZone: 'Etc/UTC' },
+  async () => {
+    const now = new Date();
+    const schedulesSnap = await db.ref('schedules').once('value');
+    const schedules = schedulesSnap.val() || {};
+
+    for (const [scheduleId, schedule] of Object.entries(schedules)) {
+      if (!schedule.enabled || !scheduleIsDue(schedule, now)) continue;
+
+      const { periodStart, periodEnd, dayKeys } = reportPeriodFor(schedule.frequency);
+      // Already produced this exact period's report — guards against a
+      // double-fire within the same due hour, not a real recurrence.
+      if (schedule.lastRunStatus === 'ok' && schedule.lastPeriodEnd === periodEnd) continue;
+
+      const runRef = db.ref(`reportRuns/${scheduleId}`).push();
+      const dateLabel = periodStart === periodEnd ? periodEnd : `${periodStart} to ${periodEnd}`;
+
+      try {
+        const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
+        const ai = makeAI(aiSettingsSnap.val() || {});
+        const customPrompts = await getCustomPrompts();
+
+        let sources = (await db.ref(`countries/${schedule.countryKey}/setup/sources`).once('value')).val() || [];
+        sources = sources.filter(s => (schedule.sourceIds || []).includes(s.id));
+
+        const summaryLen = `~${Math.min(Math.max(schedule.summaryWords || 100, 30), 300)}-word summary`;
+        let totalInputTokens = 0, totalOutputTokens = 0;
+        const results = {};
+
+        await Promise.all(sources.map(async (source) => {
+          const articles = await readArchivedArticles(schedule.countryKey, source.id, dayKeys);
+          const { text, usage, relevantIndices, topicKeywordMatches } = await analyzeArticlesForTopics({
+            ai, source, articles, topics: schedule.topics, country: schedule.country, dateLabel, summaryLen, customPrompts
+          });
+          totalInputTokens  += usage?.input_tokens  || 0;
+          totalOutputTokens += usage?.output_tokens || 0;
+          const analysis = finalizeAnalysis(text, relevantIndices, topicKeywordMatches, dateLabel);
+          results[source.id] = { source, articleCount: articles.length, analysis };
+        }));
+
+        const costUsd = calcCostUsd(ai, totalInputTokens, totalOutputTokens);
+        await persistCost(schedule.createdBy, schedule.createdByEmail, ai, costUsd);
+
+        await runRef.set({
+          scheduleId, generatedAt: now.toISOString(), periodStart, periodEnd, dateLabel,
+          results, costUsd, inputTokens: totalInputTokens, outputTokens: totalOutputTokens,
+          provider: ai.type, model: ai.model, status: 'ok'
+        });
+        await db.ref(`schedules/${scheduleId}`).update({ lastRunAt: now.toISOString(), lastRunStatus: 'ok', lastPeriodEnd: periodEnd });
+      } catch (e) {
+        // Deliberately does NOT set lastPeriodEnd on failure, so the next
+        // hourly tick retries this same period instead of silently skipping it.
+        await runRef.set({ scheduleId, generatedAt: now.toISOString(), periodStart, periodEnd, dateLabel, status: 'error', error: e.message });
+        await db.ref(`schedules/${scheduleId}`).update({ lastRunAt: now.toISOString(), lastRunStatus: 'error' });
+      }
+    }
+  }
+);
+
+// ─── Schedule management (admin-only, mirrors other admin-gated writes) ──────
+exports.createSchedule = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    const { country, countryKey, sourceIds, topics, frequency, startDay, hourUtc, summaryWords, maxArticles } = request.data || {};
+    if (!country || !countryKey || !sourceIds?.length || !topics?.length) {
+      throw new HttpsError('invalid-argument', 'country, countryKey, sourceIds, and topics required');
+    }
+    if (!['daily', 'weekly'].includes(frequency)) throw new HttpsError('invalid-argument', 'frequency must be daily or weekly');
+    if (frequency === 'weekly' && !WEEKDAYS.includes(startDay)) throw new HttpsError('invalid-argument', 'valid startDay required for weekly frequency');
+    const hour = Math.min(Math.max(parseInt(hourUtc) || 0, 0), 23);
+
+    const ref = db.ref('schedules').push();
+    const schedule = {
+      id: ref.key, country, countryKey, sourceIds, topics, frequency,
+      startDay: frequency === 'weekly' ? startDay : null,
+      hourUtc: hour,
+      summaryWords: summaryWords || 100, maxArticles: maxArticles || 25,
+      enabled: true,
+      createdBy: request.auth.uid, createdByEmail: request.auth.token.email || null,
+      createdAt: new Date().toISOString(),
+      lastRunAt: null, lastRunStatus: null, lastPeriodEnd: null
+    };
+    await ref.set(schedule);
+    return { schedule };
+  }
+);
+
+exports.updateSchedule = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    const { scheduleId, ...updates } = request.data || {};
+    if (!scheduleId) throw new HttpsError('invalid-argument', 'scheduleId required');
+    const allowed = ['sourceIds', 'topics', 'frequency', 'startDay', 'hourUtc', 'summaryWords', 'maxArticles', 'enabled'];
+    const patch = {};
+    for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
+    if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');
+    await db.ref(`schedules/${scheduleId}`).update(patch);
+    return { ok: true };
+  }
+);
+
+exports.deleteSchedule = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    const { scheduleId } = request.data || {};
+    if (!scheduleId) throw new HttpsError('invalid-argument', 'scheduleId required');
+    // Only clears this schedule's own config + report history — the shared
+    // article archive for its sources stays, since other schedules may
+    // still be reading from it.
+    await Promise.all([
+      db.ref(`schedules/${scheduleId}`).remove(),
+      db.ref(`reportRuns/${scheduleId}`).remove(),
+    ]);
+    return { ok: true };
+  }
+);
+
+exports.listSchedules = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    const snap = await db.ref('schedules').once('value');
+    const schedules = Object.values(snap.val() || {});
+    schedules.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    return { schedules };
+  }
+);
+
+exports.listReportRuns = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    const { scheduleId } = request.data || {};
+    if (!scheduleId) throw new HttpsError('invalid-argument', 'scheduleId required');
+    const snap = await db.ref(`reportRuns/${scheduleId}`).once('value');
+    const val = snap.val() || {};
+    // Metadata only — not the full per-source analysis payload, so browsing
+    // history for a schedule with many runs stays lightweight.
+    const runs = Object.entries(val).map(([runId, r]) => ({
+      runId, generatedAt: r.generatedAt, periodStart: r.periodStart, periodEnd: r.periodEnd,
+      dateLabel: r.dateLabel, costUsd: r.costUsd || 0, status: r.status, error: r.error || null,
+      sourceCount: r.results ? Object.keys(r.results).length : 0
+    }));
+    runs.sort((a, b) => (b.generatedAt || '').localeCompare(a.generatedAt || ''));
+    return { runs };
+  }
+);
+
+exports.getReportRun = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    const { scheduleId, runId } = request.data || {};
+    if (!scheduleId || !runId) throw new HttpsError('invalid-argument', 'scheduleId and runId required');
+    const snap = await db.ref(`reportRuns/${scheduleId}/${runId}`).once('value');
+    const run = snap.val();
+    if (!run) throw new HttpsError('not-found', 'Report run not found');
+    return { run };
+  }
+);
+
+// Rough per-run / per-month cost projection shown before a schedule is
+// turned on, based on typical article/token volume — not a specific run's
+// real usage. Actual per-run cost is recorded once the schedule starts
+// executing (see reportRuns / listReportRuns).
+exports.estimateScheduleCost = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    const { sourceIds, topics, summaryWords, frequency } = request.data || {};
+    if (!sourceIds?.length || !topics?.length) throw new HttpsError('invalid-argument', 'sourceIds and topics required');
+
+    const ai = makeAI(request.data);
+    const words = Math.min(Math.max(summaryWords || 100, 30), 300);
+
+    // Heuristic: assume ~3 relevant articles matched per source at ~120
+    // words each, plus fixed prompt scaffolding, for input; output scales
+    // with topics selected and requested summary length.
+    const inputTokensPerSource = 300 + Math.round((3 * 120) * 1.3);
+    const outputTokensPerSource = Math.round(topics.length * (words * 1.3 + 60));
+    const perRunInputTokens = inputTokensPerSource * sourceIds.length;
+    const perRunOutputTokens = outputTokensPerSource * sourceIds.length;
+    const perRunUsd = calcCostUsd(ai, perRunInputTokens, perRunOutputTokens);
+    const runsPerMonth = frequency === 'weekly' ? 4.35 : 30;
+
+    return {
+      perRunUsd, monthlyUsd: perRunUsd * runsPerMonth,
+      provider: ai.type, model: ai.model, basis: 'heuristic'
+    };
   }
 );

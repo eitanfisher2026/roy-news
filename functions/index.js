@@ -799,9 +799,16 @@ exports.fetchNews = onCall(
         return { source, articles, rssError, usage: null, text: precomputed, relevantIndices, topicKeywordMatches, usedGoogleNews };
       }
 
-      const articlesText = articles.map((a, i) => `${i + 1}. ${a.title}\n${a.text}`).join('\n\n');
+      // Only send the AI the articles that actually matched a topic — not
+      // every date-matched article. A high-volume outlet can have 40+ items
+      // from the requested date with only 2 about the selected topics; paying
+      // to put all 40 in the prompt bought nothing since the other 38 were
+      // never going to be quoted or summarized anyway.
+      const relevantArticles = relevantIndices.map(i => articles[i - 1]);
+      const origToLocal = new Map(relevantIndices.map((origIdx, localIdx) => [origIdx, localIdx + 1]));
+      const articlesText = relevantArticles.map((a, i) => `${i + 1}. ${a.title}\n${a.text}`).join('\n\n');
       const topicMatchesText = topics.map(t => {
-        const idx = topicKeywordMatches[t];
+        const idx = topicKeywordMatches[t].map(origIdx => origToLocal.get(origIdx));
         return `- ${t}: ${idx.length > 0 ? idx.map(i => `article ${i}`).join(', ') : 'none'}`;
       }).join('\n');
 

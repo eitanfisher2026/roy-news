@@ -472,14 +472,27 @@ function deriveGoogleNewsUrl(source, countryKey, topics = []) {
   return `https://news.google.com/rss/search?${qs}`;
 }
 
-// Exact calendar-day match (UTC) between an RSS pubDate and the requested
+// Exact calendar-day match between an RSS pubDate and the requested
 // "YYYY-MM-DD" date — the user wants only articles from that date, not a
 // rolling window of "whatever's most recent in the feed".
+//
+// Must compare against the calendar day the *publisher* stamped on the
+// article (their local timezone), not the UTC day. A straight
+// `new Date(articleDate).toISOString()` normalizes to UTC first, which
+// silently reclassifies any article published in the early local morning
+// (e.g. 06:00 +0700 in Bangkok) as the *previous* UTC day — so every
+// early-morning article from a non-UTC outlet was being filtered out as
+// "not from the requested date" even though the outlet itself dated it today.
 function matchesExactDate(articleDate, requestedDate) {
   if (!requestedDate || !articleDate) return false;
   const d = new Date(articleDate);
   if (isNaN(d)) return false;
-  return d.toISOString().slice(0, 10) === requestedDate;
+  const offsetMatch = articleDate.match(/([+-])(\d{2}):?(\d{2})\s*$/);
+  const offsetMinutes = offsetMatch
+    ? (offsetMatch[1] === '-' ? -1 : 1) * (parseInt(offsetMatch[2], 10) * 60 + parseInt(offsetMatch[3], 10))
+    : 0;
+  const publisherLocal = new Date(d.getTime() + offsetMinutes * 60000);
+  return publisherLocal.toISOString().slice(0, 10) === requestedDate;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

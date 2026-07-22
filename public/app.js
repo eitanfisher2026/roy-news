@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.79';
+const VERSION = 'v1.80';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1306,6 +1306,11 @@ function ConfigStep({ country, user, onGo, onBack }) {
                 <input type="date" value={date} max={todayStr()} onChange={e => setDate(e.target.value)} className="input-field" style={{ width: 'auto', fontSize: 14 }} />
                 {date === todayStr() && <span style={{ color: C.faint, fontSize: 12 }}>Today</span>}
               </div>
+              {date === todayStr() && (
+                <div style={{ marginTop: 8, fontSize: 12, color: '#fb923c', lineHeight: 1.4, maxWidth: 420 }}>
+                  ⚠ Today's coverage is often incomplete: each outlet's live feed only shows its most recent items, and Google's news index typically takes about a day to catch up. For reliable results, pick yesterday or earlier — today's results will fill in better once you re-check tomorrow.
+                </div>
+              )}
             </div>
 
             <button onClick={() => onGo({ mode: 'pointintime', topics: [...selectedTopics], date, summaryWords, maxArticles })}

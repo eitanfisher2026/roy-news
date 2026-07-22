@@ -688,6 +688,96 @@ If this outlet does not exist in ${country} or you are not confident it exists, 
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Shared per-source topic analysis — used by both the live fetchNews call and
+// the scheduled report generator, so the "only pay for what's relevant" and
+// keyword-override logic exists in exactly one place.
+// ─────────────────────────────────────────────────────────────────────────────
+function computeTopicKeywordMatches(articles, topics) {
+  const topicKeywordMatches = {};
+  for (const topic of topics) {
+    const kw = topic.toLowerCase();
+    topicKeywordMatches[topic] = articles.reduce((acc, a, i) => {
+      if ((a.title + ' ' + (a.text || '')).toLowerCase().includes(kw)) acc.push(i + 1);
+      return acc;
+    }, []);
+  }
+  return topicKeywordMatches;
+}
+
+function relevantIndicesFromMatches(topicKeywordMatches) {
+  return [...new Set(Object.values(topicKeywordMatches).flat())].sort((a, b) => a - b);
+}
+
+function notCoveredAnalysis(topics, dateLabel) {
+  return {
+    topicAnalyses: topics.map(t => ({
+      topic: t, covered: false,
+      summary: `No articles about this topic were published in this outlet on ${dateLabel}.`,
+      tone: 'neutral', narrative: null, quotes: []
+    })),
+    overallTone: 'neutral', keyStories: [], relevantArticleIndices: []
+  };
+}
+
+// Given articles already fetched/date-filtered by the caller, matches them
+// against topics and (only if something matched) calls the AI with just the
+// relevant articles — not the full set — since unrelated same-day articles
+// cost tokens without ever being quoted or summarized.
+async function analyzeArticlesForTopics({ ai, source, articles, topics, country, dateLabel, summaryLen, customPrompts }) {
+  if (articles.length === 0) {
+    return { text: JSON.stringify(notCoveredAnalysis(topics, dateLabel)), usage: null, relevantIndices: [], topicKeywordMatches: {} };
+  }
+
+  const topicKeywordMatches = computeTopicKeywordMatches(articles, topics);
+  const relevantIndices = relevantIndicesFromMatches(topicKeywordMatches);
+
+  if (relevantIndices.length === 0) {
+    return { text: JSON.stringify(notCoveredAnalysis(topics, dateLabel)), usage: null, relevantIndices, topicKeywordMatches };
+  }
+
+  const relevantArticles = relevantIndices.map(i => articles[i - 1]);
+  const origToLocal = new Map(relevantIndices.map((origIdx, localIdx) => [origIdx, localIdx + 1]));
+  const articlesText = relevantArticles.map((a, i) => `${i + 1}. ${a.title}\n${a.text}`).join('\n\n');
+  const topicMatchesText = topics.map(t => {
+    const idx = topicKeywordMatches[t].map(origIdx => origToLocal.get(origIdx));
+    return `- ${t}: ${idx.length > 0 ? idx.map(i => `article ${i}`).join(', ') : 'none'}`;
+  }).join('\n');
+
+  const prompt = fillPrompt(customPrompts.analysis || DEFAULT_PROMPTS.analysis, {
+    sourceName: source.name, sourceLean: source.lean, country,
+    leanDescription: source.leanDescription, date: dateLabel, topicList: topics.join(', '),
+    articlesText, topicMatchesText, lang: 'English', summaryLen
+  });
+
+  const { text, usage } = await callAI(ai, prompt, 3000);
+  return { text, usage, relevantIndices, topicKeywordMatches };
+}
+
+// Applies the AI's parsed analysis + the server-side keyword override that
+// makes covered/not-covered authoritative regardless of what the prompt says.
+function finalizeAnalysis(rawText, relevantIndices, topicKeywordMatches, dateLabel) {
+  let analysis = null;
+  if (rawText) {
+    try { analysis = extractJson(rawText, '{'); }
+    catch { analysis = { error: 'parse_error', raw: rawText.slice(0, 500) }; }
+  }
+  if (analysis && relevantIndices !== undefined) {
+    analysis.relevantArticleIndices = relevantIndices;
+    if (Array.isArray(analysis.topicAnalyses) && topicKeywordMatches) {
+      analysis.topicAnalyses = analysis.topicAnalyses.map(ta => {
+        const key = Object.keys(topicKeywordMatches).find(t => t.toLowerCase() === (ta.topic || '').toLowerCase());
+        if (!key) return ta;
+        const hasMatch = topicKeywordMatches[key].length > 0;
+        if (hasMatch && !ta.covered) return { ...ta, covered: true };
+        if (!hasMatch && ta.covered) return { ...ta, covered: false, summary: `No articles about this topic were published in this outlet on ${dateLabel}.`, narrative: null, quotes: [], tone: 'neutral' };
+        return ta;
+      });
+    }
+  }
+  return analysis;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AGENT 2: Fetch News
 // ─────────────────────────────────────────────────────────────────────────────
 exports.fetchNews = onCall(
@@ -702,8 +792,6 @@ exports.fetchNews = onCall(
     if (!country || !selectedSources?.length) throw new HttpsError('invalid-argument', 'country and sources required');
 
     const ai = makeAI(request.data);
-    const lang = 'English';
-    const topicList = topics.join(', ');
     const dateLabel = dateRangeLabel(date, lookbackDays);
     const allResults = {};
     let totalInputTokens = 0;
@@ -748,78 +836,24 @@ exports.fetchNews = onCall(
         return { source, articles, rssError, usage: null, text: null, usedGoogleNews };
       }
 
-      // Keyword matching — determine which articles mention each topic
-      const topicKeywordMatches = {};
-      for (const topic of topics) {
-        const kw = topic.toLowerCase();
-        topicKeywordMatches[topic] = articles.reduce((acc, a, i) => {
-          if ((a.title + ' ' + (a.text || '')).toLowerCase().includes(kw)) acc.push(i + 1);
-          return acc;
-        }, []);
-      }
-      let relevantIndices = [...new Set(Object.values(topicKeywordMatches).flat())].sort((a, b) => a - b);
-
-      // Step 3: had exact-date articles but none matched any topic — try
-      // Google News for this source+topic, same large-pool-then-filter approach
-      if (relevantIndices.length === 0 && !usedGoogleNews) {
+      // Step 3: had date-matched articles but none matched any topic yet —
+      // try Google News for this source+topic before giving up on it
+      const preMatches = computeTopicKeywordMatches(articles, topics);
+      if (relevantIndicesFromMatches(preMatches).length === 0 && !usedGoogleNews) {
         const googleUrl = deriveGoogleNewsUrl(source, countryKey, topics);
         if (googleUrl) {
           try {
             const googleArticles = await fetchRssWithRetry(googleUrl, GOOGLE_NEWS_FETCH_POOL);
             const dated = googleArticles.filter(a => matchesDateRange(a.date, date, lookbackDays)).slice(0, articleLimit);
-            if (dated.length > 0) {
-              articles = dated;
-              rssError = null;
-              usedGoogleNews = true;
-              for (const topic of topics) {
-                const kw = topic.toLowerCase();
-                topicKeywordMatches[topic] = articles.reduce((acc, a, i) => {
-                  if ((a.title + ' ' + (a.text || '')).toLowerCase().includes(kw)) acc.push(i + 1);
-                  return acc;
-                }, []);
-              }
-              relevantIndices = [...new Set(Object.values(topicKeywordMatches).flat())].sort((a, b) => a - b);
-            }
+            if (dated.length > 0) { articles = dated; rssError = null; usedGoogleNews = true; }
           } catch {}
         }
       }
 
-      // If no topic keyword found in any article, skip AI entirely
-      if (relevantIndices.length === 0) {
-        const precomputed = JSON.stringify({
-          topicAnalyses: topics.map(t => ({
-            topic: t, covered: false,
-            summary: `No articles about this topic were published in this outlet on ${dateLabel}.`,
-            tone: 'neutral', narrative: null, quotes: []
-          })),
-          overallTone: 'neutral',
-          keyStories: [],
-          relevantArticleIndices: []
-        });
-        return { source, articles, rssError, usage: null, text: precomputed, relevantIndices, topicKeywordMatches, usedGoogleNews };
-      }
-
-      // Only send the AI the articles that actually matched a topic — not
-      // every date-matched article. A high-volume outlet can have 40+ items
-      // from the requested date with only 2 about the selected topics; paying
-      // to put all 40 in the prompt bought nothing since the other 38 were
-      // never going to be quoted or summarized anyway.
-      const relevantArticles = relevantIndices.map(i => articles[i - 1]);
-      const origToLocal = new Map(relevantIndices.map((origIdx, localIdx) => [origIdx, localIdx + 1]));
-      const articlesText = relevantArticles.map((a, i) => `${i + 1}. ${a.title}\n${a.text}`).join('\n\n');
-      const topicMatchesText = topics.map(t => {
-        const idx = topicKeywordMatches[t].map(origIdx => origToLocal.get(origIdx));
-        return `- ${t}: ${idx.length > 0 ? idx.map(i => `article ${i}`).join(', ') : 'none'}`;
-      }).join('\n');
-
-      const prompt = fillPrompt(customPrompts.analysis || DEFAULT_PROMPTS.analysis, {
-        sourceName: source.name, sourceLean: source.lean, country,
-        leanDescription: source.leanDescription, date: dateLabel, topicList,
-        articlesText, topicMatchesText, lang, summaryLen
-      });
-
       try {
-        const { text, usage } = await callAI(ai, prompt, 3000);
+        const { text, usage, relevantIndices, topicKeywordMatches } = await analyzeArticlesForTopics({
+          ai, source, articles, topics, country, dateLabel, summaryLen, customPrompts
+        });
         return { source, articles, rssError, usage, text, relevantIndices, topicKeywordMatches, usedGoogleNews };
       } catch (e) {
         return { source, articles: [], rssError, error: e.message, usedGoogleNews };
@@ -832,25 +866,7 @@ exports.fetchNews = onCall(
       } else {
         totalInputTokens  += r.usage?.input_tokens  || 0;
         totalOutputTokens += r.usage?.output_tokens || 0;
-        let analysis = null;
-        if (r.text) {
-          try { analysis = extractJson(r.text, '{'); }
-          catch { analysis = { error: 'parse_error', raw: r.text.slice(0, 500) }; }
-        }
-        if (analysis && r.relevantIndices !== undefined) {
-          analysis.relevantArticleIndices = r.relevantIndices;
-          // Override covered/not-covered based on server-side keyword match — authoritative regardless of prompt
-          if (Array.isArray(analysis.topicAnalyses) && r.topicKeywordMatches) {
-            analysis.topicAnalyses = analysis.topicAnalyses.map(ta => {
-              const key = Object.keys(r.topicKeywordMatches).find(t => t.toLowerCase() === (ta.topic || '').toLowerCase());
-              if (!key) return ta;
-              const hasMatch = r.topicKeywordMatches[key].length > 0;
-              if (hasMatch && !ta.covered) return { ...ta, covered: true };
-              if (!hasMatch && ta.covered) return { ...ta, covered: false, summary: `No articles about this topic were published in this outlet on ${dateLabel}.`, narrative: null, quotes: [], tone: 'neutral' };
-              return ta;
-            });
-          }
-        }
+        const analysis = finalizeAnalysis(r.text, r.relevantIndices, r.topicKeywordMatches, dateLabel);
         allResults[r.source.id] = { source: r.source, articles: r.articles, analysis, fetchedAt: new Date().toISOString(), rssError: r.rssError, usedGoogleNews: r.usedGoogleNews || false };
       }
     }

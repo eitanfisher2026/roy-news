@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.82';
+const VERSION = 'v1.83';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1226,6 +1226,8 @@ function ConfigStep({ country, user, onGo, onBack }) {
 
   const [customInput, setCustomInput] = useState('');
   const [date, setDate]               = useState(todayStr());
+  const [showTopicHelp, setShowTopicHelp] = useState(false);
+  const [showDateInfo, setShowDateInfo]   = useState(false);
 
   // Load topic list from Firebase on mount; if none saved yet, keeps localStorage-seeded defaults
   useEffect(() => {
@@ -1282,10 +1284,19 @@ function ConfigStep({ country, user, onGo, onBack }) {
   const isPeriod = mode === 'period';
 
   function WordsStepper({ label, sublabel, value, onChange, min = 30, max = 500, step = 25, unit = 'words' }) {
+    const [showInfo, setShowInfo] = useState(false);
     return (
       <div style={{ padding: '10px 14px', background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginBottom: 16 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 2 }}>{label}</div>
-        <div style={{ fontSize: 11, color: C.faint, marginBottom: 10 }}>{sublabel}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: showInfo ? 4 : 10 }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{label}</span>
+          {sublabel && (
+            <button onClick={() => setShowInfo(s => !s)} title="What does this do?"
+              style={{ background: 'none', border: 'none', color: showInfo ? '#60a5fa' : C.faint, cursor: 'pointer', fontSize: 14, padding: 0, lineHeight: 1 }}>ℹ️</button>
+          )}
+        </div>
+        {showInfo && sublabel && (
+          <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>{sublabel}</div>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <button onClick={() => onChange(Math.max(min, value - step))}
             style={{ width: 44, height: 44, borderRadius: '50%', border: '1px solid ' + C.borderLight, background: C.card, color: C.text, fontSize: 24, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>−</button>
@@ -1333,11 +1344,19 @@ function ConfigStep({ country, user, onGo, onBack }) {
         </div>
 
         {/* Topic naming guide */}
-        <div style={{ fontSize: 11, color: C.faint, marginBottom: 20, lineHeight: 1.8, padding: '8px 12px', background: C.card, borderRadius: 7, border: '1px solid ' + C.border }}>
-          <strong style={{ color: C.muted }}>How to name topics:</strong><br/>
-          <span style={{ color: '#60a5fa' }}>Economy</span> — single word, finds any article about economy<br/>
-          <span style={{ color: '#60a5fa' }}>Red card</span> — phrase, finds articles containing "red card" together<br/>
-          <span style={{ color: '#60a5fa' }}>Mundial &amp; red card</span> — both must appear in the article, not necessarily together
+        <div style={{ marginBottom: 20 }}>
+          <button onClick={() => setShowTopicHelp(s => !s)}
+            style={{ background: 'none', border: 'none', color: showTopicHelp ? '#60a5fa' : C.faint, cursor: 'pointer', fontSize: 12, padding: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span>ℹ️</span><span>How to name topics</span>
+          </button>
+          {showTopicHelp && (
+            <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.8, padding: '8px 12px', background: C.card, borderRadius: 7, border: '1px solid ' + C.border }}>
+              <span style={{ color: '#60a5fa' }}>Economy</span> — single word, finds any article about economy<br/>
+              <span style={{ color: '#60a5fa' }}>Red card</span> — phrase, finds articles containing "red card" together<br/>
+              <span style={{ color: '#60a5fa' }}>Mundial &amp; red card</span> — both must appear in the article, not necessarily together
+              {!isPeriod && <><br/><br/>In Point in Time mode, topics filter which articles the AI reads.</>}
+            </div>
+          )}
         </div>
 
         {/* Mode toggle */}
@@ -1353,9 +1372,6 @@ function ConfigStep({ country, user, onGo, onBack }) {
         {/* Point-in-time mode */}
         {!isPeriod && (
           <>
-            <div style={{ fontSize: 11, color: C.faint, marginBottom: 16, lineHeight: 1.6, padding: '7px 12px', background: C.card, borderRadius: 7, border: '1px solid ' + C.border }}>
-              ℹ In Point in Time mode, topics filter which articles the AI reads — single words (<em>Iran</em>), phrases (<em>red card</em>), or combined with &amp; (<em>Mundial &amp; red card</em>) all work.
-            </div>
             <WordsStepper
               label="Summary Length per Topic"
               sublabel="Words the AI writes per topic per source"
@@ -1377,11 +1393,17 @@ function ConfigStep({ country, user, onGo, onBack }) {
               <label style={{ display: 'block', fontSize: 12, color: C.faint, marginBottom: 6, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>Date</label>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <input type="date" value={date} max={todayStr()} onChange={e => setDate(e.target.value)} className="input-field" style={{ width: 'auto', fontSize: 14 }} />
-                {date === todayStr() && <span style={{ color: C.faint, fontSize: 12 }}>Today</span>}
+                {date === todayStr() && (
+                  <>
+                    <span style={{ color: C.faint, fontSize: 12 }}>Today</span>
+                    <button onClick={() => setShowDateInfo(s => !s)} title="Why might today be incomplete?"
+                      style={{ background: 'none', border: 'none', color: showDateInfo ? '#60a5fa' : '#fb923c', cursor: 'pointer', fontSize: 14, padding: 0, lineHeight: 1 }}>⚠ ℹ️</button>
+                  </>
+                )}
               </div>
-              {date === todayStr() && (
+              {date === todayStr() && showDateInfo && (
                 <div style={{ marginTop: 8, fontSize: 12, color: '#fb923c', lineHeight: 1.4, maxWidth: 420 }}>
-                  ⚠ Today's coverage is often incomplete: each outlet's live feed only shows its most recent items, and Google's news index typically takes about a day to catch up.{lookbackDays > 0 ? ` "Days to look back" below is set to ${lookbackDays}, so this search also includes ${lookbackDays === 1 ? 'yesterday' : `the past ${lookbackDays} days`} to help fill in what today alone would miss.` : ' Set "Days to look back" below to 1 or more to also pick up yesterday\'s coverage.'}
+                  Today's coverage is often incomplete: each outlet's live feed only shows its most recent items, and Google's news index typically takes about a day to catch up.{lookbackDays > 0 ? ` "Days to look back" below is set to ${lookbackDays}, so this search also includes ${lookbackDays === 1 ? 'yesterday' : `the past ${lookbackDays} days`} to help fill in what today alone would miss.` : ' Set "Days to look back" below to 1 or more to also pick up yesterday\'s coverage.'}
                 </div>
               )}
             </div>

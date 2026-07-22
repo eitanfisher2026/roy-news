@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.81';
+const VERSION = 'v1.82';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -84,6 +84,16 @@ function formatDisplayDate(dateStr) {
 function formatLastLogin(ts) {
   if (!ts) return 'Never logged in';
   return 'Last logged in: ' + new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+// A feed's item count alone doesn't say much — pairing it with the time
+// span those items cover shows whether "10 items" means "the last 3 hours"
+// (scrolls fast, small window) or "the last 3 days" (much more headroom).
+function formatFeedStats(stats) {
+  if (!stats || typeof stats.itemCount !== 'number') return null;
+  const countLabel = `${stats.itemCount} item${stats.itemCount !== 1 ? 's' : ''}`;
+  if (stats.spanHours == null) return countLabel;
+  const spanLabel = stats.spanHours < 48 ? `~${stats.spanHours}h` : `~${Math.round(stats.spanHours / 24)}d`;
+  return `${countLabel} · spans ${spanLabel}`;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -527,6 +537,10 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
   // Fix URL
   const [fixingSourceId, setFixingSourceId] = useState(null);
 
+  // Feed stats (item count / time span) — checked without an AI call
+  const [checkingStatsId, setCheckingStatsId] = useState(null);
+  const [checkingAllStats, setCheckingAllStats] = useState(false);
+
   // Sources added in the most recent add/find action — shown at the top of
   // the list with a temporary dashed marker until the next add or reload.
   const [newlyAddedIds, setNewlyAddedIds] = useState(new Set());
@@ -567,7 +581,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
     catch { return {}; }
   })();
 
-  const isBusy = refreshing || adding || finding || !!fixingSourceId;
+  const isBusy = refreshing || adding || finding || !!fixingSourceId || !!checkingStatsId || checkingAllStats;
 
   async function handleFind() {
     const q = findQuery.trim();
@@ -654,12 +668,51 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
       const fn = fns.httpsCallable('fixSourceUrl', { timeout: 60000 });
       const result = await fn({ country: country.name, countryKey: country.key, sourceName: src.name, ...await getAISettings(uid) });
       const newUrl = result.data.rssUrl || null;
-      onSourcesChange(sources.map(s => s.id === src.id ? { ...s, rssUrl: newUrl } : s));
+      onSourcesChange(sources.map(s => s.id === src.id ? { ...s, rssUrl: newUrl, feedStats: newUrl ? result.data.feedStats : null } : s));
       if (!newUrl) alert(`Could not find a working RSS feed for ${src.name}. The feed link has been cleared.`);
     } catch (e) {
       alert('Fix failed: ' + e.message);
     }
     setFixingSourceId(null);
+  }
+
+  // No AI call — just re-fetches an already-known rssUrl to report its
+  // current item count / time span. Used for sources added before this
+  // feature existed, or to spot-check whether a feed's cadence has changed.
+  async function handleCheckStats(src) {
+    if (!src.rssUrl) return;
+    setCheckingStatsId(src.id);
+    try {
+      const fn = fns.httpsCallable('checkFeedStats', { timeout: 30000 });
+      const result = await fn({ countryKey: country.key, sourceId: src.id, rssUrl: src.rssUrl });
+      if (result.data.valid) {
+        onSourcesChange(sources.map(s => s.id === src.id ? { ...s, feedStats: result.data.feedStats } : s));
+      } else {
+        alert(`Could not reach ${src.name}'s feed just now — try again, or use ⚙ Fix if this keeps happening.`);
+      }
+    } catch (e) {
+      alert('Stats check failed: ' + e.message);
+    }
+    setCheckingStatsId(null);
+  }
+
+  async function handleCheckAllStats() {
+    const withFeed = sources.filter(s => s.rssUrl);
+    if (withFeed.length === 0) return;
+    setCheckingAllStats(true);
+    try {
+      const fn = fns.httpsCallable('checkFeedStats', { timeout: 30000 });
+      const results = await Promise.all(withFeed.map(s =>
+        fn({ countryKey: country.key, sourceId: s.id, rssUrl: s.rssUrl }).then(r => ({ id: s.id, ...r.data })).catch(() => ({ id: s.id, valid: false }))
+      ));
+      const byId = Object.fromEntries(results.map(r => [r.id, r]));
+      onSourcesChange(sources.map(s => byId[s.id]?.valid ? { ...s, feedStats: byId[s.id].feedStats } : s));
+      const failedCount = results.filter(r => !r.valid).length;
+      if (failedCount > 0) alert(`${failedCount} of ${withFeed.length} feeds couldn't be reached just now — their stats were left unchanged.`);
+    } catch (e) {
+      alert('Refresh stats failed: ' + e.message);
+    }
+    setCheckingAllStats(false);
   }
 
   async function handleRemoveSource(id) {
@@ -821,15 +874,23 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
         </div>
       )}
 
-      {/* Sort control */}
-      {sources.length > 1 && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-          <span style={{ color: C.faint, fontSize: 12 }}>Sort by</span>
-          <select value={sortBy} onChange={e => changeSortBy(e.target.value)} className="input-field" style={{ fontSize: 12, padding: '4px 10px', width: 'auto' }}>
-            <option value="default">Default</option>
-            <option value="name">Name</option>
-            <option value="lean">Orientation</option>
-          </select>
+      {/* Sort control + bulk feed-stats refresh */}
+      {sources.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+          {sources.length > 1 && (
+            <>
+              <span style={{ color: C.faint, fontSize: 12 }}>Sort by</span>
+              <select value={sortBy} onChange={e => changeSortBy(e.target.value)} className="input-field" style={{ fontSize: 12, padding: '4px 10px', width: 'auto' }}>
+                <option value="default">Default</option>
+                <option value="name">Name</option>
+                <option value="lean">Orientation</option>
+              </select>
+            </>
+          )}
+          <button onClick={handleCheckAllStats} disabled={isBusy || checkingAllStats || sources.filter(s => s.rssUrl).length === 0}
+            style={{ ...SMALL_BTN, marginLeft: 'auto' }}>
+            {checkingAllStats ? <><Spinner size={10} />&nbsp;Checking feeds…</> : '🔄 Refresh Feed Stats'}
+          </button>
         </div>
       )}
 
@@ -869,6 +930,11 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
                         ? <span style={{ fontSize: 11, color: '#ef4444' }}>⚠ failed</span>
                         : <span style={{ fontSize: 11, color: C.faint }}>⬤ URL stored</span>
                   }
+                  {src.rssUrl && formatFeedStats(src.feedStats) && (
+                    <span style={{ fontSize: 11, color: C.faint, whiteSpace: 'nowrap' }} title="Items currently in this feed, and the time span they cover">
+                      · {formatFeedStats(src.feedStats)}
+                    </span>
+                  )}
                   <button onClick={e => { e.stopPropagation(); toggleExpand(src.id); }}
                     style={{ background: 'none', border: 'none', color: expanded.has(src.id) ? '#60a5fa' : C.faint, cursor: 'pointer', fontSize: 16, padding: '0 2px', lineHeight: 1, flexShrink: 0 }}>ℹ️</button>
                 </div>
@@ -880,6 +946,12 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
                 )}
               </div>
               <div style={{ display: 'flex', gap: 5, flexShrink: 0, alignItems: 'flex-start' }} onClick={e => e.stopPropagation()}>
+                {src.rssUrl && (
+                  <button onClick={() => handleCheckStats(src)} disabled={isBusy || checkingStatsId === src.id}
+                    title="Re-check this feed's item count and time span" style={{ ...SMALL_BTN, fontSize: 11 }}>
+                    {checkingStatsId === src.id ? <><Spinner size={10} />&nbsp;Checking…</> : '🔄 Stats'}
+                  </button>
+                )}
                 <button onClick={() => handleFixSource(src)} disabled={isBusy}
                   style={{ ...SMALL_BTN, fontSize: 11 }}>
                   {fixingSourceId === src.id ? <><Spinner size={10} />&nbsp;Fixing…</> : '⚙ Fix'}

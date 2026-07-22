@@ -408,7 +408,14 @@ async function fetchRss(url, limit = 25) {
     .slice(0, limit);
 }
 
-async function validateRssUrl(url) {
+// Fetches a candidate RSS/Atom feed once and reports back both whether it's
+// usable and what it actually looks like day-to-day: how many items it
+// currently holds (its "queue depth") and the time span those items cover
+// (oldest to newest pubDate). A feed with 10 items spanning 4 hours behaves
+// very differently at query time than one with 10 items spanning 3 days —
+// this is what actually determines whether a source's own feed can be relied
+// on for a given lookback window, independent of the app's articleLimit.
+async function probeRssFeed(url) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 6000);
   try {
@@ -416,11 +423,17 @@ async function validateRssUrl(url) {
       signal: controller.signal,
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; RoyNewsBot/1.0; +https://roy-news.web.app)' }
     });
-    if (!res.ok) return false;
+    if (!res.ok) return { valid: false };
     const xml = await res.text();
-    await rssParser.parseString(xml);
-    return true;
-  } catch { return false; }
+    const feed = await rssParser.parseString(xml);
+    const itemCount = feed.items.length;
+    const dates = feed.items
+      .map(i => new Date(i.pubDate))
+      .filter(d => !isNaN(d))
+      .sort((a, b) => b - a);
+    const spanHours = dates.length >= 2 ? Math.round((dates[0] - dates[dates.length - 1]) / 3600000) : null;
+    return { valid: true, feedStats: { itemCount, spanHours, checkedAt: new Date().toISOString() } };
+  } catch { return { valid: false }; }
   finally { clearTimeout(timer); }
 }
 
@@ -535,11 +548,12 @@ exports.setupCountry = onCall(
       throw new HttpsError('internal', 'Failed to parse sources from AI: ' + e.message);
     }
 
-    // Validate RSS URLs in parallel — drop any that fail to load
-    const validations = await Promise.all(
-      sources.map(s => s.rssUrl ? validateRssUrl(s.rssUrl) : Promise.resolve(false))
+    // Validate RSS URLs in parallel — drop any that fail to load, and record
+    // each working feed's item count / time span for display in the UI
+    const probes = await Promise.all(
+      sources.map(s => s.rssUrl ? probeRssFeed(s.rssUrl) : Promise.resolve({ valid: false }))
     );
-    sources = sources.map((s, i) => validations[i] ? s : { ...s, rssUrl: null });
+    sources = sources.map((s, i) => probes[i].valid ? { ...s, feedStats: probes[i].feedStats } : { ...s, rssUrl: null });
     if (filterNoRSS) sources = sources.filter(s => s.rssUrl);
 
     const countryKey = countryToKey(country);
@@ -604,10 +618,10 @@ exports.addSources = onCall(
     sources = sources.filter(s => !existingLower.includes((s.name || '').trim().toLowerCase()));
     const duplicatesSkipped = aiReturnedCount - sources.length;
 
-    const validations = await Promise.all(
-      sources.map(s => s.rssUrl ? validateRssUrl(s.rssUrl) : Promise.resolve(false))
+    const probes = await Promise.all(
+      sources.map(s => s.rssUrl ? probeRssFeed(s.rssUrl) : Promise.resolve({ valid: false }))
     );
-    sources = sources.map((s, i) => validations[i] ? s : { ...s, rssUrl: null });
+    sources = sources.map((s, i) => probes[i].valid ? { ...s, feedStats: probes[i].feedStats } : { ...s, rssUrl: null });
     const beforeRssFilter = sources.length;
     if (filterNoRSS) sources = sources.filter(s => s.rssUrl);
     const rssFilteredCount = filterNoRSS ? beforeRssFilter - sources.length : 0;
@@ -660,8 +674,9 @@ If this outlet does not exist in ${country} or you are not confident it exists, 
         const parsed = extractJson(text, '{');
         if (parsed && parsed.id) {
           if (parsed.rssUrl) {
-            const valid = await validateRssUrl(parsed.rssUrl);
-            if (!valid) parsed.rssUrl = null;
+            const probe = await probeRssFeed(parsed.rssUrl);
+            if (!probe.valid) parsed.rssUrl = null;
+            else parsed.feedStats = probe.feedStats;
           }
           source = parsed;
         }
@@ -874,11 +889,12 @@ If you are not confident a working URL exists, return: { "rssUrl": null }`;
     const { text, usage } = await callAI(ai, prompt, 200);
     await recordCost(request, ai, usage?.input_tokens || 0, usage?.output_tokens || 0);
     let rssUrl = null;
+    let feedStats = null;
     try {
       const parsed = extractJson(text, '{');
       if (parsed.rssUrl) {
-        const valid = await validateRssUrl(parsed.rssUrl);
-        if (valid) rssUrl = parsed.rssUrl;
+        const probe = await probeRssFeed(parsed.rssUrl);
+        if (probe.valid) { rssUrl = parsed.rssUrl; feedStats = probe.feedStats; }
       }
     } catch {}
 
@@ -887,12 +903,41 @@ If you are not confident a working URL exists, return: { "rssUrl": null }`;
       const snap = await db.ref(`countries/${countryKey}/setup/sources`).once('value');
       const sources = snap.val();
       if (Array.isArray(sources)) {
-        const updated = sources.map(s => s.name === sourceName ? { ...s, rssUrl: rssUrl || null } : s);
+        const updated = sources.map(s => s.name === sourceName ? { ...s, rssUrl: rssUrl || null, feedStats: feedStats || null } : s);
         await db.ref(`countries/${countryKey}/setup/sources`).set(updated);
       }
     } catch {}
 
-    return { rssUrl };
+    return { rssUrl, feedStats };
+  }
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AGENT: Check Feed Stats (no AI call — just re-probes an existing rssUrl for
+// its current item count / time span, e.g. for sources added before this
+// feature existed, or to spot-check whether a feed's cadence has changed)
+// ─────────────────────────────────────────────────────────────────────────────
+exports.checkFeedStats = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { countryKey, sourceId, rssUrl } = request.data || {};
+    if (!countryKey || !sourceId || !rssUrl) throw new HttpsError('invalid-argument', 'countryKey, sourceId, and rssUrl required');
+
+    const probe = await probeRssFeed(rssUrl);
+    // Only persist on a successful probe — a single timed-out check shouldn't
+    // erase stats that were previously working fine.
+    if (probe.valid) {
+      try {
+        const snap = await db.ref(`countries/${countryKey}/setup/sources`).once('value');
+        const sources = snap.val();
+        if (Array.isArray(sources)) {
+          const updated = sources.map(s => s.id === sourceId ? { ...s, feedStats: probe.feedStats } : s);
+          await db.ref(`countries/${countryKey}/setup/sources`).set(updated);
+        }
+      } catch {}
+    }
+    return { valid: probe.valid, feedStats: probe.valid ? probe.feedStats : null };
   }
 );
 

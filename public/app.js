@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.80';
+const VERSION = 'v1.81';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1150,6 +1150,7 @@ function ConfigStep({ country, user, onGo, onBack }) {
   const [periodFrom, setPeriodFrom]             = useState(() => loadLocal('periodFrom', ''));
   const [periodTo, setPeriodTo]                 = useState(() => loadLocal('periodTo', todayStr()));
   const [periodReportWords, setPeriodReportWords] = useState(() => loadLocal('periodReportWords', 150));
+  const [lookbackDays, setLookbackDays]         = useState(() => loadLocal('lookbackDays', 1));
 
   const [customInput, setCustomInput] = useState('');
   const [date, setDate]               = useState(todayStr());
@@ -1177,11 +1178,11 @@ function ConfigStep({ country, user, onGo, onBack }) {
   useEffect(() => {
     if (topicsKey) {
       localStorage.setItem(topicsKey, JSON.stringify({
-        selected: [...selectedTopics], summaryWords, maxArticles,
+        selected: [...selectedTopics], summaryWords, maxArticles, lookbackDays,
         mode, periodType, periodDays, periodFrom, periodTo, periodReportWords
       }));
     }
-  }, [selectedTopics, summaryWords, maxArticles, mode, periodType, periodDays, periodFrom, periodTo, periodReportWords, topicsKey]);
+  }, [selectedTopics, summaryWords, maxArticles, lookbackDays, mode, periodType, periodDays, periodFrom, periodTo, periodReportWords, topicsKey]);
 
   function toggleTopic(t) { setSelectedTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; }); }
   function addCustom() { const t = customInput.trim(); if (!t || customTopics.includes(t)) return; setCustomTopics(p => [...p, t]); setSelectedTopics(p => new Set([...p, t])); setCustomInput(''); }
@@ -1208,7 +1209,7 @@ function ConfigStep({ country, user, onGo, onBack }) {
   const allTopics = [...DEFAULT_TOPICS.filter(t => !removedDefaultTopics.has(t)), ...customTopics];
   const isPeriod = mode === 'period';
 
-  function WordsStepper({ label, sublabel, value, onChange, min = 30, max = 500, step = 25 }) {
+  function WordsStepper({ label, sublabel, value, onChange, min = 30, max = 500, step = 25, unit = 'words' }) {
     return (
       <div style={{ padding: '10px 14px', background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginBottom: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 2 }}>{label}</div>
@@ -1221,7 +1222,7 @@ function ConfigStep({ country, user, onGo, onBack }) {
             style={{ width: 80, textAlign: 'center', fontSize: 22, fontWeight: 700, padding: '10px 6px', background: C.bg, border: '1px solid ' + C.borderLight, borderRadius: 10, color: C.text, outline: 'none' }} />
           <button onClick={() => onChange(Math.min(max, value + step))}
             style={{ width: 44, height: 44, borderRadius: '50%', border: '1px solid ' + C.borderLight, background: C.card, color: C.text, fontSize: 24, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>+</button>
-          <span style={{ fontSize: 13, color: C.muted }}>words</span>
+          <span style={{ fontSize: 13, color: C.muted }}>{unit}</span>
         </div>
       </div>
     );
@@ -1308,12 +1309,23 @@ function ConfigStep({ country, user, onGo, onBack }) {
               </div>
               {date === todayStr() && (
                 <div style={{ marginTop: 8, fontSize: 12, color: '#fb923c', lineHeight: 1.4, maxWidth: 420 }}>
-                  ⚠ Today's coverage is often incomplete: each outlet's live feed only shows its most recent items, and Google's news index typically takes about a day to catch up. For reliable results, pick yesterday or earlier — today's results will fill in better once you re-check tomorrow.
+                  ⚠ Today's coverage is often incomplete: each outlet's live feed only shows its most recent items, and Google's news index typically takes about a day to catch up.{lookbackDays > 0 ? ` "Days to look back" below is set to ${lookbackDays}, so this search also includes ${lookbackDays === 1 ? 'yesterday' : `the past ${lookbackDays} days`} to help fill in what today alone would miss.` : ' Set "Days to look back" below to 1 or more to also pick up yesterday\'s coverage.'}
                 </div>
               )}
             </div>
 
-            <button onClick={() => onGo({ mode: 'pointintime', topics: [...selectedTopics], date, summaryWords, maxArticles })}
+            <WordsStepper
+              label="Days to Look Back"
+              sublabel="Also includes coverage from this many days before the date above — helps when today's news isn't indexed yet"
+              value={lookbackDays}
+              onChange={setLookbackDays}
+              min={0}
+              max={7}
+              step={1}
+              unit={lookbackDays === 1 ? 'day' : 'days'}
+            />
+
+            <button onClick={() => onGo({ mode: 'pointintime', topics: [...selectedTopics], date, summaryWords, maxArticles, lookbackDays })}
               disabled={selectedTopics.size === 0}
               style={{ ...BTN('#2563eb'), width: '100%', padding: '12px', fontSize: 15, opacity: selectedTopics.size === 0 ? 0.4 : 1 }}>
               → Select Sources
@@ -3098,7 +3110,7 @@ function App() {
     }
   }
 
-  async function runFetchNews(sources, { topics, date, summaryWords, maxArticles }) {
+  async function runFetchNews(sources, { topics, date, summaryWords, maxArticles, lookbackDays }) {
     cancelledRef.current = false;
     setResultDate(date);
     const estSec = sources.length * 35 + 30;
@@ -3110,7 +3122,7 @@ function App() {
     setStep('loading');
     try {
       const fn = fns.httpsCallable('fetchNews', { timeout: 310000 });
-      const resp = await fn({ country: country.name, countryKey: country.key, selectedSources: sources, topics, date, summaryWords: summaryWords || 100, maxArticles: maxArticles || 25, ...await getAISettings(user.uid) });
+      const resp = await fn({ country: country.name, countryKey: country.key, selectedSources: sources, topics, date, summaryWords: summaryWords || 100, maxArticles: maxArticles || 25, lookbackDays: lookbackDays ?? 1, ...await getAISettings(user.uid) });
       if (cancelledRef.current) return;
       setResults(resp.data.results);
       setResultUsage(resp.data.usage || null);
@@ -3128,7 +3140,7 @@ function App() {
     setLoadingConfig(null);
   }
 
-  async function handleGo({ mode, topics, date, summaryWords, maxArticles, startDate, endDate, periodReportWords }) {
+  async function handleGo({ mode, topics, date, summaryWords, maxArticles, lookbackDays, startDate, endDate, periodReportWords }) {
     cancelledRef.current = false;
 
     if (mode === 'period') {
@@ -3159,7 +3171,7 @@ function App() {
     }
 
     // Point-in-time: store params and go to source selection
-    setPendingRunParams({ topics, date, summaryWords, maxArticles });
+    setPendingRunParams({ topics, date, summaryWords, maxArticles, lookbackDays });
     setStep('sources');
   }
 

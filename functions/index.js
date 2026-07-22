@@ -472,27 +472,42 @@ function deriveGoogleNewsUrl(source, countryKey, topics = []) {
   return `https://news.google.com/rss/search?${qs}`;
 }
 
-// Exact calendar-day match between an RSS pubDate and the requested
-// "YYYY-MM-DD" date — the user wants only articles from that date, not a
-// rolling window of "whatever's most recent in the feed".
-//
-// Must compare against the calendar day the *publisher* stamped on the
-// article (their local timezone), not the UTC day. A straight
-// `new Date(articleDate).toISOString()` normalizes to UTC first, which
-// silently reclassifies any article published in the early local morning
-// (e.g. 06:00 +0700 in Bangkok) as the *previous* UTC day — so every
-// early-morning article from a non-UTC outlet was being filtered out as
-// "not from the requested date" even though the outlet itself dated it today.
-function matchesExactDate(articleDate, requestedDate) {
-  if (!requestedDate || !articleDate) return false;
+// Calendar day the *publisher* stamped on the article (their local
+// timezone), not the UTC day. A straight `new Date(articleDate).toISOString()`
+// normalizes to UTC first, which silently reclassifies any article published
+// in the early local morning (e.g. 06:00 +0700 in Bangkok) as the *previous*
+// UTC day — so every early-morning article from a non-UTC outlet was being
+// filtered out as "not from the requested date" even though the outlet
+// itself dated it today.
+function publisherLocalDateStr(articleDate) {
   const d = new Date(articleDate);
-  if (isNaN(d)) return false;
+  if (isNaN(d)) return null;
   const offsetMatch = articleDate.match(/([+-])(\d{2}):?(\d{2})\s*$/);
   const offsetMinutes = offsetMatch
     ? (offsetMatch[1] === '-' ? -1 : 1) * (parseInt(offsetMatch[2], 10) * 60 + parseInt(offsetMatch[3], 10))
     : 0;
-  const publisherLocal = new Date(d.getTime() + offsetMinutes * 60000);
-  return publisherLocal.toISOString().slice(0, 10) === requestedDate;
+  return new Date(d.getTime() + offsetMinutes * 60000).toISOString().slice(0, 10);
+}
+
+// Matches an RSS pubDate against the requested "YYYY-MM-DD" date plus up to
+// `lookbackDays` earlier calendar days — a source's own feed or Google News'
+// index frequently hasn't caught up with the exact requested day yet, so a
+// same-day-only match misses real coverage that's a day or two old.
+function matchesDateRange(articleDate, requestedDate, lookbackDays = 0) {
+  if (!requestedDate || !articleDate) return false;
+  const articleDay = publisherLocalDateStr(articleDate);
+  if (!articleDay) return false;
+  const diffDays = Math.round((Date.parse(requestedDate + 'T00:00:00Z') - Date.parse(articleDay + 'T00:00:00Z')) / 86400000);
+  return diffDays >= 0 && diffDays <= lookbackDays;
+}
+
+// Human-readable label for the effective window being searched, used in
+// user-facing "no coverage found" text so it accurately reflects what was
+// actually checked (not just the single anchor date).
+function dateRangeLabel(requestedDate, lookbackDays = 0) {
+  if (!lookbackDays) return requestedDate;
+  const start = new Date(Date.parse(requestedDate + 'T00:00:00Z') - lookbackDays * 86400000).toISOString().slice(0, 10);
+  return `${start} to ${requestedDate}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -664,14 +679,17 @@ exports.fetchNews = onCall(
   { timeoutSeconds: 300, memory: '1GiB', region: 'us-central1' },
   async (request) => {
     await requireAuthorized(request);
-    const { country, countryKey, selectedSources, topics, date, summaryWords, maxArticles } = request.data;
+    const { country, countryKey, selectedSources, topics, date, summaryWords, maxArticles, lookbackDays: rawLookbackDays } = request.data;
     const summaryLen = `~${Math.min(Math.max(summaryWords || 100, 30), 300)}-word summary`;
     const articleLimit = Math.min(Math.max(parseInt(maxArticles) || 25, 10), 50);
+    const parsedLookbackDays = parseInt(rawLookbackDays);
+    const lookbackDays = Math.min(Math.max(Number.isFinite(parsedLookbackDays) ? parsedLookbackDays : 1, 0), 14);
     if (!country || !selectedSources?.length) throw new HttpsError('invalid-argument', 'country and sources required');
 
     const ai = makeAI(request.data);
     const lang = 'English';
     const topicList = topics.join(', ');
+    const dateLabel = dateRangeLabel(date, lookbackDays);
     const allResults = {};
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
@@ -683,29 +701,29 @@ exports.fetchNews = onCall(
       let rssError = null;
       let usedGoogleNews = false;
 
-      // Step 1: try the source's own RSS feed, kept to articles from the exact requested date
+      // Step 1: try the source's own RSS feed, kept to articles within the
+      // requested date window (the anchor date plus up to lookbackDays earlier)
       if (source.rssUrl) {
         try {
           const fetched = await fetchRssWithRetry(source.rssUrl, articleLimit);
-          articles = fetched.filter(a => matchesExactDate(a.date, date));
-          if (fetched.length > 0 && articles.length === 0) rssError = `No articles from ${date} in this feed's recent window`;
+          articles = fetched.filter(a => matchesDateRange(a.date, date, lookbackDays));
+          if (fetched.length > 0 && articles.length === 0) rssError = `No articles from ${dateLabel} in this feed's recent window`;
         }
         catch (e) { rssError = e.message; }
       }
 
-      // Step 2: own RSS had nothing from that exact date — try Google News.
+      // Step 2: own RSS had nothing in that window — try Google News.
       // Google's search endpoint has no real date-range filter (its after:/
       // before: operators are silently ignored there), so instead we pull a
-      // much larger pool of its results and filter *those* down to the exact
-      // date ourselves — filtering after truncating to articleLimit would
-      // throw away date matches that just weren't near the top of Google's
-      // relevance ranking.
+      // much larger pool of its results and filter *those* down ourselves —
+      // filtering after truncating to articleLimit would throw away date
+      // matches that just weren't near the top of Google's relevance ranking.
       if (articles.length === 0) {
         const googleUrl = deriveGoogleNewsUrl(source, countryKey, topics);
         if (googleUrl) {
           try {
             const googleArticles = await fetchRssWithRetry(googleUrl, GOOGLE_NEWS_FETCH_POOL);
-            const dated = googleArticles.filter(a => matchesExactDate(a.date, date)).slice(0, articleLimit);
+            const dated = googleArticles.filter(a => matchesDateRange(a.date, date, lookbackDays)).slice(0, articleLimit);
             if (dated.length > 0) { articles = dated; rssError = null; usedGoogleNews = true; }
           } catch {}
         }
@@ -733,7 +751,7 @@ exports.fetchNews = onCall(
         if (googleUrl) {
           try {
             const googleArticles = await fetchRssWithRetry(googleUrl, GOOGLE_NEWS_FETCH_POOL);
-            const dated = googleArticles.filter(a => matchesExactDate(a.date, date)).slice(0, articleLimit);
+            const dated = googleArticles.filter(a => matchesDateRange(a.date, date, lookbackDays)).slice(0, articleLimit);
             if (dated.length > 0) {
               articles = dated;
               rssError = null;
@@ -756,7 +774,7 @@ exports.fetchNews = onCall(
         const precomputed = JSON.stringify({
           topicAnalyses: topics.map(t => ({
             topic: t, covered: false,
-            summary: `No articles about this topic were published in this outlet on ${date}.`,
+            summary: `No articles about this topic were published in this outlet on ${dateLabel}.`,
             tone: 'neutral', narrative: null, quotes: []
           })),
           overallTone: 'neutral',
@@ -774,7 +792,7 @@ exports.fetchNews = onCall(
 
       const prompt = fillPrompt(customPrompts.analysis || DEFAULT_PROMPTS.analysis, {
         sourceName: source.name, sourceLean: source.lean, country,
-        leanDescription: source.leanDescription, date, topicList,
+        leanDescription: source.leanDescription, date: dateLabel, topicList,
         articlesText, topicMatchesText, lang, summaryLen
       });
 
@@ -806,7 +824,7 @@ exports.fetchNews = onCall(
               if (!key) return ta;
               const hasMatch = r.topicKeywordMatches[key].length > 0;
               if (hasMatch && !ta.covered) return { ...ta, covered: true };
-              if (!hasMatch && ta.covered) return { ...ta, covered: false, summary: `No articles about this topic were published in this outlet on ${date}.`, narrative: null, quotes: [], tone: 'neutral' };
+              if (!hasMatch && ta.covered) return { ...ta, covered: false, summary: `No articles about this topic were published in this outlet on ${dateLabel}.`, narrative: null, quotes: [], tone: 'neutral' };
               return ta;
             });
           }

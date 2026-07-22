@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.83';
+const VERSION = 'v1.84';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2597,6 +2597,9 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
           </div>
         )}
 
+        {/* Scheduled Reports (admin only) */}
+        {isAdmin && <ScheduledReportsPanel user={user} countries={countries} />}
+
         {/* Usage & Costs */}
         <div style={{ marginBottom: 28 }}>
           <button
@@ -3021,6 +3024,345 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
           }
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Scheduled Reports (admin only) ────────────────────────────────────────────
+// Daily/weekly digests built from the article archive (see functions/index.js)
+// instead of a live fetch — reliable because the archive has been continuously
+// collecting each source's feed, rather than checking it once at report time.
+const WEEKDAY_OPTIONS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+
+function ScheduledReportsPanel({ user, countries }) {
+  const uid = user?.uid;
+  const [open, setOpen] = useState(false);
+  const [schedules, setSchedules] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+
+  const [newCountryKey, setNewCountryKey] = useState('');
+  const [newSourceIds, setNewSourceIds] = useState(new Set());
+  const [newTopics, setNewTopics] = useState('');
+  const [newFrequency, setNewFrequency] = useState('daily');
+  const [newStartDay, setNewStartDay] = useState('monday');
+  const [newHourUtc, setNewHourUtc] = useState(6);
+  const [newSummaryWords, setNewSummaryWords] = useState(100);
+  const [newMaxArticles, setNewMaxArticles] = useState(25);
+  const [estimate, setEstimate] = useState(null);
+  const [estimating, setEstimating] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createMsg, setCreateMsg] = useState('');
+
+  const [expandedId, setExpandedId] = useState(null);
+  const [runsByScheduleId, setRunsByScheduleId] = useState({});
+  const [runsLoading, setRunsLoading] = useState(null);
+  const [viewingRun, setViewingRun] = useState(null); // { scheduleId, run }
+  const [busyId, setBusyId] = useState(null);
+
+  const selectedCountry = countries.find(c => c.countryKey === newCountryKey) || null;
+
+  async function loadSchedules() {
+    setLoading(true);
+    try {
+      const resp = await fns.httpsCallable('listSchedules')({});
+      setSchedules(resp.data.schedules || []);
+    } catch {}
+    setLoading(false);
+  }
+
+  function toggleSource(id) {
+    setNewSourceIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+    setEstimate(null);
+  }
+
+  function topicsArray() {
+    return newTopics.split(',').map(t => t.trim()).filter(Boolean);
+  }
+
+  async function handleEstimate() {
+    const topics = topicsArray();
+    if (newSourceIds.size === 0 || topics.length === 0) return;
+    setEstimating(true);
+    try {
+      const aiSettings = await getAISettings(uid);
+      const resp = await fns.httpsCallable('estimateScheduleCost')({
+        sourceIds: [...newSourceIds], topics, summaryWords: newSummaryWords, frequency: newFrequency, ...aiSettings
+      });
+      setEstimate(resp.data);
+    } catch (e) {
+      setEstimate({ error: e.message });
+    }
+    setEstimating(false);
+  }
+
+  async function handleCreate() {
+    const topics = topicsArray();
+    if (!selectedCountry || newSourceIds.size === 0 || topics.length === 0) return;
+    setCreating(true);
+    setCreateMsg('');
+    try {
+      await fns.httpsCallable('createSchedule')({
+        country: selectedCountry.country, countryKey: selectedCountry.countryKey,
+        sourceIds: [...newSourceIds], topics, frequency: newFrequency,
+        startDay: newStartDay, hourUtc: newHourUtc,
+        summaryWords: newSummaryWords, maxArticles: newMaxArticles
+      });
+      setCreateMsg('✓ Schedule created');
+      setShowCreate(false);
+      setNewCountryKey(''); setNewSourceIds(new Set()); setNewTopics(''); setEstimate(null);
+      await loadSchedules();
+    } catch (e) {
+      setCreateMsg('⚠ ' + e.message);
+    }
+    setCreating(false);
+  }
+
+  async function toggleEnabled(schedule) {
+    setBusyId(schedule.id);
+    try {
+      await fns.httpsCallable('updateSchedule')({ scheduleId: schedule.id, enabled: !schedule.enabled });
+      setSchedules(prev => prev.map(s => s.id === schedule.id ? { ...s, enabled: !s.enabled } : s));
+    } catch (e) {
+      alert('Could not update schedule: ' + e.message);
+    }
+    setBusyId(null);
+  }
+
+  async function handleDelete(schedule) {
+    if (!window.confirm(`Delete this schedule for ${schedule.country}? Its report history will be removed too.`)) return;
+    setBusyId(schedule.id);
+    try {
+      await fns.httpsCallable('deleteSchedule')({ scheduleId: schedule.id });
+      setSchedules(prev => prev.filter(s => s.id !== schedule.id));
+    } catch (e) {
+      alert('Could not delete schedule: ' + e.message);
+    }
+    setBusyId(null);
+  }
+
+  async function toggleExpand(schedule) {
+    const next = expandedId === schedule.id ? null : schedule.id;
+    setExpandedId(next);
+    if (next && !runsByScheduleId[schedule.id]) {
+      setRunsLoading(schedule.id);
+      try {
+        const resp = await fns.httpsCallable('listReportRuns')({ scheduleId: schedule.id });
+        setRunsByScheduleId(prev => ({ ...prev, [schedule.id]: resp.data.runs || [] }));
+      } catch {}
+      setRunsLoading(null);
+    }
+  }
+
+  async function viewRun(scheduleId, runId) {
+    try {
+      const resp = await fns.httpsCallable('getReportRun')({ scheduleId, runId });
+      setViewingRun({ scheduleId, run: resp.data.run });
+    } catch (e) {
+      alert('Could not load report: ' + e.message);
+    }
+  }
+
+  function scheduleSummary(s) {
+    const when = s.frequency === 'weekly'
+      ? `Weekly, ${s.startDay[0].toUpperCase()}${s.startDay.slice(1)} at ${String(s.hourUtc).padStart(2, '0')}:00 UTC`
+      : `Daily at ${String(s.hourUtc).padStart(2, '0')}:00 UTC`;
+    return `${when} · ${s.topics.join(', ')} · ${s.sourceIds.length} source${s.sourceIds.length !== 1 ? 's' : ''}`;
+  }
+
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <button
+        onClick={() => { setOpen(o => { if (!o) loadSchedules(); return !o; }); }}
+        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: '12px 14px', background: open ? C.card : '#0f1e35', border: '1px solid ' + (open ? C.borderLight : C.border), borderRadius: 9, cursor: 'pointer', color: C.text }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 16 }}>🗓️</span>
+          <div style={{ textAlign: 'left' }}>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>Scheduled Reports</div>
+            <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>Recurring daily/weekly topic digests, built from a continuously-archived feed</div>
+          </div>
+        </div>
+        <span style={{ color: C.faint, fontSize: 12 }}>{open ? '▲ Hide' : '▼ Show'}</span>
+      </button>
+
+      {open && (
+        <div style={{ marginTop: 12 }}>
+          {loading ? (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: 20 }}><Spinner /></div>
+          ) : (
+            <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border }}>
+
+              {schedules.length === 0 && !showCreate && (
+                <div style={{ color: C.faint, fontSize: 12, padding: '4px 10px 12px' }}>No scheduled reports yet</div>
+              )}
+
+              {schedules.map(s => (
+                <div key={s.id} style={{ padding: '10px 12px', background: '#0f1e35', borderRadius: 7, marginBottom: 8, border: '1px solid ' + C.border }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{s.country}</div>
+                      <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{scheduleSummary(s)}</div>
+                      <div style={{ fontSize: 11, color: s.lastRunStatus === 'error' ? '#f87171' : C.faint, marginTop: 2 }}>
+                        {s.lastRunAt ? `Last run: ${new Date(s.lastRunAt).toLocaleString()} (${s.lastRunStatus})` : 'Never run yet'}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
+                      <button onClick={() => toggleEnabled(s)} disabled={busyId === s.id}
+                        style={{ ...SMALL_BTN, color: s.enabled ? '#4ade80' : C.faint, borderColor: s.enabled ? '#14532d' : C.border, fontSize: 11 }}>
+                        {s.enabled ? '● On' : '○ Off'}
+                      </button>
+                      <button onClick={() => handleDelete(s)} disabled={busyId === s.id}
+                        style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 18, padding: '0 4px', opacity: 0.7 }}>×</button>
+                    </div>
+                  </div>
+                  <button onClick={() => toggleExpand(s)}
+                    style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <span>{expandedId === s.id ? '▾' : '▸'}</span><span>Report history</span>
+                  </button>
+                  {expandedId === s.id && (
+                    <div style={{ marginTop: 8 }}>
+                      {runsLoading === s.id ? (
+                        <div style={{ display: 'flex', justifyContent: 'center', padding: 12 }}><Spinner size={14} /></div>
+                      ) : (runsByScheduleId[s.id] || []).length === 0 ? (
+                        <div style={{ color: C.faint, fontSize: 11, padding: '4px 0' }}>No reports generated yet</div>
+                      ) : (runsByScheduleId[s.id] || []).map(r => (
+                        <div key={r.runId} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '6px 8px', background: C.bg, borderRadius: 6, marginBottom: 5, fontSize: 11 }}>
+                          <div style={{ minWidth: 0 }}>
+                            <span style={{ color: C.text }}>{r.dateLabel}</span>
+                            <span style={{ color: r.status === 'error' ? '#f87171' : C.faint, marginLeft: 8 }}>
+                              {r.status === 'error' ? '⚠ failed' : `$${r.costUsd.toFixed(4)} · ${r.sourceCount} sources`}
+                            </span>
+                          </div>
+                          {r.status !== 'error' && (
+                            <button onClick={() => viewRun(s.id, r.runId)} style={{ ...SMALL_BTN, fontSize: 10, flexShrink: 0 }}>View</button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {!showCreate ? (
+                <button onClick={() => setShowCreate(true)} style={{ ...BTN('#2563eb'), fontSize: 13, padding: '8px 16px', width: '100%' }}>+ New Schedule</button>
+              ) : (
+                <div style={{ marginTop: schedules.length > 0 ? 10 : 0, padding: 12, background: '#0f1e35', borderRadius: 7, border: '1px solid ' + C.border }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 10 }}>New Schedule</div>
+
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Country</label>
+                  <select value={newCountryKey} onChange={e => { setNewCountryKey(e.target.value); setNewSourceIds(new Set()); setEstimate(null); }}
+                    className="input-field" style={{ fontSize: 13, marginBottom: 10, width: '100%' }}>
+                    <option value="">Select a country…</option>
+                    {countries.map(c => <option key={c.countryKey} value={c.countryKey}>{c.country}</option>)}
+                  </select>
+
+                  {selectedCountry && (
+                    <>
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Sources</label>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 10, maxHeight: 160, overflowY: 'auto', padding: 6, background: C.bg, borderRadius: 6 }}>
+                        {selectedCountry.sources.filter(s => s.rssUrl).length === 0 ? (
+                          <div style={{ color: C.faint, fontSize: 11 }}>No sources with a working feed in this country yet</div>
+                        ) : selectedCountry.sources.filter(s => s.rssUrl).map(s => (
+                          <label key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: C.text, cursor: 'pointer' }}>
+                            <input type="checkbox" checked={newSourceIds.has(s.id)} onChange={() => toggleSource(s.id)} />
+                            {s.name}
+                          </label>
+                        ))}
+                      </div>
+                    </>
+                  )}
+
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Topics (comma-separated)</label>
+                  <input className="input-field" value={newTopics} onChange={e => { setNewTopics(e.target.value); setEstimate(null); }}
+                    placeholder="Israel, Gaza" style={{ fontSize: 13, marginBottom: 10, width: '100%' }} />
+
+                  <div style={{ display: 'flex', gap: 0, marginBottom: 10, borderRadius: 7, overflow: 'hidden', border: '1px solid ' + C.border }}>
+                    {['daily', 'weekly'].map(f => (
+                      <button key={f} onClick={() => setNewFrequency(f)}
+                        style={{ flex: 1, padding: '7px 0', fontSize: 12, fontWeight: newFrequency === f ? 700 : 400, cursor: 'pointer', border: 'none', background: newFrequency === f ? '#1d4ed8' : C.card, color: newFrequency === f ? 'white' : C.muted, textTransform: 'capitalize' }}>
+                        {f}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
+                    {newFrequency === 'weekly' && (
+                      <div style={{ flex: 1 }}>
+                        <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Start day</label>
+                        <select value={newStartDay} onChange={e => setNewStartDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                          {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
+                        </select>
+                      </div>
+                    )}
+                    <div style={{ flex: 1 }}>
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Run time (UTC)</label>
+                      <select value={newHourUtc} onChange={e => setNewHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                        {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
+                    <div style={{ flex: 1 }}>
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Summary words</label>
+                      <input type="number" min={30} max={300} value={newSummaryWords} onChange={e => { setNewSummaryWords(parseInt(e.target.value) || 100); setEstimate(null); }} className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Articles per source</label>
+                      <input type="number" min={10} max={50} value={newMaxArticles} onChange={e => setNewMaxArticles(parseInt(e.target.value) || 25)} className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
+                    <button onClick={handleEstimate} disabled={estimating || newSourceIds.size === 0 || topicsArray().length === 0} style={{ ...SMALL_BTN, fontSize: 12 }}>
+                      {estimating ? <><Spinner size={10} />&nbsp;Estimating…</> : '💰 Estimate Cost'}
+                    </button>
+                    {estimate && !estimate.error && (
+                      <span style={{ fontSize: 12, color: C.muted }}>~${estimate.perRunUsd.toFixed(4)}/run · ~${estimate.monthlyUsd.toFixed(2)}/month ({estimate.provider}/{estimate.model})</span>
+                    )}
+                    {estimate?.error && <span style={{ fontSize: 12, color: '#f87171' }}>⚠ {estimate.error}</span>}
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button onClick={() => { setShowCreate(false); setCreateMsg(''); }} style={{ ...SMALL_BTN, fontSize: 13 }}>Cancel</button>
+                    <button onClick={handleCreate} disabled={creating || !selectedCountry || newSourceIds.size === 0 || topicsArray().length === 0}
+                      style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px', flex: 1, opacity: (creating || !selectedCountry || newSourceIds.size === 0 || topicsArray().length === 0) ? 0.5 : 1 }}>
+                      {creating ? <><Spinner size={10} />&nbsp;Creating…</> : 'Create Schedule'}
+                    </button>
+                  </div>
+                  {createMsg && <div style={{ fontSize: 12, color: createMsg.startsWith('✓') ? '#4ade80' : '#f87171', marginTop: 10 }}>{createMsg}</div>}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {viewingRun && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+          onClick={() => setViewingRun(null)}>
+          <div className="panel" style={{ maxWidth: 640, width: '100%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{viewingRun.run.dateLabel}</div>
+              <button onClick={() => setViewingRun(null)} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 20 }}>×</button>
+            </div>
+            <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>
+              ${(viewingRun.run.costUsd || 0).toFixed(4)} · {viewingRun.run.provider}/{viewingRun.run.model} · {viewingRun.run.inputTokens}+{viewingRun.run.outputTokens} tokens
+            </div>
+            {Object.values(viewingRun.run.results || {}).map((r, i) => (
+              <div key={i} style={{ marginBottom: 18, paddingBottom: 14, borderBottom: '1px solid ' + C.border }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  <span style={{ fontWeight: 700, fontSize: 13, color: C.text }}>{r.source.name}</span>
+                  <LeanBadge lean={r.source.lean} />
+                  <span style={{ fontSize: 11, color: C.faint }}>{r.articleCount} article{r.articleCount !== 1 ? 's' : ''} archived</span>
+                </div>
+                {(r.analysis?.topicAnalyses || []).map((ta, j) => <TopicCard key={j} analysis={ta} />)}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

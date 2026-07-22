@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.86';
+const VERSION = 'v1.87';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3062,15 +3062,28 @@ function ScheduledReportsPanel({ user, countries }) {
 
   const [sourcesExpandedId, setSourcesExpandedId] = useState(null);
   const [sourceBusyId, setSourceBusyId] = useState(null);
-  const [addingSourceFor, setAddingSourceFor] = useState(null); // scheduleId currently showing the "add source" picker
-  const [pickSourceId, setPickSourceId] = useState('');
   // Fetched fresh (not from the once-at-load `countries` prop) whenever a
-  // schedule's Sources section is opened, so a feed fixed on the Sources page
-  // shows up here without needing a full app reload, and so we can show each
-  // source's poll history (item count / last refreshed) alongside it.
+  // schedule's Sources section is opened or edit started, so a feed fixed on
+  // the Sources page shows up here without needing a full app reload, and so
+  // we can show each source's poll history (item count / last refreshed).
   const [liveSources, setLiveSources] = useState({}); // countryKey -> sources[]
   const [archiveMeta, setArchiveMeta] = useState({}); // countryKey -> { [sourceId]: { lastPolledAt, articleCount } }
   const [metaLoading, setMetaLoading] = useState(null);
+
+  // Full edit mode — mirrors every field the "New Schedule" form sets, so
+  // whatever you could configure at creation you can also change later,
+  // including swapping sources via the same SourceManager used in country
+  // setup (find-by-name, AI "add more" with filters, remove) instead of a
+  // plain dropdown limited to already-verified, not-yet-used sources.
+  const [editingId, setEditingId] = useState(null);
+  const [editTopics, setEditTopics] = useState('');
+  const [editFrequency, setEditFrequency] = useState('daily');
+  const [editStartDay, setEditStartDay] = useState('monday');
+  const [editHourUtc, setEditHourUtc] = useState(6);
+  const [editSummaryWords, setEditSummaryWords] = useState(100);
+  const [editMaxArticles, setEditMaxArticles] = useState(25);
+  const [editSelected, setEditSelected] = useState(new Set());
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const selectedCountry = countries.find(c => c.countryKey === newCountryKey) || null;
 
@@ -3095,31 +3108,42 @@ function ScheduledReportsPanel({ user, countries }) {
     setMetaLoading(null);
   }
 
-  // Swap a schedule's source list by pushing the full new sourceIds array —
-  // updateSchedule already accepts sourceIds as one of its editable fields
-  // (see functions/index.js), so "replace" is just remove-then-add against
-  // the same array, no new backend endpoint needed.
-  async function setScheduleSources(schedule, nextSourceIds) {
-    setSourceBusyId(schedule.id);
+  function startEdit(s) {
+    setEditingId(s.id);
+    setEditTopics(s.topics.join(', '));
+    setEditFrequency(s.frequency);
+    setEditStartDay(s.startDay || 'monday');
+    setEditHourUtc(s.hourUtc);
+    setEditSummaryWords(s.summaryWords);
+    setEditMaxArticles(s.maxArticles);
+    setEditSelected(new Set(s.sourceIds));
+    loadCountrySourcesLive(s.countryKey);
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+  }
+
+  async function saveEdit(schedule) {
+    const topics = editTopics.split(',').map(t => t.trim()).filter(Boolean);
+    if (topics.length === 0) { alert('At least one topic is required.'); return; }
+    if (editSelected.size === 0) { alert('At least one source is required.'); return; }
+    const fields = {
+      topics, frequency: editFrequency,
+      startDay: editFrequency === 'weekly' ? editStartDay : null,
+      hourUtc: editHourUtc,
+      summaryWords: editSummaryWords, maxArticles: editMaxArticles,
+      sourceIds: [...editSelected]
+    };
+    setSavingEdit(true);
     try {
-      await fns.httpsCallable('updateSchedule')({ scheduleId: schedule.id, sourceIds: nextSourceIds });
-      setSchedules(prev => prev.map(s => s.id === schedule.id ? { ...s, sourceIds: nextSourceIds } : s));
+      await fns.httpsCallable('updateSchedule')({ scheduleId: schedule.id, ...fields });
+      setSchedules(prev => prev.map(x => x.id === schedule.id ? { ...x, ...fields } : x));
+      setEditingId(null);
     } catch (e) {
-      alert('Could not update sources: ' + e.message);
+      alert('Could not save changes: ' + e.message);
     }
-    setSourceBusyId(null);
-  }
-
-  function removeSource(schedule, sourceId) {
-    if (schedule.sourceIds.length <= 1) { alert('A schedule needs at least one source — add a replacement first.'); return; }
-    setScheduleSources(schedule, schedule.sourceIds.filter(id => id !== sourceId));
-  }
-
-  function addSource(schedule, sourceId) {
-    if (!sourceId || schedule.sourceIds.includes(sourceId)) return;
-    setScheduleSources(schedule, [...schedule.sourceIds, sourceId]);
-    setAddingSourceFor(null);
-    setPickSourceId('');
+    setSavingEdit(false);
   }
 
   async function loadSchedules() {
@@ -3272,74 +3296,124 @@ function ScheduledReportsPanel({ user, countries }) {
                         style={{ ...SMALL_BTN, color: s.enabled ? '#4ade80' : C.faint, borderColor: s.enabled ? '#14532d' : C.border, fontSize: 11 }}>
                         {s.enabled ? '● On' : '○ Off'}
                       </button>
+                      <button onClick={() => editingId === s.id ? cancelEdit() : startEdit(s)} disabled={busyId === s.id}
+                        style={{ ...SMALL_BTN, color: editingId === s.id ? '#60a5fa' : C.faint, borderColor: editingId === s.id ? '#1e4a6e' : C.border, fontSize: 11 }}>
+                        ✎ Edit
+                      </button>
                       <button onClick={() => handleDelete(s)} disabled={busyId === s.id}
                         style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 18, padding: '0 4px', opacity: 0.7 }}>×</button>
                     </div>
                   </div>
-                  <button onClick={() => {
-                    const next = sourcesExpandedId === s.id ? null : s.id;
-                    setSourcesExpandedId(next);
-                    if (next) loadCountrySourcesLive(s.countryKey);
-                  }} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
-                    <span>{sourcesExpandedId === s.id ? '▾' : '▸'}</span><span>Sources ({s.sourceIds.length})</span>
-                  </button>
-                  {sourcesExpandedId === s.id && (() => {
-                    if (metaLoading === s.countryKey) {
-                      return <div style={{ display: 'flex', justifyContent: 'center', padding: 10 }}><Spinner size={14} /></div>;
-                    }
-                    const allSources = sourcesForCountry(s.countryKey);
-                    const byId = new Map(allSources.map(src => [src.id, src]));
-                    const meta = archiveMeta[s.countryKey] || {};
-                    // Every other source in the country, not just ones with a
-                    // verified feed — a source can be added and its feed fixed
-                    // afterward on the Sources page (see removeSource's mirror:
-                    // remove is always allowed regardless of feed status too).
-                    const availableToAdd = allSources.filter(src => !s.sourceIds.includes(src.id));
-                    return (
-                      <div style={{ marginTop: 8 }}>
-                        {s.sourceIds.map(id => {
-                          const src = byId.get(id);
-                          const m = meta[id];
-                          return (
-                            <div key={id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '6px 8px', background: C.bg, borderRadius: 6, marginBottom: 5, fontSize: 11 }}>
-                              <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                                <span style={{ color: C.text }}>{src ? src.name : `(removed source: ${id})`}</span>
-                                {src && (src.rssUrl
-                                  ? <span style={{ color: '#4ade80' }}>✓ feed ok</span>
-                                  : <span style={{ color: '#fb923c' }}>⚠ no feed</span>)}
-                                {!src && <span style={{ color: '#f87171' }}>⚠ no longer in source list</span>}
-                                {m ? (
-                                  <span style={{ color: C.faint }}>{m.articleCount} item{m.articleCount !== 1 ? 's' : ''} · refreshed {new Date(m.lastPolledAt).toLocaleString()}</span>
-                                ) : src?.rssUrl ? (
-                                  <span style={{ color: C.faint }}>not polled yet</span>
-                                ) : null}
-                              </div>
-                              <button onClick={() => removeSource(s, id)} disabled={sourceBusyId === s.id}
-                                style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 15, padding: '0 4px', opacity: 0.7, flexShrink: 0 }}>×</button>
-                            </div>
-                          );
-                        })}
-                        {addingSourceFor === s.id ? (
-                          <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-                            <select value={pickSourceId} onChange={e => setPickSourceId(e.target.value)} className="input-field" style={{ fontSize: 12, flex: 1 }}>
-                              <option value="">Select a source to add…</option>
-                              {availableToAdd.map(src => <option key={src.id} value={src.id}>{src.name}{src.rssUrl ? '' : ' (no feed yet)'}</option>)}
-                            </select>
-                            <button onClick={() => addSource(s, pickSourceId)} disabled={!pickSourceId || sourceBusyId === s.id}
-                              style={{ ...SMALL_BTN, fontSize: 11, opacity: (!pickSourceId || sourceBusyId === s.id) ? 0.5 : 1 }}>Add</button>
-                            <button onClick={() => { setAddingSourceFor(null); setPickSourceId(''); }} style={{ ...SMALL_BTN, fontSize: 11 }}>Cancel</button>
-                          </div>
-                        ) : availableToAdd.length === 0 ? (
-                          <div style={{ color: C.faint, fontSize: 11, marginTop: 4 }}>Every source in {s.country} is already in this schedule.</div>
-                        ) : (
-                          <button onClick={() => setAddingSourceFor(s.id)} disabled={sourceBusyId === s.id}
-                            style={{ ...SMALL_BTN, fontSize: 11, marginTop: 4 }}>
-                            + Add source
+
+                  {editingId === s.id ? (
+                    <div style={{ marginTop: 10, padding: 12, background: '#0a1626', borderRadius: 7, border: '1px solid ' + C.border }}>
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Topics (comma-separated)</label>
+                      <input className="input-field" value={editTopics} onChange={e => setEditTopics(e.target.value)}
+                        placeholder="Israel, Gaza" style={{ fontSize: 13, marginBottom: 10, width: '100%' }} />
+
+                      <div style={{ display: 'flex', gap: 0, marginBottom: 10, borderRadius: 7, overflow: 'hidden', border: '1px solid ' + C.border }}>
+                        {['daily', 'weekly'].map(f => (
+                          <button key={f} onClick={() => setEditFrequency(f)}
+                            style={{ flex: 1, padding: '7px 0', fontSize: 12, fontWeight: editFrequency === f ? 700 : 400, cursor: 'pointer', border: 'none', background: editFrequency === f ? '#1d4ed8' : C.card, color: editFrequency === f ? 'white' : C.muted, textTransform: 'capitalize' }}>
+                            {f}
                           </button>
-                        )}
+                        ))}
                       </div>
-                    );
-                  })()}
+
+                      <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
+                        {editFrequency === 'weekly' && (
+                          <div style={{ flex: 1 }}>
+                            <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Start day</label>
+                            <select value={editStartDay} onChange={e => setEditStartDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                              {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
+                            </select>
+                          </div>
+                        )}
+                        <div style={{ flex: 1 }}>
+                          <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Run time (UTC)</label>
+                          <select value={editHourUtc} onChange={e => setEditHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                            {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+                        <div style={{ flex: 1 }}>
+                          <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Summary words</label>
+                          <input type="number" min={30} max={300} value={editSummaryWords} onChange={e => setEditSummaryWords(parseInt(e.target.value) || 100)} className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Articles per source</label>
+                          <input type="number" min={10} max={50} value={editMaxArticles} onChange={e => setEditMaxArticles(parseInt(e.target.value) || 25)} className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                        </div>
+                      </div>
+
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Sources ({editSelected.size} selected)</label>
+                      {metaLoading === s.countryKey ? (
+                        <div style={{ display: 'flex', justifyContent: 'center', padding: 16 }}><Spinner size={14} /></div>
+                      ) : (
+                        <SourceManager
+                          country={{ name: s.country, key: s.countryKey }}
+                          user={user}
+                          sources={sourcesForCountry(s.countryKey)}
+                          onSourcesChange={newSrcs => setLiveSources(prev => ({ ...prev, [s.countryKey]: newSrcs }))}
+                          selectable={true}
+                          selected={editSelected}
+                          onSelectionChange={setEditSelected}
+                        />
+                      )}
+
+                      <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                        <button onClick={cancelEdit} disabled={savingEdit} style={{ ...SMALL_BTN, fontSize: 13 }}>Cancel</button>
+                        <button onClick={() => saveEdit(s)} disabled={savingEdit}
+                          style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px', flex: 1, opacity: savingEdit ? 0.5 : 1 }}>
+                          {savingEdit ? <><Spinner size={10} />&nbsp;Saving…</> : 'Save Changes'}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <button onClick={() => {
+                        const next = sourcesExpandedId === s.id ? null : s.id;
+                        setSourcesExpandedId(next);
+                        if (next) loadCountrySourcesLive(s.countryKey);
+                      }} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <span>{sourcesExpandedId === s.id ? '▾' : '▸'}</span><span>Sources ({s.sourceIds.length})</span>
+                      </button>
+                      {sourcesExpandedId === s.id && (() => {
+                        if (metaLoading === s.countryKey) {
+                          return <div style={{ display: 'flex', justifyContent: 'center', padding: 10 }}><Spinner size={14} /></div>;
+                        }
+                        const allSources = sourcesForCountry(s.countryKey);
+                        const byId = new Map(allSources.map(src => [src.id, src]));
+                        const meta = archiveMeta[s.countryKey] || {};
+                        return (
+                          <div style={{ marginTop: 8 }}>
+                            {s.sourceIds.map(id => {
+                              const src = byId.get(id);
+                              const m = meta[id];
+                              return (
+                                <div key={id} style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: '6px 8px', background: C.bg, borderRadius: 6, marginBottom: 5, fontSize: 11 }}>
+                                  <span style={{ color: C.text }}>{src ? src.name : `(removed source: ${id})`}</span>
+                                  {src && (src.rssUrl
+                                    ? <span style={{ color: '#4ade80' }}>✓ feed ok</span>
+                                    : <span style={{ color: '#fb923c' }}>⚠ no feed</span>)}
+                                  {!src && <span style={{ color: '#f87171' }}>⚠ no longer in source list</span>}
+                                  {m ? (
+                                    <span style={{ color: C.faint }}>{m.articleCount} item{m.articleCount !== 1 ? 's' : ''} · refreshed {new Date(m.lastPolledAt).toLocaleString()}</span>
+                                  ) : src?.rssUrl ? (
+                                    <span style={{ color: C.faint }}>not polled yet</span>
+                                  ) : null}
+                                </div>
+                              );
+                            })}
+                            <button onClick={() => startEdit(s)} style={{ ...SMALL_BTN, fontSize: 11, marginTop: 4 }}>✎ Edit sources</button>
+                          </div>
+                        );
+                      })()}
+                    </>
+                  )}
+
                   <button onClick={() => toggleExpand(s)}
                     style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
                     <span>{expandedId === s.id ? '▾' : '▸'}</span><span>Report history</span>

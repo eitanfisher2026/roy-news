@@ -1842,25 +1842,40 @@ exports.estimateScheduleCost = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
     await requireAuthorized(request);
-    const { sourceIds, topics, summaryWords, frequency } = request.data || {};
+    const { sourceIds, topics, contextTopics, summaryWords, frequency } = request.data || {};
     if (!sourceIds?.length || !topics?.length) throw new HttpsError('invalid-argument', 'sourceIds and topics required');
 
     const ai = makeAI(request.data);
     const words = Math.min(Math.max(summaryWords || 100, 30), 300);
 
-    // Heuristic: assume ~3 relevant articles matched per source at ~120
-    // words each, plus fixed prompt scaffolding, for input; output scales
-    // with topics selected and requested summary length.
-    const inputTokensPerSource = 300 + Math.round((3 * 120) * 1.3);
+    const contextSet = new Set((contextTopics || []).map(t => t.toLowerCase()));
+    const hasContext = topics.some(t => contextSet.has(t.toLowerCase()));
+    const contextMode = hasContext ? await getContextAnalysisMode() : null;
+
+    // Heuristic: exact-only assumes ~3 relevant articles matched per source
+    // at ~120 words each. A context topic in 'fullBody' mode has no
+    // pre-filter — every article goes to the main call — so the assumed
+    // volume is much closer to the actual per-source article limit instead
+    // of just the handful an exact match would have found.
+    const assumedArticles = contextMode === 'fullBody' ? 15 : 3;
+    const inputTokensPerSource = 300 + Math.round((assumedArticles * 120) * 1.3);
     const outputTokensPerSource = Math.round(topics.length * (words * 1.3 + 60));
-    const perRunInputTokens = inputTokensPerSource * sourceIds.length;
-    const perRunOutputTokens = outputTokensPerSource * sourceIds.length;
+    let perRunInputTokens = inputTokensPerSource * sourceIds.length;
+    let perRunOutputTokens = outputTokensPerSource * sourceIds.length;
+
+    if (contextMode === 'header') {
+      // Small added classification pass per source: ~10 short titles in,
+      // a small JSON list of numbers out.
+      perRunInputTokens += 150 * sourceIds.length;
+      perRunOutputTokens += 60 * sourceIds.length;
+    }
+
     const perRunUsd = calcCostUsd(ai, perRunInputTokens, perRunOutputTokens);
     const runsPerMonth = frequency === 'weekly' ? 4.35 : 30;
 
     return {
       perRunUsd, monthlyUsd: perRunUsd * runsPerMonth,
-      provider: ai.type, model: ai.model, basis: 'heuristic'
+      provider: ai.type, model: ai.model, basis: 'heuristic', contextMode
     };
   }
 );

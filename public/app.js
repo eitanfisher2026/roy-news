@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.90';
+const VERSION = 'v1.91';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1246,6 +1246,9 @@ function ConfigStep({ country, user, onGo, onBack }) {
   // customTopics and removedDefaultTopics seed from localStorage, then get overwritten by Firebase
   const [customTopics, setCustomTopics]         = useState(() => loadLocal('custom', []));
   const [removedDefaultTopics, setRemovedDefaultTopics] = useState(() => new Set(loadLocal('removedDefaults', [])));
+  // Topics tagged "Context" are judged thematically by AI instead of by
+  // literal keyword — see Settings → Context Topic Analysis for how.
+  const [contextTopics, setContextTopics]       = useState(() => new Set(loadLocal('context', [])));
   const [topicsLoaded, setTopicsLoaded]         = useState(false);
   const [summaryWords, setSummaryWords]         = useState(() => loadLocal('summaryWords', 100));
   const [maxArticles, setMaxArticles]           = useState(() => loadLocal('maxArticles', 25));
@@ -1270,6 +1273,7 @@ function ConfigStep({ country, user, onGo, onBack }) {
       if (data) {
         setCustomTopics(data.custom || []);
         setRemovedDefaultTopics(new Set(data.removedDefaults || []));
+        setContextTopics(new Set(data.context || []));
       }
       setTopicsLoaded(true);
     }).catch(() => setTopicsLoaded(true));
@@ -1278,20 +1282,21 @@ function ConfigStep({ country, user, onGo, onBack }) {
   // Sync topic list to Firebase whenever it changes (only after initial load)
   useEffect(() => {
     if (!uid || !topicsLoaded) return;
-    db.ref(`users/${uid}/topics`).set({ custom: customTopics, removedDefaults: [...removedDefaultTopics] });
-  }, [customTopics, removedDefaultTopics, topicsLoaded, uid]);
+    db.ref(`users/${uid}/topics`).set({ custom: customTopics, removedDefaults: [...removedDefaultTopics], context: [...contextTopics] });
+  }, [customTopics, removedDefaultTopics, contextTopics, topicsLoaded, uid]);
 
   // Save session preferences to localStorage
   useEffect(() => {
     if (topicsKey) {
       localStorage.setItem(topicsKey, JSON.stringify({
         selected: [...selectedTopics], summaryWords, maxArticles, lookbackDays,
-        mode, periodType, periodDays, periodFrom, periodTo, periodReportWords
+        mode, periodType, periodDays, periodFrom, periodTo, periodReportWords, context: [...contextTopics]
       }));
     }
-  }, [selectedTopics, summaryWords, maxArticles, lookbackDays, mode, periodType, periodDays, periodFrom, periodTo, periodReportWords, topicsKey]);
+  }, [selectedTopics, summaryWords, maxArticles, lookbackDays, mode, periodType, periodDays, periodFrom, periodTo, periodReportWords, contextTopics, topicsKey]);
 
   function toggleTopic(t) { setSelectedTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; }); }
+  function toggleContextMode(t) { setContextTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; }); }
   function addCustom() { const t = customInput.trim(); if (!t || customTopics.includes(t)) return; setCustomTopics(p => [...p, t]); setSelectedTopics(p => new Set([...p, t])); setCustomInput(''); }
   function removeTopic(t) {
     if (!window.confirm(`Remove topic "${t}"?`)) return;
@@ -1301,6 +1306,7 @@ function ConfigStep({ country, user, onGo, onBack }) {
       setRemovedDefaultTopics(prev => new Set([...prev, t]));
     }
     setSelectedTopics(prev => { const n = new Set(prev); n.delete(t); return n; });
+    setContextTopics(prev => { const n = new Set(prev); n.delete(t); return n; });
   }
 
   function computePeriodDates() {
@@ -1353,18 +1359,24 @@ function ConfigStep({ country, user, onGo, onBack }) {
         </div>
 
         {/* Topic grid */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 6 }}>
           {allTopics.map(t => {
             const active = selectedTopics.has(t);
+            const isContext = contextTopics.has(t);
             return (
               <button key={t} onClick={() => toggleTopic(t)} style={{ padding: '6px 13px', borderRadius: 20, fontSize: 13, cursor: 'pointer', background: active ? '#1d4ed8' : C.card, color: active ? 'white' : C.muted, border: '1px solid ' + (active ? '#3b82f6' : C.border), transition: 'all 0.15s', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 {t}
+                <span onClick={e => { e.stopPropagation(); toggleContextMode(t); }} title={isContext ? 'Context topic — click for Exact keyword match' : 'Exact keyword match — click for Context (theme) matching'}
+                  style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3, padding: '1px 6px', borderRadius: 8, background: isContext ? '#7c3aed' : 'rgba(255,255,255,0.12)', color: isContext ? 'white' : (active ? 'rgba(255,255,255,0.8)' : C.faint) }}>
+                  {isContext ? '🧭 context' : 'exact'}
+                </span>
                 <span onClick={e => { e.stopPropagation(); removeTopic(t); }}
                   style={{ opacity: 0.6, fontSize: 15, lineHeight: 1, marginLeft: 2 }}>×</span>
               </button>
             );
           })}
         </div>
+        <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>Tap a topic's "exact"/"context" tag to switch how it's matched — exact looks for the literal word, context judges by theme (costs a bit more).</div>
 
         {/* Add custom topic */}
         <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
@@ -1452,7 +1464,7 @@ function ConfigStep({ country, user, onGo, onBack }) {
               unit={lookbackDays === 1 ? 'day' : 'days'}
             />
 
-            <button onClick={() => onGo({ mode: 'pointintime', topics: [...selectedTopics], date, summaryWords, maxArticles, lookbackDays })}
+            <button onClick={() => onGo({ mode: 'pointintime', topics: [...selectedTopics], contextTopics: [...selectedTopics].filter(t => contextTopics.has(t)), date, summaryWords, maxArticles, lookbackDays })}
               disabled={selectedTopics.size === 0}
               style={{ ...BTN('#2563eb'), width: '100%', padding: '12px', fontSize: 15, opacity: selectedTopics.size === 0 ? 0.4 : 1 }}>
               → Select Sources
@@ -2367,6 +2379,32 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
   const [loading, setLoading] = useState(true);
   const [installMsg, setInstallMsg] = useState('');
 
+  const [contextModeOpen, setContextModeOpen] = useState(false);
+  const [contextMode, setContextMode] = useState('header');
+  const [contextModeLoading, setContextModeLoading] = useState(false);
+  const [contextModeSaving, setContextModeSaving] = useState(false);
+
+  async function loadContextMode() {
+    setContextModeLoading(true);
+    try {
+      const snap = await db.ref('config/contextAnalysisMode').once('value');
+      setContextMode(snap.val() === 'fullBody' ? 'fullBody' : 'header');
+    } catch {}
+    setContextModeLoading(false);
+  }
+
+  async function saveContextMode(mode) {
+    if (!isAdmin || mode === contextMode) return;
+    setContextModeSaving(true);
+    try {
+      await fns.httpsCallable('setContextAnalysisMode')({ mode });
+      setContextMode(mode);
+    } catch (e) {
+      alert('Could not save: ' + e.message);
+    }
+    setContextModeSaving(false);
+  }
+
   const [promptsOpen, setPromptsOpen] = useState(false);
   const [promptsLoading, setPromptsLoading] = useState(false);
   const [setupPrompt, setSetupPrompt] = useState('');
@@ -2899,6 +2937,51 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
           </div>
         </div>
 
+        {/* Context Topic Analysis */}
+        <div style={{ marginBottom: 28 }}>
+          <button
+            onClick={() => { setContextModeOpen(o => { if (!o) loadContextMode(); return !o; }); }}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: '12px 14px', background: contextModeOpen ? C.card : '#0f1e35', border: '1px solid ' + (contextModeOpen ? C.borderLight : C.border), borderRadius: 9, cursor: 'pointer', color: C.text }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 16 }}>🧭</span>
+              <div style={{ textAlign: 'left' }}>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>Context Topic Analysis</div>
+                <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>How "Context" topics (themes, not keywords) get matched — applies app-wide</div>
+              </div>
+            </div>
+            <span style={{ color: C.faint, fontSize: 12 }}>{contextModeOpen ? '▲ Hide' : '▼ Show'}</span>
+          </button>
+
+          {contextModeOpen && (
+            <div style={{ marginTop: 12, padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border }}>
+              {contextModeLoading ? (
+                <div style={{ display: 'flex', justifyContent: 'center', padding: 20 }}><Spinner /></div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 12, color: C.faint, marginBottom: 12, lineHeight: 1.6 }}>
+                    A topic like "Israel" is a word a keyword check can find. A topic like "internal politics" is a theme — no keyword check will ever match it, since an article can be about that theme without containing those words. Topics marked "Context" are judged by the AI instead of by keyword, using whichever mode is selected below.
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <button onClick={() => saveContextMode('header')} disabled={!isAdmin || contextModeSaving}
+                      style={{ textAlign: 'left', padding: '10px 14px', borderRadius: 8, border: '1px solid ' + (contextMode === 'header' ? '#3b82f6' : C.border), background: contextMode === 'header' ? '#1e3a5f' : '#0f1e35', cursor: isAdmin ? 'pointer' : 'default', opacity: !isAdmin && contextMode !== 'header' ? 0.6 : 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: contextMode === 'header' ? '#60a5fa' : C.text }}>{contextMode === 'header' && '● '}Header-first analysis {contextMode === 'header' && '(active)'}</div>
+                      <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>Cheap classification pass over just the article titles first; only the ones it flags get a full read. Keeps cost down, default.</div>
+                    </button>
+                    <button onClick={() => saveContextMode('fullBody')} disabled={!isAdmin || contextModeSaving}
+                      style={{ textAlign: 'left', padding: '10px 14px', borderRadius: 8, border: '1px solid ' + (contextMode === 'fullBody' ? '#3b82f6' : C.border), background: contextMode === 'fullBody' ? '#1e3a5f' : '#0f1e35', cursor: isAdmin ? 'pointer' : 'default', opacity: !isAdmin && contextMode !== 'fullBody' ? 0.6 : 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: contextMode === 'fullBody' ? '#60a5fa' : C.text }}>{contextMode === 'fullBody' && '● '}Full body analysis {contextMode === 'fullBody' && '(active)'}</div>
+                      <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>No pre-filter — every matched article gets a full read for every context topic. More thorough, priced per article regardless of relevance.</div>
+                    </button>
+                  </div>
+                  {!isAdmin && <div style={{ fontSize: 11, color: C.faint, marginTop: 10 }}>Only an admin can change this — you're seeing the current setting.</div>}
+                  {contextModeSaving && <div style={{ display: 'flex', justifyContent: 'center', marginTop: 10 }}><Spinner size={14} /></div>}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Prompt Templates */}
         <div style={{ marginBottom: 28 }}>
           <button
@@ -3073,6 +3156,25 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
 // collecting each source's feed, rather than checking it once at report time.
 const WEEKDAY_OPTIONS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
 
+// Renders each parsed topic as a small chip toggling Exact/Context matching
+// — shared by the create and edit forms in ScheduledReportsPanel below.
+function TopicModeChips({ topics, contextSet, onToggle }) {
+  if (topics.length === 0) return null;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10, marginTop: -4 }}>
+      {topics.map(t => {
+        const isContext = contextSet.has(t);
+        return (
+          <button key={t} onClick={() => onToggle(t)} type="button"
+            style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3, padding: '2px 8px', borderRadius: 10, border: 'none', cursor: 'pointer', background: isContext ? '#7c3aed' : 'rgba(255,255,255,0.1)', color: isContext ? 'white' : C.faint }}>
+            {t}: {isContext ? '🧭 context' : 'exact'}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function ScheduledReportsPanel({ user, countries }) {
   const uid = user?.uid;
   const [open, setOpen] = useState(false);
@@ -3083,6 +3185,7 @@ function ScheduledReportsPanel({ user, countries }) {
   const [newCountryKey, setNewCountryKey] = useState('');
   const [newSourceIds, setNewSourceIds] = useState(new Set());
   const [newTopics, setNewTopics] = useState('');
+  const [newContextTopics, setNewContextTopics] = useState(new Set());
   const [newFrequency, setNewFrequency] = useState('daily');
   const [newStartDay, setNewStartDay] = useState('monday');
   const [newHourUtc, setNewHourUtc] = useState(6);
@@ -3093,6 +3196,7 @@ function ScheduledReportsPanel({ user, countries }) {
   const [creating, setCreating] = useState(false);
   const [createMsg, setCreateMsg] = useState('');
 
+  const [sharedInfoId, setSharedInfoId] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
   const [runsByScheduleId, setRunsByScheduleId] = useState({});
   const [runsLoading, setRunsLoading] = useState(null);
@@ -3124,6 +3228,7 @@ function ScheduledReportsPanel({ user, countries }) {
   // plain dropdown limited to already-verified, not-yet-used sources.
   const [editingId, setEditingId] = useState(null);
   const [editTopics, setEditTopics] = useState('');
+  const [editContextTopics, setEditContextTopics] = useState(new Set());
   const [editFrequency, setEditFrequency] = useState('daily');
   const [editStartDay, setEditStartDay] = useState('monday');
   const [editHourUtc, setEditHourUtc] = useState(6);
@@ -3158,6 +3263,7 @@ function ScheduledReportsPanel({ user, countries }) {
   function startEdit(s) {
     setEditingId(s.id);
     setEditTopics(s.topics.join(', '));
+    setEditContextTopics(new Set(s.contextTopics || []));
     setEditFrequency(s.frequency);
     setEditStartDay(s.startDay || 'monday');
     setEditHourUtc(s.hourUtc);
@@ -3171,12 +3277,16 @@ function ScheduledReportsPanel({ user, countries }) {
     setEditingId(null);
   }
 
+  function editTopicsArray() {
+    return editTopics.split(',').map(t => t.trim()).filter(Boolean);
+  }
+
   async function saveEdit(schedule) {
-    const topics = editTopics.split(',').map(t => t.trim()).filter(Boolean);
+    const topics = editTopicsArray();
     if (topics.length === 0) { alert('At least one topic is required.'); return; }
     if (editSelected.size === 0) { alert('At least one source is required.'); return; }
     const fields = {
-      topics, frequency: editFrequency,
+      topics, contextTopics: topics.filter(t => editContextTopics.has(t)), frequency: editFrequency,
       startDay: editFrequency === 'weekly' ? editStartDay : null,
       hourUtc: editHourUtc,
       summaryWords: editSummaryWords, maxArticles: editMaxArticles,
@@ -3218,7 +3328,8 @@ function ScheduledReportsPanel({ user, countries }) {
     try {
       const aiSettings = await getAISettings(uid);
       const resp = await fns.httpsCallable('estimateScheduleCost')({
-        sourceIds: [...newSourceIds], topics, summaryWords: newSummaryWords, frequency: newFrequency, ...aiSettings
+        sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => newContextTopics.has(t)),
+        summaryWords: newSummaryWords, frequency: newFrequency, ...aiSettings
       });
       setEstimate(resp.data);
     } catch (e) {
@@ -3235,13 +3346,13 @@ function ScheduledReportsPanel({ user, countries }) {
     try {
       await fns.httpsCallable('createSchedule')({
         country: selectedCountry.country, countryKey: selectedCountry.countryKey,
-        sourceIds: [...newSourceIds], topics, frequency: newFrequency,
+        sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => newContextTopics.has(t)), frequency: newFrequency,
         startDay: newStartDay, hourUtc: newHourUtc,
         summaryWords: newSummaryWords, maxArticles: newMaxArticles
       });
       setCreateMsg('✓ Schedule created');
       setShowCreate(false);
-      setNewCountryKey(''); setNewSourceIds(new Set()); setNewTopics(''); setEstimate(null);
+      setNewCountryKey(''); setNewSourceIds(new Set()); setNewTopics(''); setNewContextTopics(new Set()); setEstimate(null);
       await loadSchedules();
     } catch (e) {
       setCreateMsg('⚠ ' + e.message);
@@ -3329,9 +3440,11 @@ function ScheduledReportsPanel({ user, countries }) {
 
   function scheduleSummary(s) {
     const when = s.frequency === 'weekly'
-      ? `Weekly, ${s.startDay[0].toUpperCase()}${s.startDay.slice(1)} at ${String(s.hourUtc).padStart(2, '0')}:00 UTC`
-      : `Daily at ${String(s.hourUtc).padStart(2, '0')}:00 UTC`;
-    return `${when} · ${s.topics.join(', ')} · ${s.sourceIds.length} source${s.sourceIds.length !== 1 ? 's' : ''}`;
+      ? `Weekly ${s.startDay.slice(0, 3)} ${String(s.hourUtc).padStart(2, '0')}:00`
+      : `Daily ${String(s.hourUtc).padStart(2, '0')}:00`;
+    const contextSet = new Set(s.contextTopics || []);
+    const topicsLabel = s.topics.map(t => contextSet.has(t) ? `${t}🧭` : t).join(', ');
+    return `${when} UTC · ${topicsLabel} · ${s.sourceIds.length} src`;
   }
 
   return (
@@ -3365,44 +3478,46 @@ function ScheduledReportsPanel({ user, countries }) {
                 <div key={s.id} style={{ padding: '10px 12px', background: '#0f1e35', borderRadius: 7, marginBottom: 8, border: '1px solid ' + C.border }}>
                   <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                         <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{s.country}</span>
                         {s.access !== 'owner' && (
-                          <span style={{ fontSize: 10, fontWeight: 700, color: '#60a5fa', background: '#1a2d42', border: '1px solid #2a4060', borderRadius: 4, padding: '1px 6px', textTransform: 'uppercase', letterSpacing: 0.4 }}>
-                            {s.access === 'write' ? 'Shared · can edit' : 'Shared · view only'}
-                          </span>
+                          <button onClick={() => setSharedInfoId(sharedInfoId === s.id ? null : s.id)} title="Sharing info"
+                            style={{ background: 'none', border: 'none', color: sharedInfoId === s.id ? '#60a5fa' : C.faint, cursor: 'pointer', fontSize: 12, padding: 0, lineHeight: 1 }}>👥ℹ️</button>
                         )}
                       </div>
-                      {s.access !== 'owner' && (
-                        <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>Owned by {s.createdByEmail}</div>
+                      {s.access !== 'owner' && sharedInfoId === s.id && (
+                        <div style={{ fontSize: 11, color: C.faint, marginTop: 3, padding: '5px 8px', background: C.bg, borderRadius: 5 }}>
+                          {s.access === 'write' ? 'Shared with you · can edit' : 'Shared with you · view only'}<br/>
+                          Owned by {s.createdByEmail}
+                        </div>
                       )}
-                      <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{scheduleSummary(s)}</div>
-                      <div style={{ fontSize: 11, color: s.lastRunStatus === 'error' ? '#f87171' : C.faint, marginTop: 2 }}>
-                        {s.lastRunAt ? `Last run: ${formatDMYTime(s.lastRunAt)} (${s.lastRunStatus})` : 'Never run yet'}
+                      <div style={{ fontSize: 11, color: C.faint, marginTop: 3, lineHeight: 1.5 }}>{scheduleSummary(s)}</div>
+                      <div style={{ fontSize: 11, color: s.lastRunStatus === 'error' ? '#f87171' : C.faint, marginTop: 1 }}>
+                        {s.lastRunAt ? `${s.lastRunStatus === 'ok' ? '✓' : '⚠'} ${formatDMYTime(s.lastRunAt)}` : 'Never run yet'}
                       </div>
                     </div>
-                    <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
+                    <div style={{ display: 'flex', gap: 4, flexShrink: 0, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 120 }}>
                       {s.access !== 'read' && (
                         <button onClick={() => toggleEnabled(s)} disabled={busyId === s.id}
-                          style={{ ...SMALL_BTN, color: s.enabled ? '#4ade80' : C.faint, borderColor: s.enabled ? '#14532d' : C.border, fontSize: 11 }}>
+                          style={{ ...SMALL_BTN, color: s.enabled ? '#4ade80' : C.faint, borderColor: s.enabled ? '#14532d' : C.border, fontSize: 10, padding: '5px 8px' }}>
                           {s.enabled ? '● On' : '○ Off'}
                         </button>
                       )}
                       {s.access !== 'read' && (
                         <button onClick={() => editingId === s.id ? cancelEdit() : startEdit(s)} disabled={busyId === s.id}
-                          style={{ ...SMALL_BTN, color: editingId === s.id ? '#60a5fa' : C.faint, borderColor: editingId === s.id ? '#1e4a6e' : C.border, fontSize: 11 }}>
+                          style={{ ...SMALL_BTN, color: editingId === s.id ? '#60a5fa' : C.faint, borderColor: editingId === s.id ? '#1e4a6e' : C.border, fontSize: 10, padding: '5px 8px' }}>
                           ✎ Edit
                         </button>
                       )}
                       {s.access === 'owner' && (
                         <button onClick={() => startShare(s)} disabled={busyId === s.id}
-                          style={{ ...SMALL_BTN, color: sharingId === s.id ? '#60a5fa' : C.faint, borderColor: sharingId === s.id ? '#1e4a6e' : C.border, fontSize: 11 }}>
-                          👥 Share
+                          style={{ ...SMALL_BTN, color: sharingId === s.id ? '#60a5fa' : C.faint, borderColor: sharingId === s.id ? '#1e4a6e' : C.border, fontSize: 10, padding: '5px 8px' }}>
+                          👥
                         </button>
                       )}
                       {s.access !== 'read' && (
                         <button onClick={() => handleDelete(s)} disabled={busyId === s.id}
-                          style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 18, padding: '0 4px', opacity: 0.7 }}>×</button>
+                          style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 18, padding: '0 2px', opacity: 0.7 }}>×</button>
                       )}
                     </div>
                   </div>
@@ -3443,7 +3558,9 @@ function ScheduledReportsPanel({ user, countries }) {
                     <div style={{ marginTop: 10, padding: 12, background: '#0a1626', borderRadius: 7, border: '1px solid ' + C.border }}>
                       <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Topics (comma-separated)</label>
                       <input className="input-field" value={editTopics} onChange={e => setEditTopics(e.target.value)}
-                        placeholder="Israel, Gaza" style={{ fontSize: 13, marginBottom: 10, width: '100%' }} />
+                        placeholder="Israel, Gaza" style={{ fontSize: 13, marginBottom: 6, width: '100%' }} />
+                      <TopicModeChips topics={editTopicsArray()} contextSet={editContextTopics}
+                        onToggle={t => setEditContextTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; })} />
 
                       <div style={{ display: 'flex', gap: 0, marginBottom: 10, borderRadius: 7, overflow: 'hidden', border: '1px solid ' + C.border }}>
                         {['daily', 'weekly'].map(f => (
@@ -3609,7 +3726,9 @@ function ScheduledReportsPanel({ user, countries }) {
 
                   <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Topics (comma-separated)</label>
                   <input className="input-field" value={newTopics} onChange={e => { setNewTopics(e.target.value); setEstimate(null); }}
-                    placeholder="Israel, Gaza" style={{ fontSize: 13, marginBottom: 10, width: '100%' }} />
+                    placeholder="Israel, Gaza" style={{ fontSize: 13, marginBottom: 6, width: '100%' }} />
+                  <TopicModeChips topics={topicsArray()} contextSet={newContextTopics}
+                    onToggle={t => { setNewContextTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; }); setEstimate(null); }} />
 
                   <div style={{ display: 'flex', gap: 0, marginBottom: 10, borderRadius: 7, overflow: 'hidden', border: '1px solid ' + C.border }}>
                     {['daily', 'weekly'].map(f => (
@@ -3653,7 +3772,10 @@ function ScheduledReportsPanel({ user, countries }) {
                       {estimating ? <><Spinner size={10} />&nbsp;Estimating…</> : '💰 Estimate Cost'}
                     </button>
                     {estimate && !estimate.error && (
-                      <span style={{ fontSize: 12, color: C.muted }}>~${estimate.perRunUsd.toFixed(4)}/run · ~${estimate.monthlyUsd.toFixed(2)}/month ({estimate.provider}/{estimate.model})</span>
+                      <span style={{ fontSize: 12, color: C.muted }}>
+                        ~${estimate.perRunUsd.toFixed(4)}/run · ~${estimate.monthlyUsd.toFixed(2)}/month ({estimate.provider}/{estimate.model})
+                        {estimate.contextMode && ` · context mode: ${estimate.contextMode === 'fullBody' ? 'full body' : 'header-first'}`}
+                      </span>
                     )}
                     {estimate?.error && <span style={{ fontSize: 12, color: '#f87171' }}>⚠ {estimate.error}</span>}
                   </div>
@@ -3882,7 +4004,7 @@ function App() {
     }
   }
 
-  async function runFetchNews(sources, { topics, date, summaryWords, maxArticles, lookbackDays }) {
+  async function runFetchNews(sources, { topics, contextTopics, date, summaryWords, maxArticles, lookbackDays }) {
     cancelledRef.current = false;
     setResultDate(date);
     const estSec = sources.length * 35 + 30;
@@ -3894,7 +4016,7 @@ function App() {
     setStep('loading');
     try {
       const fn = fns.httpsCallable('fetchNews', { timeout: 310000 });
-      const resp = await fn({ country: country.name, countryKey: country.key, selectedSources: sources, topics, date, summaryWords: summaryWords || 100, maxArticles: maxArticles || 25, lookbackDays: lookbackDays ?? 1, ...await getAISettings(user.uid) });
+      const resp = await fn({ country: country.name, countryKey: country.key, selectedSources: sources, topics, contextTopics: contextTopics || [], date, summaryWords: summaryWords || 100, maxArticles: maxArticles || 25, lookbackDays: lookbackDays ?? 1, ...await getAISettings(user.uid) });
       if (cancelledRef.current) return;
       setResults(resp.data.results);
       setResultUsage(resp.data.usage || null);
@@ -3912,7 +4034,7 @@ function App() {
     setLoadingConfig(null);
   }
 
-  async function handleGo({ mode, topics, date, summaryWords, maxArticles, lookbackDays, startDate, endDate, periodReportWords }) {
+  async function handleGo({ mode, topics, contextTopics, date, summaryWords, maxArticles, lookbackDays, startDate, endDate, periodReportWords }) {
     cancelledRef.current = false;
 
     if (mode === 'period') {
@@ -3943,7 +4065,7 @@ function App() {
     }
 
     // Point-in-time: store params and go to source selection
-    setPendingRunParams({ topics, date, summaryWords, maxArticles, lookbackDays });
+    setPendingRunParams({ topics, contextTopics, date, summaryWords, maxArticles, lookbackDays });
     setStep('sources');
   }
 

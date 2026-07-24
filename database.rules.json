@@ -8,6 +8,10 @@
       "prompts": {
         ".read": "auth != null && root.child('authorizedUids').child(auth.uid).exists()",
         ".write": false
+      },
+      "contextAnalysisMode": {
+        ".read": "auth != null && root.child('authorizedUids').child(auth.uid).exists()",
+        ".write": false
       }
     },
     "countries": {

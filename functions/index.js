@@ -400,7 +400,9 @@ async function fetchRss(url, limit = 25) {
   return feed.items
     .map(item => ({
       title: (item.title || '').trim(),
-      text: (item.contentSnippet || item.description || '').slice(0, 600).trim(),
+      // 1500 rather than a shorter cut — a topic mentioned partway through a
+      // longer description was invisible to the keyword check below 600.
+      text: (item.contentSnippet || item.description || '').slice(0, 1500).trim(),
       link: item.link || '',
       date: item.pubDate || ''
     }))
@@ -698,12 +700,61 @@ If this outlet does not exist in ${country} or you are not confident it exists, 
 // the scheduled report generator, so the "only pay for what's relevant" and
 // keyword-override logic exists in exactly one place.
 // ─────────────────────────────────────────────────────────────────────────────
-function computeTopicKeywordMatches(articles, topics) {
+// In-memory cache, backed by the DB below so it survives cold starts —
+// translations never change, so once a topic/language pair has been
+// translated it's reused forever across every schedule and run that needs it.
+const topicTranslationCache = {};
+function cacheSlug(str) {
+  const basis = str.trim().toLowerCase();
+  let hash = 5381;
+  for (let i = 0; i < basis.length; i++) hash = ((hash * 33) ^ basis.charCodeAt(i)) >>> 0;
+  return 'k' + hash.toString(36);
+}
+
+// Translates a topic keyword into a source's own language so non-English
+// outlets can actually be matched — checking only the English word against
+// Thai/Khmer/etc. article text silently misses every real mention, which is
+// exactly what was happening: high-volume non-English sources were coming
+// back "not covered" not because they had no coverage, but because the
+// check never had a chance of matching their language.
+async function getTranslatedTopic(topic, language, ai, uid, email) {
+  const cacheKey = cacheSlug(language) + '/' + cacheSlug(topic);
+  if (topicTranslationCache[cacheKey] !== undefined) return topicTranslationCache[cacheKey];
+  const dbPath = `topicTranslations/${cacheKey}`;
+  try {
+    const snap = await db.ref(dbPath).once('value');
+    if (snap.exists()) { topicTranslationCache[cacheKey] = snap.val(); return snap.val(); }
+  } catch {}
+  let translated = null;
+  try {
+    const prompt = `Translate the word or short phrase "${topic}" into ${language}. Reply with ONLY the single most natural, commonly used translation a native speaker would recognize in a news article — no explanation, no English, no quotation marks, nothing else.`;
+    const { text, usage } = await callAI(ai, prompt, 40);
+    translated = text.trim();
+    if (usage) await persistCost(uid, email, ai, calcCostUsd(ai, usage.input_tokens || 0, usage.output_tokens || 0));
+    if (translated) await db.ref(dbPath).set(translated).catch(() => {});
+  } catch {}
+  topicTranslationCache[cacheKey] = translated;
+  return translated;
+}
+
+async function computeTopicKeywordMatches(articles, topics, source, ai, uid, email) {
+  const languages = (source?.languages || []).filter(l => l && l.toLowerCase() !== 'english');
+  const topicVariants = {};
+  for (const topic of topics) {
+    const variants = [topic.toLowerCase()];
+    for (const lang of languages) {
+      const translated = await getTranslatedTopic(topic, lang, ai, uid, email);
+      if (translated) variants.push(translated.toLowerCase());
+    }
+    topicVariants[topic] = variants;
+  }
+
   const topicKeywordMatches = {};
   for (const topic of topics) {
-    const kw = topic.toLowerCase();
+    const variants = topicVariants[topic];
     topicKeywordMatches[topic] = articles.reduce((acc, a, i) => {
-      if ((a.title + ' ' + (a.text || '')).toLowerCase().includes(kw)) acc.push(i + 1);
+      const haystack = (a.title + ' ' + (a.text || '')).toLowerCase();
+      if (variants.some(v => haystack.includes(v))) acc.push(i + 1);
       return acc;
     }, []);
   }
@@ -729,12 +780,12 @@ function notCoveredAnalysis(topics, dateLabel) {
 // against topics and (only if something matched) calls the AI with just the
 // relevant articles — not the full set — since unrelated same-day articles
 // cost tokens without ever being quoted or summarized.
-async function analyzeArticlesForTopics({ ai, source, articles, topics, country, dateLabel, summaryLen, customPrompts }) {
+async function analyzeArticlesForTopics({ ai, source, articles, topics, country, dateLabel, summaryLen, customPrompts, uid, email }) {
   if (articles.length === 0) {
     return { text: JSON.stringify(notCoveredAnalysis(topics, dateLabel)), usage: null, relevantIndices: [], topicKeywordMatches: {} };
   }
 
-  const topicKeywordMatches = computeTopicKeywordMatches(articles, topics);
+  const topicKeywordMatches = await computeTopicKeywordMatches(articles, topics, source, ai, uid, email);
   const relevantIndices = relevantIndicesFromMatches(topicKeywordMatches);
 
   if (relevantIndices.length === 0) {
@@ -844,7 +895,7 @@ exports.fetchNews = onCall(
 
       // Step 3: had date-matched articles but none matched any topic yet —
       // try Google News for this source+topic before giving up on it
-      const preMatches = computeTopicKeywordMatches(articles, topics);
+      const preMatches = await computeTopicKeywordMatches(articles, topics, source, ai, request.auth.uid, request.auth.token.email);
       if (relevantIndicesFromMatches(preMatches).length === 0 && !usedGoogleNews) {
         const googleUrl = deriveGoogleNewsUrl(source, countryKey, topics);
         if (googleUrl) {
@@ -858,7 +909,8 @@ exports.fetchNews = onCall(
 
       try {
         const { text, usage, relevantIndices, topicKeywordMatches } = await analyzeArticlesForTopics({
-          ai, source, articles, topics, country, dateLabel, summaryLen, customPrompts
+          ai, source, articles, topics, country, dateLabel, summaryLen, customPrompts,
+          uid: request.auth.uid, email: request.auth.token.email
         });
         return { source, articles, rssError, usage, text, relevantIndices, topicKeywordMatches, usedGoogleNews };
       } catch (e) {
@@ -1447,7 +1499,8 @@ exports.generateScheduledReports = onSchedule(
         await Promise.all(sources.map(async (source) => {
           const articles = await readArchivedArticles(schedule.countryKey, source.id, dayKeys);
           const { text, usage, relevantIndices, topicKeywordMatches } = await analyzeArticlesForTopics({
-            ai, source, articles, topics: schedule.topics, country: schedule.country, dateLabel, summaryLen, customPrompts
+            ai, source, articles, topics: schedule.topics, country: schedule.country, dateLabel, summaryLen, customPrompts,
+            uid: schedule.createdBy, email: schedule.createdByEmail
           });
           totalInputTokens  += usage?.input_tokens  || 0;
           totalOutputTokens += usage?.output_tokens || 0;

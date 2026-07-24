@@ -1314,6 +1314,23 @@ async function archiveSourceArticles(countryKey, sourceId, rssUrl) {
   }
 }
 
+// Reduces needless polling for slow-moving feeds — a source with, say, one
+// new item every 3 hours doesn't need re-checking every 15 minutes just
+// because the scheduler ticks that often. Derived from the same
+// itemCount/spanHours feed-stats already shown in the UI: the average gap
+// between items, halved for safety margin, clamped to a sane range. A source
+// with no feedStats yet (never checked, or too few items to measure a rate)
+// defaults to the tightest interval, since there's no evidence yet that
+// polling less often is safe for it.
+const MIN_POLL_MINUTES = 15;
+const MAX_POLL_MINUTES = 120;
+function targetPollMinutes(source) {
+  const stats = source.feedStats;
+  if (!stats || !stats.spanHours || !stats.itemCount || stats.itemCount < 2) return MIN_POLL_MINUTES;
+  const avgMinutesBetweenItems = (stats.spanHours * 60) / stats.itemCount;
+  return Math.min(MAX_POLL_MINUTES, Math.max(MIN_POLL_MINUTES, Math.round(avgMinutesBetweenItems / 2)));
+}
+
 exports.pollArchivedSources = onSchedule(
   { schedule: 'every 15 minutes', region: 'us-central1', memory: '256MiB', timeoutSeconds: 300, timeZone: 'Etc/UTC' },
   async () => {
@@ -1327,13 +1344,21 @@ exports.pollArchivedSources = onSchedule(
       (s.sourceIds || []).forEach(id => set.add(id));
     }
 
+    const now = Date.now();
     for (const [countryKey, sourceIdSet] of Object.entries(sourceIdsByCountry)) {
       let sources = [];
       try { sources = (await db.ref(`countries/${countryKey}/setup/sources`).once('value')).val() || []; } catch { continue; }
       const bySourceId = Object.fromEntries(sources.map(s => [s.id, s]));
+
+      let meta = {};
+      try { meta = (await db.ref(`articleArchiveMeta/${countryKey}`).once('value')).val() || {}; } catch {}
+
       await Promise.all([...sourceIdSet].map(sourceId => {
         const source = bySourceId[sourceId];
         if (!source?.rssUrl) return Promise.resolve();
+        const lastPolledAt = meta[sourceId]?.lastPolledAt || 0;
+        const dueInMs = targetPollMinutes(source) * 60000 - (now - lastPolledAt);
+        if (dueInMs > 0) return Promise.resolve(); // this source isn't due yet — cheaper feeds get skipped most ticks
         return archiveSourceArticles(countryKey, sourceId, source.rssUrl);
       }));
     }
@@ -1363,13 +1388,19 @@ function reportPeriodFor(frequency) {
   return { periodStart, periodEnd, dayKeys };
 }
 
+// Each returned article carries its own archive path (_archivePath) so the
+// caller can delete specific entries later — analyzeArticlesForTopics only
+// reads .title/.text, so this extra field rides along harmlessly.
 async function readArchivedArticles(countryKey, sourceId, dayKeys) {
   const snaps = await Promise.all(dayKeys.map(day => db.ref(`articleArchive/${countryKey}/${sourceId}/${day}`).once('value')));
   const articles = [];
-  for (const snap of snaps) {
-    const val = snap.val();
-    if (val) articles.push(...Object.values(val));
-  }
+  dayKeys.forEach((day, i) => {
+    const val = snaps[i].val();
+    if (!val) return;
+    for (const [key, a] of Object.entries(val)) {
+      articles.push({ ...a, _archivePath: `articleArchive/${countryKey}/${sourceId}/${day}/${key}` });
+    }
+  });
   return articles;
 }
 
@@ -1408,6 +1439,10 @@ exports.generateScheduledReports = onSchedule(
         const summaryLen = `~${Math.min(Math.max(schedule.summaryWords || 100, 30), 300)}-word summary`;
         let totalInputTokens = 0, totalOutputTokens = 0;
         const results = {};
+        // Collected but not applied until the whole run is durably recorded
+        // below — if anything in this run throws, nothing here ever executes,
+        // so a retried run still sees the full, unpruned archive to work from.
+        const pendingDeletions = {};
 
         await Promise.all(sources.map(async (source) => {
           const articles = await readArchivedArticles(schedule.countryKey, source.id, dayKeys);
@@ -1417,7 +1452,15 @@ exports.generateScheduledReports = onSchedule(
           totalInputTokens  += usage?.input_tokens  || 0;
           totalOutputTokens += usage?.output_tokens || 0;
           const analysis = finalizeAnalysis(text, relevantIndices, topicKeywordMatches, dateLabel);
-          results[source.id] = { source, articleCount: articles.length, analysis };
+          results[source.id] = { source, articleCount: articles.length, relevantCount: relevantIndices.length, analysis };
+
+          // Keep only the articles that mattered to this report; drop the
+          // rest from the archive. Note: if another schedule shares this same
+          // source with different topics (or a wider date range), it may now
+          // find fewer archived articles than before — pruning is per-schedule,
+          // applied immediately, by deliberate choice.
+          const relevantSet = new Set(relevantIndices);
+          articles.forEach((a, i) => { if (!relevantSet.has(i + 1)) pendingDeletions[a._archivePath] = null; });
         }));
 
         const costUsd = calcCostUsd(ai, totalInputTokens, totalOutputTokens);
@@ -1429,6 +1472,10 @@ exports.generateScheduledReports = onSchedule(
           provider: ai.type, model: ai.model, status: 'ok'
         });
         await db.ref(`schedules/${scheduleId}`).update({ lastRunAt: now.toISOString(), lastRunStatus: 'ok', lastPeriodEnd: periodEnd });
+
+        if (Object.keys(pendingDeletions).length > 0) {
+          try { await db.ref().update(pendingDeletions); } catch {}
+        }
       } catch (e) {
         // Deliberately does NOT set lastPeriodEnd on failure, so the next
         // hourly tick retries this same period instead of silently skipping it.

@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.87';
+const VERSION = 'v1.88';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -84,6 +84,26 @@ function formatDisplayDate(dateStr) {
 function formatLastLogin(ts) {
   if (!ts) return 'Never logged in';
   return 'Last logged in: ' + new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+// dd/mm/yyyy for a single "YYYY-MM-DD" string, or the same applied to both
+// sides of a "YYYY-MM-DD to YYYY-MM-DD" range label.
+function formatDMY(isoDate) {
+  const [y, m, d] = isoDate.split('-');
+  return `${d}/${m}/${y}`;
+}
+function formatDateLabelDMY(dateLabel) {
+  if (!dateLabel) return dateLabel;
+  if (dateLabel.includes(' to ')) {
+    const [a, b] = dateLabel.split(' to ');
+    return `${formatDMY(a)} to ${formatDMY(b)}`;
+  }
+  return formatDMY(dateLabel);
+}
+function formatDMYTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 // A feed's item count alone doesn't say much — pairing it with the time
 // span those items cover shows whether "10 items" means "the last 3 hours"
@@ -3288,7 +3308,7 @@ function ScheduledReportsPanel({ user, countries }) {
                       <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{s.country}</div>
                       <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{scheduleSummary(s)}</div>
                       <div style={{ fontSize: 11, color: s.lastRunStatus === 'error' ? '#f87171' : C.faint, marginTop: 2 }}>
-                        {s.lastRunAt ? `Last run: ${new Date(s.lastRunAt).toLocaleString()} (${s.lastRunStatus})` : 'Never run yet'}
+                        {s.lastRunAt ? `Last run: ${formatDMYTime(s.lastRunAt)} (${s.lastRunStatus})` : 'Never run yet'}
                       </div>
                     </div>
                     <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
@@ -3427,7 +3447,7 @@ function ScheduledReportsPanel({ user, countries }) {
                       ) : (runsByScheduleId[s.id] || []).map(r => (
                         <div key={r.runId} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '6px 8px', background: C.bg, borderRadius: 6, marginBottom: 5, fontSize: 11 }}>
                           <div style={{ minWidth: 0 }}>
-                            <span style={{ color: C.text }}>{r.dateLabel}</span>
+                            <span style={{ color: C.text }}>{formatDateLabelDMY(r.dateLabel)}</span>
                             <span style={{ color: r.status === 'error' ? '#f87171' : C.faint, marginLeft: 8 }}>
                               {r.status === 'error' ? '⚠ failed' : `$${r.costUsd.toFixed(4)} · ${r.sourceCount} sources`}
                             </span>
@@ -3542,7 +3562,7 @@ function ScheduledReportsPanel({ user, countries }) {
           onClick={() => setViewingRun(null)}>
           <div className="panel" style={{ maxWidth: 640, width: '100%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }} onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{viewingRun.run.dateLabel}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{formatDateLabelDMY(viewingRun.run.dateLabel)}</div>
               <button onClick={() => setViewingRun(null)} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 20 }}>×</button>
             </div>
             <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>
@@ -3553,7 +3573,7 @@ function ScheduledReportsPanel({ user, countries }) {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                   <span style={{ fontWeight: 700, fontSize: 13, color: C.text }}>{r.source.name}</span>
                   <LeanBadge lean={r.source.lean} />
-                  <span style={{ fontSize: 11, color: C.faint }}>{r.articleCount} article{r.articleCount !== 1 ? 's' : ''} archived</span>
+                  <span style={{ fontSize: 11, color: C.faint }}>{r.articleCount} scanned · {r.relevantCount ?? 0} kept</span>
                 </div>
                 {(r.analysis?.topicAnalyses || []).map((ta, j) => <TopicCard key={j} analysis={ta} />)}
               </div>

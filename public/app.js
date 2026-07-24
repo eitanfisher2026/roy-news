@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.88';
+const VERSION = 'v1.89';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -76,6 +76,19 @@ function getToneClass(tone) {
 function getToneLabel(tone) {
   const m = { positive: 'Positive', negative: 'Negative', neutral: 'Neutral', alarmed: 'Alarmed', dismissive: 'Dismissive' };
   return m[(tone || '').toLowerCase()] || tone || 'Neutral';
+}
+// Ranks a source by how strongly its coverage matched the requested topics —
+// not just whether it matched at all, but how many topics it covered and how
+// much material backed that up — so the most relevant sources surface first
+// instead of whatever order they happened to be fetched/stored in. Used by
+// both the point-in-time results view and the scheduled-report viewer.
+function topicMatchScore(analysis, relevantCount) {
+  const coveredCount = (analysis?.topicAnalyses || []).filter(ta => ta.covered).length;
+  return { coveredCount, relevantCount: relevantCount ?? (analysis?.relevantArticleIndices?.length || 0) };
+}
+function compareByMatchScore(a, b) {
+  if (b.coveredCount !== a.coveredCount) return b.coveredCount - a.coveredCount;
+  return b.relevantCount - a.relevantCount;
 }
 function formatDisplayDate(dateStr) {
   if (!dateStr) return '';
@@ -2093,6 +2106,12 @@ function ResultsView({ country, results, date, includeIsrael, usage, user, onNew
   const displayResults = isHebrew && hebrewResults ? hebrewResults : results;
   const failedSourceIds = sourceOrder.filter(id => results[id]?.rssError && !results[id]?.analysis);
   const visibleSourceIds = sourceOrder.filter(id => !failedSourceIds.includes(id));
+  // Sources with the strongest topic match lead — most covered topics first,
+  // then most relevant articles as a tiebreaker (stable otherwise, so ties
+  // keep their original order rather than reshuffling on every render).
+  const sortedVisibleSourceIds = [...visibleSourceIds].sort((idA, idB) =>
+    compareByMatchScore(topicMatchScore(displayResults[idA]?.analysis), topicMatchScore(displayResults[idB]?.analysis))
+  );
 
   async function handleCopyResult() {
     const text = buildShareText(country, date, displayResults, includeIsrael);
@@ -2222,7 +2241,7 @@ function ResultsView({ country, results, date, includeIsrael, usage, user, onNew
       )}
 
       <div className="results-columns" style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
-        {visibleSourceIds.map(id => <SourceColumn key={id} sourceResult={displayResults[id]} requestedDate={date} />)}
+        {sortedVisibleSourceIds.map(id => <SourceColumn key={id} sourceResult={displayResults[id]} requestedDate={date} />)}
         {includeIsrael && israelResult && <SourceColumn key="_israel" sourceResult={displayResults['_israel']} requestedDate={date} />}
       </div>
     </div>
@@ -3568,7 +3587,9 @@ function ScheduledReportsPanel({ user, countries }) {
             <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>
               ${(viewingRun.run.costUsd || 0).toFixed(4)} · {viewingRun.run.provider}/{viewingRun.run.model} · {viewingRun.run.inputTokens}+{viewingRun.run.outputTokens} tokens
             </div>
-            {Object.values(viewingRun.run.results || {}).map((r, i) => (
+            {Object.values(viewingRun.run.results || {})
+              .sort((a, b) => compareByMatchScore(topicMatchScore(a.analysis, a.relevantCount), topicMatchScore(b.analysis, b.relevantCount)))
+              .map((r, i) => (
               <div key={i} style={{ marginBottom: 18, paddingBottom: 14, borderBottom: '1px solid ' + C.border }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                   <span style={{ fontWeight: 700, fontSize: 13, color: C.text }}>{r.source.name}</span>

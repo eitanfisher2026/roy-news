@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.89';
+const VERSION = 'v1.90';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2636,8 +2636,8 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
           </div>
         )}
 
-        {/* Scheduled Reports (admin only) */}
-        {isAdmin && <ScheduledReportsPanel user={user} countries={countries} />}
+        {/* Scheduled Reports — personal by default, shareable per schedule */}
+        <ScheduledReportsPanel user={user} countries={countries} />
 
         {/* Usage & Costs */}
         <div style={{ marginBottom: 28 }}>
@@ -3109,6 +3109,14 @@ function ScheduledReportsPanel({ user, countries }) {
   const [archiveMeta, setArchiveMeta] = useState({}); // countryKey -> { [sourceId]: { lastPolledAt, articleCount } }
   const [metaLoading, setMetaLoading] = useState(null);
 
+  // Sharing — owner-only. "read" can view the schedule and its reports;
+  // "write" can also edit/pause/delete it, same two-level model as Buli lists.
+  const [sharingId, setSharingId] = useState(null);
+  const [shareEmail, setShareEmail] = useState('');
+  const [shareLevel, setShareLevel] = useState('read');
+  const [sharingBusy, setSharingBusy] = useState(false);
+  const [shareMsg, setShareMsg] = useState('');
+
   // Full edit mode — mirrors every field the "New Schedule" form sets, so
   // whatever you could configure at creation you can also change later,
   // including swapping sources via the same SourceManager used in country
@@ -3264,6 +3272,39 @@ function ScheduledReportsPanel({ user, countries }) {
     setBusyId(null);
   }
 
+  function startShare(schedule) {
+    setSharingId(sharingId === schedule.id ? null : schedule.id);
+    setShareEmail(''); setShareLevel('read'); setShareMsg('');
+  }
+
+  async function handleAddShare(schedule) {
+    const email = shareEmail.trim();
+    if (!email) return;
+    setSharingBusy(true);
+    setShareMsg('');
+    try {
+      await fns.httpsCallable('shareSchedule')({ scheduleId: schedule.id, email, level: shareLevel });
+      await loadSchedules();
+      setShareEmail('');
+      setShareMsg('✓ Shared');
+    } catch (e) {
+      setShareMsg('⚠ ' + e.message);
+    }
+    setSharingBusy(false);
+  }
+
+  async function handleRemoveShare(schedule, uid) {
+    setSharingBusy(true);
+    try {
+      const entry = schedule.sharedWith?.[uid];
+      await fns.httpsCallable('shareSchedule')({ scheduleId: schedule.id, email: entry?.email, level: null });
+      await loadSchedules();
+    } catch (e) {
+      alert('Could not remove access: ' + e.message);
+    }
+    setSharingBusy(false);
+  }
+
   async function toggleExpand(schedule) {
     const next = expandedId === schedule.id ? null : schedule.id;
     setExpandedId(next);
@@ -3324,25 +3365,79 @@ function ScheduledReportsPanel({ user, countries }) {
                 <div key={s.id} style={{ padding: '10px 12px', background: '#0f1e35', borderRadius: 7, marginBottom: 8, border: '1px solid ' + C.border }}>
                   <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{s.country}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{s.country}</span>
+                        {s.access !== 'owner' && (
+                          <span style={{ fontSize: 10, fontWeight: 700, color: '#60a5fa', background: '#1a2d42', border: '1px solid #2a4060', borderRadius: 4, padding: '1px 6px', textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                            {s.access === 'write' ? 'Shared · can edit' : 'Shared · view only'}
+                          </span>
+                        )}
+                      </div>
+                      {s.access !== 'owner' && (
+                        <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>Owned by {s.createdByEmail}</div>
+                      )}
                       <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{scheduleSummary(s)}</div>
                       <div style={{ fontSize: 11, color: s.lastRunStatus === 'error' ? '#f87171' : C.faint, marginTop: 2 }}>
                         {s.lastRunAt ? `Last run: ${formatDMYTime(s.lastRunAt)} (${s.lastRunStatus})` : 'Never run yet'}
                       </div>
                     </div>
                     <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
-                      <button onClick={() => toggleEnabled(s)} disabled={busyId === s.id}
-                        style={{ ...SMALL_BTN, color: s.enabled ? '#4ade80' : C.faint, borderColor: s.enabled ? '#14532d' : C.border, fontSize: 11 }}>
-                        {s.enabled ? '● On' : '○ Off'}
-                      </button>
-                      <button onClick={() => editingId === s.id ? cancelEdit() : startEdit(s)} disabled={busyId === s.id}
-                        style={{ ...SMALL_BTN, color: editingId === s.id ? '#60a5fa' : C.faint, borderColor: editingId === s.id ? '#1e4a6e' : C.border, fontSize: 11 }}>
-                        ✎ Edit
-                      </button>
-                      <button onClick={() => handleDelete(s)} disabled={busyId === s.id}
-                        style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 18, padding: '0 4px', opacity: 0.7 }}>×</button>
+                      {s.access !== 'read' && (
+                        <button onClick={() => toggleEnabled(s)} disabled={busyId === s.id}
+                          style={{ ...SMALL_BTN, color: s.enabled ? '#4ade80' : C.faint, borderColor: s.enabled ? '#14532d' : C.border, fontSize: 11 }}>
+                          {s.enabled ? '● On' : '○ Off'}
+                        </button>
+                      )}
+                      {s.access !== 'read' && (
+                        <button onClick={() => editingId === s.id ? cancelEdit() : startEdit(s)} disabled={busyId === s.id}
+                          style={{ ...SMALL_BTN, color: editingId === s.id ? '#60a5fa' : C.faint, borderColor: editingId === s.id ? '#1e4a6e' : C.border, fontSize: 11 }}>
+                          ✎ Edit
+                        </button>
+                      )}
+                      {s.access === 'owner' && (
+                        <button onClick={() => startShare(s)} disabled={busyId === s.id}
+                          style={{ ...SMALL_BTN, color: sharingId === s.id ? '#60a5fa' : C.faint, borderColor: sharingId === s.id ? '#1e4a6e' : C.border, fontSize: 11 }}>
+                          👥 Share
+                        </button>
+                      )}
+                      {s.access !== 'read' && (
+                        <button onClick={() => handleDelete(s)} disabled={busyId === s.id}
+                          style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 18, padding: '0 4px', opacity: 0.7 }}>×</button>
+                      )}
                     </div>
                   </div>
+
+                  {sharingId === s.id && (
+                    <div style={{ marginTop: 10, padding: 12, background: '#0a1626', borderRadius: 7, border: '1px solid ' + C.border }}>
+                      <div style={{ fontSize: 11, color: C.faint, marginBottom: 8, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5 }}>Shared with</div>
+                      {Object.keys(s.sharedWith || {}).length === 0 ? (
+                        <div style={{ color: C.faint, fontSize: 12, marginBottom: 10 }}>Not shared with anyone yet</div>
+                      ) : Object.entries(s.sharedWith).map(([uid, entry]) => (
+                        <div key={uid} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 8px', background: C.bg, borderRadius: 6, marginBottom: 5, fontSize: 12 }}>
+                          <span style={{ color: C.text }}>{entry.email}</span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, color: entry.level === 'write' ? '#60a5fa' : C.faint, textTransform: 'uppercase' }}>{entry.level}</span>
+                            <button onClick={() => handleRemoveShare(s, uid)} disabled={sharingBusy}
+                              style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d', padding: '2px 8px', fontSize: 10 }}>Remove</button>
+                          </div>
+                        </div>
+                      ))}
+                      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                        <input type="email" value={shareEmail} onChange={e => setShareEmail(e.target.value)}
+                          placeholder="name@example.com" className="input-field" style={{ flex: 1, fontSize: 12 }}
+                          onKeyDown={e => { if (e.key === 'Enter') handleAddShare(s); }} />
+                        <select value={shareLevel} onChange={e => setShareLevel(e.target.value)} className="input-field" style={{ fontSize: 12, width: 90 }}>
+                          <option value="read">Read</option>
+                          <option value="write">Write</option>
+                        </select>
+                        <button onClick={() => handleAddShare(s)} disabled={!shareEmail.trim() || sharingBusy}
+                          style={{ ...BTN('#2563eb'), fontSize: 12, padding: '7px 14px', opacity: (!shareEmail.trim() || sharingBusy) ? 0.5 : 1 }}>
+                          {sharingBusy ? <Spinner size={10} /> : 'Add'}
+                        </button>
+                      </div>
+                      {shareMsg && <div style={{ fontSize: 11, color: shareMsg.startsWith('✓') ? '#4ade80' : '#f87171', marginTop: 8 }}>{shareMsg}</div>}
+                    </div>
+                  )}
 
                   {editingId === s.id ? (
                     <div style={{ marginTop: 10, padding: 12, background: '#0a1626', borderRadius: 7, border: '1px solid ' + C.border }}>
@@ -3446,7 +3541,9 @@ function ScheduledReportsPanel({ user, countries }) {
                                 </div>
                               );
                             })}
-                            <button onClick={() => startEdit(s)} style={{ ...SMALL_BTN, fontSize: 11, marginTop: 4 }}>✎ Edit sources</button>
+                            {s.access !== 'read' && (
+                              <button onClick={() => startEdit(s)} style={{ ...SMALL_BTN, fontSize: 11, marginTop: 4 }}>✎ Edit sources</button>
+                            )}
                           </div>
                         );
                       })()}

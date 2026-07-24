@@ -47,6 +47,25 @@ function requireAdmin(role) {
   if (role !== 'admin') throw new HttpsError('permission-denied', 'Administrator access required.');
 }
 
+// ─── Per-schedule access (owner / write / read) ───────────────────────────────
+// Schedules are personal by default (owned by whoever created them) with
+// optional sharing to specific other authorized users, same shape as Buli's
+// list sharing: "read" can view the schedule and its reports; "write" can
+// also edit, pause/resume, and delete it; only the owner can manage who it's
+// shared with.
+function scheduleAccessLevel(schedule, uid) {
+  if (schedule.createdBy === uid) return 'owner';
+  const shared = schedule.sharedWith && schedule.sharedWith[uid];
+  return shared ? shared.level : null;
+}
+function requireScheduleAccess(schedule, uid, minLevel) {
+  const level = scheduleAccessLevel(schedule, uid);
+  if (!level) throw new HttpsError('permission-denied', 'You do not have access to this schedule.');
+  if (minLevel === 'write' && level === 'read') throw new HttpsError('permission-denied', 'You have read-only access to this schedule.');
+  if (minLevel === 'owner' && level !== 'owner') throw new HttpsError('permission-denied', 'Only the schedule owner can do this.');
+  return level;
+}
+
 // ─── Cost tracking (per user, per month, per AI provider) ─────────────────────
 // Shared by live onCall requests and the background scheduled-report job —
 // both attribute cost to a uid, they just get it from different places
@@ -1543,7 +1562,7 @@ exports.generateScheduledReports = onSchedule(
 exports.createSchedule = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
-    requireAdmin(await requireAuthorized(request));
+    await requireAuthorized(request);
     const { country, countryKey, sourceIds, topics, frequency, startDay, hourUtc, summaryWords, maxArticles } = request.data || {};
     if (!country || !countryKey || !sourceIds?.length || !topics?.length) {
       throw new HttpsError('invalid-argument', 'country, countryKey, sourceIds, and topics required');
@@ -1561,19 +1580,24 @@ exports.createSchedule = onCall(
       enabled: true,
       createdBy: request.auth.uid, createdByEmail: request.auth.token.email || null,
       createdAt: new Date().toISOString(),
-      lastRunAt: null, lastRunStatus: null, lastPeriodEnd: null
+      lastRunAt: null, lastRunStatus: null, lastPeriodEnd: null,
+      sharedWith: {}
     };
     await ref.set(schedule);
-    return { schedule };
+    return { schedule: { ...schedule, access: 'owner' } };
   }
 );
 
 exports.updateSchedule = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
-    requireAdmin(await requireAuthorized(request));
+    await requireAuthorized(request);
     const { scheduleId, ...updates } = request.data || {};
     if (!scheduleId) throw new HttpsError('invalid-argument', 'scheduleId required');
+    const snap = await db.ref(`schedules/${scheduleId}`).once('value');
+    const schedule = snap.val();
+    if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
+    requireScheduleAccess(schedule, request.auth.uid, 'write');
     const allowed = ['sourceIds', 'topics', 'frequency', 'startDay', 'hourUtc', 'summaryWords', 'maxArticles', 'enabled'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
@@ -1586,9 +1610,13 @@ exports.updateSchedule = onCall(
 exports.deleteSchedule = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
-    requireAdmin(await requireAuthorized(request));
+    await requireAuthorized(request);
     const { scheduleId } = request.data || {};
     if (!scheduleId) throw new HttpsError('invalid-argument', 'scheduleId required');
+    const snap = await db.ref(`schedules/${scheduleId}`).once('value');
+    const schedule = snap.val();
+    if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
+    requireScheduleAccess(schedule, request.auth.uid, 'write');
     // Only clears this schedule's own config + report history — the shared
     // article archive for its sources stays, since other schedules may
     // still be reading from it.
@@ -1603,20 +1631,69 @@ exports.deleteSchedule = onCall(
 exports.listSchedules = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
-    requireAdmin(await requireAuthorized(request));
+    await requireAuthorized(request);
+    const uid = request.auth.uid;
     const snap = await db.ref('schedules').once('value');
-    const schedules = Object.values(snap.val() || {});
-    schedules.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-    return { schedules };
+    const all = Object.values(snap.val() || {});
+    // Personal by default — only schedules you own or that were shared with
+    // you, not the whole app's list of every schedule anyone has created.
+    const mine = all
+      .map(s => ({ ...s, access: scheduleAccessLevel(s, uid) }))
+      .filter(s => s.access);
+    mine.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    return { schedules: mine };
+  }
+);
+
+exports.shareSchedule = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { scheduleId, email: rawEmail, level } = request.data || {};
+    if (!scheduleId || !rawEmail) throw new HttpsError('invalid-argument', 'scheduleId and email required');
+    if (level !== null && !['read', 'write'].includes(level)) {
+      throw new HttpsError('invalid-argument', 'level must be "read", "write", or null to remove access');
+    }
+    const snap = await db.ref(`schedules/${scheduleId}`).once('value');
+    const schedule = snap.val();
+    if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
+    requireScheduleAccess(schedule, request.auth.uid, 'owner');
+
+    const email = rawEmail.trim().toLowerCase();
+    if (email === (schedule.createdByEmail || '').toLowerCase()) {
+      throw new HttpsError('invalid-argument', 'That email is already the owner');
+    }
+    const role = await getRole(email);
+    if (!role) {
+      throw new HttpsError('failed-precondition',
+        `${email} isn't authorized to use Roy News yet.\n\nHow to fix: add them in Settings → Manage Users first, then share again.`
+      );
+    }
+    const targetUid = await resolveUidByEmail(email);
+    if (!targetUid) {
+      throw new HttpsError('failed-precondition',
+        `${email} hasn't signed in to Roy News yet.\n\nHow to fix: ask them to log in once, then share again.`
+      );
+    }
+    if (level === null) {
+      await db.ref(`schedules/${scheduleId}/sharedWith/${targetUid}`).remove();
+    } else {
+      await db.ref(`schedules/${scheduleId}/sharedWith/${targetUid}`).set({ email, level });
+    }
+    return { ok: true };
   }
 );
 
 exports.listReportRuns = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
-    requireAdmin(await requireAuthorized(request));
+    await requireAuthorized(request);
     const { scheduleId } = request.data || {};
     if (!scheduleId) throw new HttpsError('invalid-argument', 'scheduleId required');
+    const scheduleSnap = await db.ref(`schedules/${scheduleId}`).once('value');
+    const schedule = scheduleSnap.val();
+    if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
+    requireScheduleAccess(schedule, request.auth.uid, 'read');
     const snap = await db.ref(`reportRuns/${scheduleId}`).once('value');
     const val = snap.val() || {};
     // Metadata only — not the full per-source analysis payload, so browsing
@@ -1634,9 +1711,13 @@ exports.listReportRuns = onCall(
 exports.getReportRun = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
-    requireAdmin(await requireAuthorized(request));
+    await requireAuthorized(request);
     const { scheduleId, runId } = request.data || {};
     if (!scheduleId || !runId) throw new HttpsError('invalid-argument', 'scheduleId and runId required');
+    const scheduleSnap = await db.ref(`schedules/${scheduleId}`).once('value');
+    const schedule = scheduleSnap.val();
+    if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
+    requireScheduleAccess(schedule, request.auth.uid, 'read');
     const snap = await db.ref(`reportRuns/${scheduleId}/${runId}`).once('value');
     const run = snap.val();
     if (!run) throw new HttpsError('not-found', 'Report run not found');
@@ -1651,7 +1732,7 @@ exports.getReportRun = onCall(
 exports.estimateScheduleCost = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
-    requireAdmin(await requireAuthorized(request));
+    await requireAuthorized(request);
     const { sourceIds, topics, summaryWords, frequency } = request.data || {};
     if (!sourceIds?.length || !topics?.length) throw new HttpsError('invalid-argument', 'sourceIds and topics required');
 

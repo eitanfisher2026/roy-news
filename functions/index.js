@@ -1807,11 +1807,17 @@ exports.listReportRuns = onCall(
     const val = snap.val() || {};
     // Metadata only — not the full per-source analysis payload, so browsing
     // history for a schedule with many runs stays lightweight.
-    const runs = Object.entries(val).map(([runId, r]) => ({
-      runId, generatedAt: r.generatedAt, periodStart: r.periodStart, periodEnd: r.periodEnd,
-      dateLabel: r.dateLabel, costUsd: r.costUsd || 0, status: r.status, error: r.error || null,
-      sourceCount: r.results ? Object.keys(r.results).length : 0
-    }));
+    const runs = Object.entries(val).map(([runId, r]) => {
+      const sources = r.results ? Object.values(r.results) : [];
+      return {
+        runId, generatedAt: r.generatedAt, periodStart: r.periodStart, periodEnd: r.periodEnd,
+        dateLabel: r.dateLabel, costUsd: r.costUsd || 0, status: r.status, error: r.error || null,
+        sourceCount: sources.length,
+        // Total matched articles across all sources — lets the list mark which
+        // runs actually found something without fetching the full analysis.
+        relevantTotal: sources.reduce((sum, s) => sum + (s.relevantCount || 0), 0)
+      };
+    });
     runs.sort((a, b) => (b.generatedAt || '').localeCompare(a.generatedAt || ''));
     return { runs };
   }
@@ -1831,6 +1837,21 @@ exports.getReportRun = onCall(
     const run = snap.val();
     if (!run) throw new HttpsError('not-found', 'Report run not found');
     return { run };
+  }
+);
+
+exports.deleteReportRun = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { scheduleId, runId } = request.data || {};
+    if (!scheduleId || !runId) throw new HttpsError('invalid-argument', 'scheduleId and runId required');
+    const scheduleSnap = await db.ref(`schedules/${scheduleId}`).once('value');
+    const schedule = scheduleSnap.val();
+    if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
+    requireScheduleAccess(schedule, request.auth.uid, 'write');
+    await db.ref(`reportRuns/${scheduleId}/${runId}`).remove();
+    return { ok: true };
   }
 );
 

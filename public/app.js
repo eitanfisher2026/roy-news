@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.92';
+const VERSION = 'v1.93';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -313,6 +313,41 @@ function Spinner({ size = 20 }) {
   return <div className="spin" style={{ width: size, height: size, border: '2px solid #1e3a5f', borderTopColor: '#3b82f6', borderRadius: '50%', display: 'inline-block' }} />;
 }
 
+// ─── Generic confirm dialog ────────────────────────────────────────────────────
+// Replaces window.confirm everywhere in the app — a native browser confirm()
+// can't be styled, looks jarring against the rest of the UI, and is easy to
+// click through on muscle memory. This is the one dialog every delete/remove
+// action in the app should route through.
+function ConfirmDialog({ title = 'Are you sure?', message, confirmLabel = 'Delete', cancelLabel = 'Cancel', danger = true, onConfirm, onCancel }) {
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+      onClick={onCancel}>
+      <div className="panel" style={{ maxWidth: 360, width: '100%', padding: 20 }} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: C.text, marginBottom: 8 }}>{title}</div>
+        <div style={{ fontSize: 13, color: C.muted, marginBottom: 18, lineHeight: 1.5 }}>{message}</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={onCancel} style={{ ...SMALL_BTN, flex: 1 }}>{cancelLabel}</button>
+          <button onClick={onConfirm} style={{ ...BTN(danger ? '#b91c1c' : '#2563eb'), flex: 1, fontSize: 13, padding: '9px 14px' }}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Local per-component confirm-dialog state, so any component can do
+// `const [confirm, confirmDialog] = useConfirm();` then
+// `confirm({ message: '...', onConfirm: () => doTheThing() })` instead of
+// window.confirm(...), and render {confirmDialog} once near its root.
+function useConfirm() {
+  const [state, setState] = useState(null);
+  function confirm(opts) { setState(opts); }
+  function close() { setState(null); }
+  const dialog = state
+    ? <ConfirmDialog {...state} onConfirm={() => { state.onConfirm(); close(); }} onCancel={close} />
+    : null;
+  return [confirm, dialog];
+}
+
 // ─── Progress Bar ─────────────────────────────────────────────────────────────
 function ProgressBar({ durationSec, steps = [] }) {
   const [pct, setPct] = useState(0);
@@ -521,6 +556,7 @@ function SetupConfigPanel({ numSources, onChange, filterNoRSS, onFilterChange, o
 // intentionally does not embed this; it only lists/removes whole countries.
 function SourceManager({ country, user, sources, onSourcesChange, selectable = false, selected, onSelectionChange }) {
   const uid = user?.uid;
+  const [confirm, confirmDialog] = useConfirm();
 
   const [expanded, setExpanded] = useState(new Set());
   function toggleExpand(id) {
@@ -748,14 +784,18 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
     setCheckingAllStats(false);
   }
 
-  async function handleRemoveSource(id) {
-    if (!window.confirm('Remove this source permanently?')) return;
-    const newSources = sources.filter(s => s.id !== id);
-    onSourcesChange(newSources);
-    if (selectable && onSelectionChange) {
-      const n = new Set(selected); n.delete(id); onSelectionChange(n);
-    }
-    fns.httpsCallable('updateSources')({ countryKey: country.key, sources: newSources }).catch(() => {});
+  function handleRemoveSource(id) {
+    confirm({
+      message: 'Remove this source permanently?',
+      onConfirm: () => {
+        const newSources = sources.filter(s => s.id !== id);
+        onSourcesChange(newSources);
+        if (selectable && onSelectionChange) {
+          const n = new Set(selected); n.delete(id); onSelectionChange(n);
+        }
+        fns.httpsCallable('updateSources')({ countryKey: country.key, sources: newSources }).catch(() => {});
+      }
+    });
   }
 
   return (
@@ -996,6 +1036,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
           );
         })}
       </div>
+      {confirmDialog}
     </div>
   );
 }
@@ -1251,6 +1292,7 @@ function SourcesStep({ country, user, onConfirmed, onBack }) {
 function ConfigStep({ country, user, onGo, onBack }) {
   const uid = user?.uid;
   const topicsKey = uid ? `roy-news-topics-${uid}` : null;
+  const [confirm, confirmDialog] = useConfirm();
 
   function loadLocal(field, fallback) {
     if (!topicsKey) return fallback;
@@ -1320,14 +1362,18 @@ function ConfigStep({ country, user, onGo, onBack }) {
   function toggleContextMode(t) { setContextTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; }); }
   function addCustom() { const t = customInput.trim(); if (!t || customTopics.includes(t)) return; setCustomTopics(p => [...p, t]); setSelectedTopics(p => new Set([...p, t])); setCustomInput(''); }
   function removeTopic(t) {
-    if (!window.confirm(`Remove topic "${t}"?`)) return;
-    if (customTopics.includes(t)) {
-      setCustomTopics(p => p.filter(x => x !== t));
-    } else {
-      setRemovedDefaultTopics(prev => new Set([...prev, t]));
-    }
-    setSelectedTopics(prev => { const n = new Set(prev); n.delete(t); return n; });
-    setContextTopics(prev => { const n = new Set(prev); n.delete(t); return n; });
+    confirm({
+      message: `Remove topic "${t}"?`,
+      onConfirm: () => {
+        if (customTopics.includes(t)) {
+          setCustomTopics(p => p.filter(x => x !== t));
+        } else {
+          setRemovedDefaultTopics(prev => new Set([...prev, t]));
+        }
+        setSelectedTopics(prev => { const n = new Set(prev); n.delete(t); return n; });
+        setContextTopics(prev => { const n = new Set(prev); n.delete(t); return n; });
+      }
+    });
   }
 
   function computePeriodDates() {
@@ -1573,6 +1619,7 @@ function ConfigStep({ country, user, onGo, onBack }) {
           </>
         )}
       </div>
+      {confirmDialog}
     </div>
   );
 }
@@ -2300,6 +2347,7 @@ const ANTHROPIC_MODELS = [
 ];
 
 function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
+  const [confirm, confirmDialog] = useConfirm();
   const [persona, setPersona] = useState('');
   const [personaSaved, setPersonaSaved] = useState(false);
 
@@ -2476,16 +2524,20 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
     setUserBusy(false);
   }
 
-  async function handleRemoveUser(email) {
-    if (!window.confirm(`Remove access for ${email}?`)) return;
-    setUserBusy(true);
-    try {
-      await fns.httpsCallable('removeAuthorizedUser')({ email });
-      await loadAuthUsers();
-    } catch (e) {
-      setUserMsg('⚠ ' + e.message);
-    }
-    setUserBusy(false);
+  function handleRemoveUser(email) {
+    confirm({
+      message: `Remove access for ${email}?`,
+      onConfirm: async () => {
+        setUserBusy(true);
+        try {
+          await fns.httpsCallable('removeAuthorizedUser')({ email });
+          await loadAuthUsers();
+        } catch (e) {
+          setUserMsg('⚠ ' + e.message);
+        }
+        setUserBusy(false);
+      }
+    });
   }
 
   const [costsOpen, setCostsOpen] = useState(false);
@@ -2592,10 +2644,14 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
     deferredInstall.current = null;
   }
 
-  async function removeCountry(key) {
-    if (!window.confirm(`Remove ${key}?`)) return;
-    await fns.httpsCallable('deleteCountry')({ countryKey: key });
-    setCountries(p => p.filter(c => c.countryKey !== key));
+  function removeCountry(key) {
+    confirm({
+      message: `Remove ${key}? This deletes its sources and configuration for everyone.`,
+      onConfirm: async () => {
+        await fns.httpsCallable('deleteCountry')({ countryKey: key });
+        setCountries(p => p.filter(c => c.countryKey !== key));
+      }
+    });
   }
 
   return (
@@ -3164,6 +3220,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
           }
         </div>
       </div>
+      {confirmDialog}
     </div>
   );
 }
@@ -3195,6 +3252,7 @@ function TopicModeChips({ topics, contextSet, onToggle }) {
 
 function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const uid = user?.uid;
+  const [confirm, confirmDialog] = useConfirm();
   const [open, setOpen] = useState(defaultOpen);
   const [schedules, setSchedules] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -3393,16 +3451,20 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setBusyId(null);
   }
 
-  async function handleDelete(schedule) {
-    if (!window.confirm(`Delete this schedule for ${schedule.country}? Its report history will be removed too.`)) return;
-    setBusyId(schedule.id);
-    try {
-      await fns.httpsCallable('deleteSchedule')({ scheduleId: schedule.id });
-      setSchedules(prev => prev.filter(s => s.id !== schedule.id));
-    } catch (e) {
-      alert('Could not delete schedule: ' + e.message);
-    }
-    setBusyId(null);
+  function handleDelete(schedule) {
+    confirm({
+      message: `Delete this schedule for ${schedule.country}? Its report history will be removed too.`,
+      onConfirm: async () => {
+        setBusyId(schedule.id);
+        try {
+          await fns.httpsCallable('deleteSchedule')({ scheduleId: schedule.id });
+          setSchedules(prev => prev.filter(s => s.id !== schedule.id));
+        } catch (e) {
+          alert('Could not delete schedule: ' + e.message);
+        }
+        setBusyId(null);
+      }
+    });
   }
 
   function startShare(schedule) {
@@ -3454,10 +3516,30 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   async function viewRun(scheduleId, runId) {
     try {
       const resp = await fns.httpsCallable('getReportRun')({ scheduleId, runId });
-      setViewingRun({ scheduleId, run: resp.data.run });
+      setViewingRun({ scheduleId, runId, run: resp.data.run });
     } catch (e) {
       alert('Could not load report: ' + e.message);
     }
+  }
+
+  // Deliberately placed inside the report detail view, not the list row —
+  // a delete button in a scrollable list is one accidental tap away from
+  // destroying history; requiring "open it, then delete" is the friction
+  // that prevents that.
+  function handleDeleteRun(scheduleId, runId) {
+    confirm({
+      title: 'Delete this report?',
+      message: 'This permanently removes this one report from the schedule\'s history.',
+      onConfirm: async () => {
+        try {
+          await fns.httpsCallable('deleteReportRun')({ scheduleId, runId });
+          setRunsByScheduleId(prev => ({ ...prev, [scheduleId]: (prev[scheduleId] || []).filter(r => r.runId !== runId) }));
+          setViewingRun(null);
+        } catch (e) {
+          alert('Could not delete report: ' + e.message);
+        }
+      }
+    });
   }
 
   function scheduleSummary(s) {
@@ -3708,7 +3790,10 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                             </span>
                           </div>
                           {r.status !== 'error' && (
-                            <button onClick={() => viewRun(s.id, r.runId)} style={{ ...SMALL_BTN, fontSize: 10, flexShrink: 0 }}>View</button>
+                            <button onClick={() => viewRun(s.id, r.runId)} title={r.relevantTotal > 0 ? `${r.relevantTotal} matched article${r.relevantTotal !== 1 ? 's' : ''}` : 'No matches found'}
+                              style={{ ...SMALL_BTN, fontSize: 10, flexShrink: 0, color: r.relevantTotal > 0 ? '#4ade80' : C.faint, borderColor: r.relevantTotal > 0 ? '#14532d' : C.border }}>
+                              {r.relevantTotal > 0 ? '● View' : '○ View'}
+                            </button>
                           )}
                         </div>
                       ))}
@@ -3823,7 +3908,13 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
           <div className="panel" style={{ maxWidth: 640, width: '100%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }} onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{formatDateLabelDMY(viewingRun.run.dateLabel)}</div>
-              <button onClick={() => setViewingRun(null)} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 20 }}>×</button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <button onClick={() => handleDeleteRun(viewingRun.scheduleId, viewingRun.runId)}
+                  style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d', fontSize: 11 }}>
+                  🗑️ Delete report
+                </button>
+                <button onClick={() => setViewingRun(null)} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 20 }}>×</button>
+              </div>
             </div>
             <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>
               ${(viewingRun.run.costUsd || 0).toFixed(4)} · {viewingRun.run.provider}/{viewingRun.run.model} · {viewingRun.run.inputTokens}+{viewingRun.run.outputTokens} tokens
@@ -3843,6 +3934,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
           </div>
         </div>
       )}
+      {confirmDialog}
     </div>
   );
 }
@@ -4123,7 +4215,7 @@ function App() {
           style={SMALL_BTN}
           title="Share Roy News"
         >
-          🔗 Share App
+          🔗 Share
         </button>
         <button
           onClick={() => setPage(p => p === 'settings' ? 'main' : 'settings')}

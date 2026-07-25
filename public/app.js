@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.91';
+const VERSION = 'v1.92';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1001,7 +1001,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
 }
 
 // ─── Step 1: Country Selection ────────────────────────────────────────────────
-function CountryStep({ onCountryConfirmed, onError, user }) {
+function CountryStep({ onCountryConfirmed, onError, user, onOpenSchedule }) {
   const metaCacheKey = user ? `roy-news-countrymeta-${user.uid}` : null;
   const [input, setInput] = useState('');
   const [history, setHistory] = useState(() => {
@@ -1094,13 +1094,33 @@ function CountryStep({ onCountryConfirmed, onError, user }) {
     }
   }
 
+  // "Latest usage" = when a report was last actually run for that country on
+  // this device, falling back to its original setup date if never run.
+  function usageDate(c) {
+    const lastRun = user?.uid ? localStorage.getItem(`roy-news-lastrun-${user.uid}-${c.key}`) : null;
+    return lastRun || c.date || '';
+  }
+  const sortedHistory = [...history].sort((a, b) => usageDate(b).localeCompare(usageDate(a)));
+
+  function goToTopHistoryEntry() {
+    const top = sortedHistory[0];
+    if (top) { setInput(top.name); handleLookup(top.name); }
+  }
+
   return (
     <div className="fade-in" style={{ maxWidth: 500, margin: '60px auto', padding: '0 20px' }}>
-      <div style={{ textAlign: 'center', marginBottom: 36 }}>
+      <div style={{ textAlign: 'center', marginBottom: 24 }}>
         <div style={{ fontSize: 40, marginBottom: 8 }}>📰</div>
         <h1 style={{ fontSize: 28, fontWeight: 800, margin: 0, color: C.text }}>Roy News</h1>
         <div style={{ color: C.faint, fontSize: 12, marginTop: 4, cursor: 'pointer' }} onClick={() => window.location.reload()} title="Tap to refresh">{VERSION}</div>
       </div>
+
+      {onOpenSchedule && (
+        <button onClick={onOpenSchedule}
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, width: '100%', padding: '12px', marginBottom: 16, background: C.card, border: '1px solid ' + C.border, borderRadius: 10, color: C.text, fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>
+          🗓️ Scheduled Reports
+        </button>
+      )}
 
       <div className="panel" style={{ padding: 24 }}>
         <h2 style={{ fontSize: 15, fontWeight: 700, marginBottom: 16, color: C.text }}>Select Country</h2>
@@ -1110,7 +1130,7 @@ function CountryStep({ onCountryConfirmed, onError, user }) {
             placeholder="Type a country name…"
             value={input}
             onChange={e => { setInput(e.target.value); setLookup(null); }}
-            onKeyDown={e => e.key === 'Enter' && handleLookup()}
+            onKeyDown={e => { if (e.key === 'Enter') { input.trim() ? handleLookup() : goToTopHistoryEntry(); } }}
             style={{ flex: 1 }}
           />
           <button
@@ -1142,20 +1162,21 @@ function CountryStep({ onCountryConfirmed, onError, user }) {
           </div>
         )}
 
-        {history.length > 0 && (
+        {sortedHistory.length > 0 && (
           <div style={{ marginTop: 20 }}>
             <div style={{ fontSize: 11, color: C.faint, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 600 }}>Recent Countries</div>
-            {history.map(c => {
-              const isLast = c.key === lastKey;
-              const lastRun = user?.uid ? localStorage.getItem(`roy-news-lastrun-${user.uid}-${c.key}`) : null;
-              const displayDate = lastRun || c.date;
-              return (
-                <button key={c.key} onClick={() => { setInput(c.name); handleLookup(c.name); }}
-                  style={{ display: 'block', width: '100%', textAlign: 'left', padding: '9px 12px', background: isLast ? '#0f2744' : C.card, border: '1px solid ' + (isLast ? '#2563eb' : C.border), borderRadius: 7, color: C.text, cursor: 'pointer', marginBottom: 4, fontSize: 14 }}>
-                  {c.name} {isLast && <span style={{ color: '#60a5fa', fontSize: 11, fontWeight: 600 }}>★ last used</span>} {displayDate && <span style={{ color: C.faint, fontSize: 11 }}>· {displayDate}</span>}
-                </button>
-              );
-            })}
+            <div style={{ maxHeight: 280, overflowY: 'auto', paddingRight: 2 }}>
+              {sortedHistory.map(c => {
+                const isLast = c.key === lastKey;
+                const displayDate = usageDate(c);
+                return (
+                  <button key={c.key} onClick={() => { setInput(c.name); handleLookup(c.name); }}
+                    style={{ display: 'block', width: '100%', textAlign: 'left', padding: '9px 12px', background: isLast ? '#0f2744' : C.card, border: '1px solid ' + (isLast ? '#2563eb' : C.border), borderRadius: 7, color: C.text, cursor: 'pointer', marginBottom: 4, fontSize: 14 }}>
+                    {c.name} {isLast && <span style={{ color: '#60a5fa', fontSize: 11, fontWeight: 600 }}>★ last used</span>} {displayDate && <span style={{ color: C.faint, fontSize: 11 }}>· {displayDate}</span>}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
@@ -2674,9 +2695,6 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
           </div>
         )}
 
-        {/* Scheduled Reports — personal by default, shareable per schedule */}
-        <ScheduledReportsPanel user={user} countries={countries} />
-
         {/* Usage & Costs */}
         <div style={{ marginBottom: 28 }}>
           <button
@@ -3175,9 +3193,9 @@ function TopicModeChips({ topics, contextSet, onToggle }) {
   );
 }
 
-function ScheduledReportsPanel({ user, countries }) {
+function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const uid = user?.uid;
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const [schedules, setSchedules] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
@@ -3236,6 +3254,10 @@ function ScheduledReportsPanel({ user, countries }) {
   const [editMaxArticles, setEditMaxArticles] = useState(25);
   const [editSelected, setEditSelected] = useState(new Set());
   const [savingEdit, setSavingEdit] = useState(false);
+
+  // When used as its own page (not a collapsible Settings section), start
+  // already open and load immediately instead of waiting for a toggle tap.
+  useEffect(() => { if (defaultOpen) loadSchedules(); }, []);
 
   const selectedCountry = countries.find(c => c.countryKey === newCountryKey) || null;
 
@@ -3847,6 +3869,21 @@ function App() {
   const deferredInstall = useRef(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const appStateRef = useRef({});
+  const [scheduleCountries, setScheduleCountries] = useState([]);
+  const [scheduleCountriesLoaded, setScheduleCountriesLoaded] = useState(false);
+
+  // Lazy-loaded the first time the Scheduled Reports page is opened, then
+  // cached for the rest of the session — it needs the full source list per
+  // country (unlike CountryStep's lightweight name/key/date history).
+  useEffect(() => {
+    if (page !== 'schedule' || scheduleCountriesLoaded) return;
+    db.ref('countries').once('value').then(snap => {
+      const val = snap.val();
+      const list = val ? Object.values(val).filter(c => c.setup).map(c => c.setup) : [];
+      setScheduleCountries(list);
+      setScheduleCountriesLoaded(true);
+    });
+  }, [page, scheduleCountriesLoaded]);
 
   // Auth state listener
   useEffect(() => {
@@ -3896,7 +3933,7 @@ function App() {
     function onPop() {
       const { page, step, pendingRunParams } = appStateRef.current;
       let handled = true;
-      if (page === 'settings') setPage('main');
+      if (page === 'settings' || page === 'schedule') setPage('main');
       else if (step === 'results') backFromResults();
       else if (step === 'period-results') backFromPeriodResults();
       else if (step === 'sources') { setStep('config'); setPendingRunParams(null); }
@@ -4142,10 +4179,22 @@ function App() {
   let content;
   if (page === 'settings') {
     content = <SettingsPage onBack={() => setPage('main')} deferredInstall={deferredInstall} user={user} onSignOut={handleSignOut} isAdmin={role === 'admin'} />;
+  } else if (page === 'schedule') {
+    content = (
+      <div className="fade-in" style={{ maxWidth: 640, margin: '40px auto', padding: '0 20px' }}>
+        <div className="panel" style={{ padding: 24 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
+            <button onClick={() => setPage('main')} style={BACK_BTN}>← Back</button>
+            <h2 style={{ fontSize: 17, fontWeight: 800, margin: 0, color: C.text }}>🗓️ Scheduled Reports</h2>
+          </div>
+          <ScheduledReportsPanel user={user} countries={scheduleCountries} defaultOpen />
+        </div>
+      </div>
+    );
   } else if (step === 'loading' && loadingConfig) {
     content = <CancelableLoader {...loadingConfig} onCancel={cancel} />;
   } else if (step === 'country') {
-    content = <CountryStep onCountryConfirmed={handleCountryConfirmed} onError={addError} user={user} />;
+    content = <CountryStep onCountryConfirmed={handleCountryConfirmed} onError={addError} user={user} onOpenSchedule={() => setPage('schedule')} />;
   } else if (step === 'config') {
     content = <ConfigStep country={country} user={user} onGo={handleGo} onBack={() => setStep('country')} />;
   } else if (step === 'sources') {

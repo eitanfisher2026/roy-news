@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.95';
+const VERSION = 'v1.96';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1718,7 +1718,7 @@ function buildPeriodShareText(country, startDate, endDate, result) {
 }
 
 // ─── Period Result View ───────────────────────────────────────────────────────
-function PeriodResultView({ country, result, startDate, endDate, usage, onNewSearch, onError }) {
+function PeriodResultView({ country, result, startDate, endDate, topics, persona, user, usage, onNewSearch, onError }) {
   const [isHebrew, setIsHebrew]           = useState(false);
   const [hebrewResult, setHebrewResult]   = useState(null);
   const [translating, setTranslating]     = useState(false);
@@ -1726,6 +1726,32 @@ function PeriodResultView({ country, result, startDate, endDate, usage, onNewSea
   const [showTranslateInfo, setShowTranslateInfo] = useState(false);
   const [shareCopied, setShareCopied]     = useState(false);
   const [resultCopied, setResultCopied]   = useState(false);
+
+  // Follow-up conversation — the one-shot analysis above is fixed, but the
+  // user can ask about it instead of having to re-prompt from scratch.
+  const [followUps, setFollowUps]       = useState([]); // [{ question, answer, costUsd }]
+  const [followUpInput, setFollowUpInput] = useState('');
+  const [asking, setAsking]             = useState(false);
+
+  async function handleAskFollowUp() {
+    const question = followUpInput.trim();
+    if (!question || asking || !result) return;
+    setAsking(true);
+    try {
+      const aiSettings = await getAISettings(user?.uid);
+      const resp = await fns.httpsCallable('askPeriodFollowUp', { timeout: 65000 })({
+        country: country.name, topics, startDate, endDate, persona,
+        originalResult: result,
+        history: followUps.map(f => ({ question: f.question, answer: f.answer })),
+        question, ...aiSettings
+      });
+      setFollowUps(prev => [...prev, { question, answer: resp.data.answer, costUsd: resp.data.usage?.costUsd || 0 }]);
+      setFollowUpInput('');
+    } catch (e) {
+      onError?.('Follow-up question', e.message);
+    }
+    setAsking(false);
+  }
 
   const displayResult = isHebrew && hebrewResult ? hebrewResult : result;
   const { leanGroups = [], synthesis } = displayResult || {};
@@ -1921,6 +1947,33 @@ function PeriodResultView({ country, result, startDate, endDate, usage, onNewSea
               <div style={{ fontSize: 13, color: '#cbd5e1', lineHeight: 1.7 }}>{val}</div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Follow-up conversation — the analysis above is fixed, but you can
+          ask about it instead of writing a whole new prompt from scratch. */}
+      {result && (
+        <div className="no-print" style={{ marginTop: 20, padding: 18, background: C.card, borderRadius: 10, border: '1px solid ' + C.border }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: C.text, marginBottom: 4 }}>💬 Ask about this analysis</div>
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 14 }}>Elaborate, clarify, or push back on anything above — each answer is grounded in the analysis, not a fresh lookup.</div>
+
+          {followUps.map((f, i) => (
+            <div key={i} style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#60a5fa', marginBottom: 4 }}>{f.question}</div>
+              <div style={{ fontSize: 13, color: '#cbd5e1', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{f.answer}</div>
+            </div>
+          ))}
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input className="input-field" value={followUpInput} onChange={e => setFollowUpInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAskFollowUp(); } }}
+              placeholder="e.g. Elaborate on the blind spot you mentioned…" disabled={asking}
+              style={{ flex: 1, fontSize: 13 }} />
+            <button onClick={handleAskFollowUp} disabled={!followUpInput.trim() || asking}
+              style={{ ...BTN('#2563eb'), padding: '9px 16px', fontSize: 13, opacity: (!followUpInput.trim() || asking) ? 0.5 : 1 }}>
+              {asking ? <Spinner size={14} /> : 'Ask'}
+            </button>
+          </div>
         </div>
       )}
 
@@ -3981,6 +4034,7 @@ function App() {
   const [resultUsage, setResultUsage] = useState(null);
   const [periodResult, setPeriodResult] = useState(null);
   const [periodDates, setPeriodDates] = useState({ startDate: null, endDate: null });
+  const [periodContext, setPeriodContext] = useState({ topics: [], persona: '' }); // for follow-up questions
   const [pendingRunParams, setPendingRunParams] = useState(null);
   const [loadingConfig, setLoadingConfig] = useState(null); // { title, duration, steps }
   const [errors, setErrors] = useState([]);
@@ -4219,6 +4273,7 @@ function App() {
         const resp = await fn({ country: country.name, countryKey: country.key, topics, startDate, endDate, periodReportWords: periodReportWords || 150, persona, ...aiSettings });
         if (cancelledRef.current) return;
         setPeriodResult(resp.data.result);
+        setPeriodContext({ topics, persona });
         setResultUsage(resp.data.usage || null);
         localStorage.setItem(`roy-news-lastrun-${user.uid}-${country.key}`, new Date().toISOString().slice(0, 10));
         setStep('period-results');
@@ -4332,7 +4387,9 @@ function App() {
   } else if (step === 'results') {
     content = <ResultsView country={country} results={results} date={resultDate} includeIsrael={false} usage={resultUsage} user={user} onNewSearch={backFromResults} onError={addError} />;
   } else if (step === 'period-results') {
-    content = <PeriodResultView country={country} result={periodResult} startDate={periodDates.startDate} endDate={periodDates.endDate} usage={resultUsage} onNewSearch={backFromPeriodResults} onError={addError} />;
+    content = <PeriodResultView country={country} result={periodResult} startDate={periodDates.startDate} endDate={periodDates.endDate}
+      topics={periodContext.topics} persona={periodContext.persona} user={user}
+      usage={resultUsage} onNewSearch={backFromPeriodResults} onError={addError} />;
   }
 
   return (

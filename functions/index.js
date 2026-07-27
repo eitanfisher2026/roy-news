@@ -1203,6 +1203,44 @@ exports.fetchPeriodSummary = onCall(
   }
 );
 
+// Turns the one-shot period summary into a real back-and-forth: the client
+// resends the original analysis plus the running Q&A history each time, so
+// the model can elaborate, clarify, or reconsider instead of the user having
+// to re-prompt from scratch. Not grounded in new data — same knowledge basis
+// as the original summary, just conversational access to it.
+exports.askPeriodFollowUp = onCall(
+  { timeoutSeconds: 60, memory: '256MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { country, topics, startDate, endDate, persona, originalResult, history, question } = request.data || {};
+    if (!country || !topics?.length || !startDate || !endDate || !originalResult || !question) {
+      throw new HttpsError('invalid-argument', 'country, topics, startDate, endDate, originalResult, and question required');
+    }
+
+    const ai = makeAI(request.data);
+    const personaLine = persona ? `\nReader profile for this analysis: ${persona}\n` : '';
+    const historyText = (history || [])
+      .map(h => `Q: ${h.question}\nA: ${h.answer}`)
+      .join('\n\n');
+
+    const prompt = `You previously analyzed how ${country}'s media covered these topics between ${startDate} and ${endDate}: ${topics.join(', ')}.${personaLine}
+
+Your original analysis (JSON):
+${JSON.stringify(originalResult)}
+${historyText ? `\nEarlier follow-up questions in this conversation:\n${historyText}\n` : ''}
+Follow-up question: ${question}
+
+Answer specifically and conversationally, grounded in your original analysis above — elaborate, clarify, reconsider, or push back as the question warrants. Don't repeat the full analysis back; just answer what was asked. Plain text only, no JSON, no markdown headers.`;
+
+    const { text, usage } = await callAI(ai, prompt, 1200);
+    const costUsd = await recordCost(request, ai, usage?.input_tokens || 0, usage?.output_tokens || 0);
+    return {
+      answer: text.trim(),
+      usage: { inputTokens: usage?.input_tokens || 0, outputTokens: usage?.output_tokens || 0, costUsd, provider: ai.type, model: ai.model }
+    };
+  }
+);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Live model catalog — lets Settings show each provider's current model list
 // (ours goes stale as providers ship new models) with a price hint per model.

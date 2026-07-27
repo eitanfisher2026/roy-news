@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.97';
+const VERSION = 'v2.0';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3516,8 +3516,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   }
 
   function handleDelete(schedule) {
+    const topicsPart = schedule.topics?.length ? ` (${schedule.topics.join(', ')})` : '';
     confirm({
-      message: `Delete this schedule for ${schedule.country}? Its report history will be removed too.`,
+      message: `Delete this schedule for ${schedule.country}? Its entire report history will be removed too — Period Analysis will lose all real archived grounding for these topics${topicsPart} and fall back to general knowledge alone for any date this schedule covered.`,
       onConfirm: async () => {
         setBusyId(schedule.id);
         try {
@@ -3604,10 +3605,13 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   // a delete button in a scrollable list is one accidental tap away from
   // destroying history; requiring "open it, then delete" is the friction
   // that prevents that.
-  function handleDeleteRun(scheduleId, runId) {
+  function handleDeleteRun(scheduleId, runId, dateLabel) {
+    const schedule = schedules.find(s => s.id === scheduleId);
+    const topicsPart = schedule?.topics?.length ? ` on ${schedule.topics.join(', ')}` : '';
+    const datePart = dateLabel ? ` for ${formatDateLabelDMY(dateLabel)}` : ' for that date';
     confirm({
       title: 'Delete this report?',
-      message: 'This permanently removes this one report from the schedule\'s history.',
+      message: `This permanently removes this one report from the schedule's history. Period Analysis will no longer be able to ground itself in real archived coverage${topicsPart}${datePart} — it'll fall back to general knowledge alone for it.`,
       onConfirm: async () => {
         try {
           await fns.httpsCallable('deleteReportRun')({ scheduleId, runId });
@@ -3989,7 +3993,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{formatDateLabelDMY(viewingRun.run.dateLabel)}</div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <button onClick={() => handleDeleteRun(viewingRun.scheduleId, viewingRun.runId)}
+                <button onClick={() => handleDeleteRun(viewingRun.scheduleId, viewingRun.runId, viewingRun.run.dateLabel)}
                   style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d', fontSize: 11 }}>
                   🗑️ Delete report
                 </button>

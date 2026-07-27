@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v2.2';
+const VERSION = 'v2.3';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1626,6 +1626,29 @@ function ConfigStep({ country, user, onGo, onBack }) {
 }
 
 // ─── Topic Card ───────────────────────────────────────────────────────────────
+// Two topics that matched the exact same article(s) for a source would
+// otherwise render as separate, near-identical cards (same quotes, same
+// narrative) — merge them into one card under a combined heading. Topics
+// with no match, or a different/partial match set, stay separate since
+// they're not actually redundant. Falls back to no merging when
+// matchedIndices is missing (older reports predating this field).
+function groupTopicAnalyses(topicAnalyses) {
+  const groups = [];
+  const groupIndexBySignature = new Map();
+  (topicAnalyses || []).forEach(ta => {
+    const signature = ta.covered && Array.isArray(ta.matchedIndices) && ta.matchedIndices.length > 0
+      ? ta.matchedIndices.join(',')
+      : null;
+    if (signature && groupIndexBySignature.has(signature)) {
+      groups[groupIndexBySignature.get(signature)].topics.push(ta.topic);
+      return;
+    }
+    groups.push({ topics: [ta.topic], analysis: ta });
+    if (signature) groupIndexBySignature.set(signature, groups.length - 1);
+  });
+  return groups.map(g => ({ ...g.analysis, topic: g.topics.join(' + ') }));
+}
+
 function TopicCard({ analysis }) {
   const { topic, covered, summary, tone, narrative, quotes, comparedToArab } = analysis;
   const [open, setOpen] = useState(true);
@@ -2083,7 +2106,7 @@ function SourceColumn({ sourceResult, requestedDate }) {
       <div style={{ fontSize: 11, color: C.faint, marginBottom: 8, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5 }}>Topic Analysis</div>
       {topicAnalyses.length === 0
         ? <div style={{ color: C.faint, fontSize: 13 }}>No results</div>
-        : topicAnalyses.map((ta, i) => <TopicCard key={i} analysis={ta} />)
+        : groupTopicAnalyses(topicAnalyses).map((ta, i) => <TopicCard key={i} analysis={ta} />)
       }
 
       {/* RSS feed info — always shown */}
@@ -4017,7 +4040,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   <LeanBadge lean={r.source.lean} />
                   <span style={{ fontSize: 11, color: C.faint }}>{r.articleCount} scanned · {r.relevantCount ?? 0} kept</span>
                 </div>
-                {(r.analysis?.topicAnalyses || []).map((ta, j) => <TopicCard key={j} analysis={ta} />)}
+                {groupTopicAnalyses(r.analysis?.topicAnalyses).map((ta, j) => <TopicCard key={j} analysis={ta} />)}
               </div>
             ))}
           </div>

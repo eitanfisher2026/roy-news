@@ -928,11 +928,15 @@ function finalizeAnalysis(rawText, relevantIndices, topicKeywordMatches, dateLab
     if (Array.isArray(analysis.topicAnalyses) && topicKeywordMatches) {
       analysis.topicAnalyses = analysis.topicAnalyses.map(ta => {
         const key = Object.keys(topicKeywordMatches).find(t => t.toLowerCase() === (ta.topic || '').toLowerCase());
-        if (!key || contextSet.has(key.toLowerCase())) return ta;
-        const hasMatch = topicKeywordMatches[key].length > 0;
-        if (hasMatch && !ta.covered) return { ...ta, covered: true };
-        if (!hasMatch && ta.covered) return { ...ta, covered: false, summary: `No articles about this topic were published in this outlet on ${dateLabel}.`, narrative: null, quotes: [], tone: 'neutral' };
-        return ta;
+        if (!key) return ta;
+        // Carried to the client so it can merge topics that matched the exact
+        // same article(s) into one card instead of showing duplicate write-ups.
+        const matchedIndices = topicKeywordMatches[key].slice().sort((a, b) => a - b);
+        if (contextSet.has(key.toLowerCase())) return { ...ta, matchedIndices };
+        const hasMatch = matchedIndices.length > 0;
+        if (hasMatch && !ta.covered) return { ...ta, covered: true, matchedIndices };
+        if (!hasMatch && ta.covered) return { ...ta, covered: false, summary: `No articles about this topic were published in this outlet on ${dateLabel}.`, narrative: null, quotes: [], tone: 'neutral', matchedIndices };
+        return { ...ta, matchedIndices };
       });
     }
   }

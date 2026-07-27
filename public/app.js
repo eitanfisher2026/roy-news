@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v2.1';
+const VERSION = 'v2.2';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -976,12 +976,12 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
           return (
             <div key={src.id} className={selectable ? `check-item ${getLeanCss(src.lean)}` : getLeanCss(src.lean)}
               onClick={selectable ? () => { const n = new Set(selected); n.has(src.id) ? n.delete(src.id) : n.add(src.id); onSelectionChange(n); } : undefined}
-              style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '12px 14px', background: active ? C.card : '#0f1e35', border: '1px solid ' + (active ? C.borderLight : C.border), borderRadius: 8, cursor: selectable ? 'pointer' : 'default', ...(isNew ? { outline: '2px dashed #3b82f6', outlineOffset: 2 } : {}) }}>
+              style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 10, padding: '12px 14px', background: active ? C.card : '#0f1e35', border: '1px solid ' + (active ? C.borderLight : C.border), borderRadius: 8, cursor: selectable ? 'pointer' : 'default', ...(isNew ? { outline: '2px dashed #3b82f6', outlineOffset: 2 } : {}) }}>
               {selectable && (
                 <input type="checkbox" checked={active} readOnly
                   style={{ marginTop: 3, accentColor: getLeanColor(src.lean), flexShrink: 0, pointerEvents: 'none' }} />
               )}
-              <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ flex: '1 1 200px', minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
                   <span style={{ fontWeight: 700, fontSize: 14, color: C.text }}>{src.name}</span>
                   {isNew && (
@@ -1018,7 +1018,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
                   </div>
                 )}
               </div>
-              <div style={{ display: 'flex', gap: 5, flexShrink: 0, alignItems: 'flex-start' }} onClick={e => e.stopPropagation()}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, flexShrink: 0, alignItems: 'flex-start', marginLeft: 'auto', justifyContent: 'flex-end', maxWidth: 160 }} onClick={e => e.stopPropagation()}>
                 {src.rssUrl && (
                   <button onClick={() => handleCheckStats(src)} disabled={isBusy || checkingStatsId === src.id}
                     title="Re-check this feed's item count and time span" style={{ ...SMALL_BTN, fontSize: 11 }}>

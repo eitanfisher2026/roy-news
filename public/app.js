@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.94';
+const VERSION = 'v1.95';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3274,9 +3274,10 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [createMsg, setCreateMsg] = useState('');
 
   const [sharedInfoId, setSharedInfoId] = useState(null);
-  const [expandedId, setExpandedId] = useState(null);
+  // All schedules' report history is auto-expanded and eager-loaded on open
+  // (see loadSchedules) — no clicking through each country one at a time.
+  const [expandedIds, setExpandedIds] = useState(new Set());
   const [runsByScheduleId, setRunsByScheduleId] = useState({});
-  const [runsLoading, setRunsLoading] = useState(null);
   const [viewingRun, setViewingRun] = useState(null); // { scheduleId, run }
   const [busyId, setBusyId] = useState(null);
 
@@ -3388,7 +3389,16 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setLoading(true);
     try {
       const resp = await fns.httpsCallable('listSchedules')({});
-      setSchedules(resp.data.schedules || []);
+      const list = resp.data.schedules || [];
+      setSchedules(list);
+      // Auto-expand every schedule's report history and eager-load it —
+      // "open all countries and expand their report automatically."
+      setExpandedIds(new Set(list.map(s => s.id)));
+      list.forEach(s => {
+        fns.httpsCallable('listReportRuns')({ scheduleId: s.id }).then(r => {
+          setRunsByScheduleId(prev => ({ ...prev, [s.id]: r.data.runs || [] }));
+        }).catch(() => {});
+      });
     } catch {}
     setLoading(false);
   }
@@ -3502,15 +3512,16 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   }
 
   async function toggleExpand(schedule) {
-    const next = expandedId === schedule.id ? null : schedule.id;
-    setExpandedId(next);
-    if (next && !runsByScheduleId[schedule.id]) {
-      setRunsLoading(schedule.id);
+    setExpandedIds(prev => {
+      const n = new Set(prev);
+      n.has(schedule.id) ? n.delete(schedule.id) : n.add(schedule.id);
+      return n;
+    });
+    if (!runsByScheduleId[schedule.id]) {
       try {
         const resp = await fns.httpsCallable('listReportRuns')({ scheduleId: schedule.id });
         setRunsByScheduleId(prev => ({ ...prev, [schedule.id]: resp.data.runs || [] }));
       } catch {}
-      setRunsLoading(null);
     }
   }
 
@@ -3527,7 +3538,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
         db.ref(`users/${uid}/readReports/${scheduleId}/${runId}`).set(true).catch(() => {});
         const currentList = runsByScheduleId[scheduleId] || [];
         const updatedList = currentList.map(r => r.runId === runId ? { ...r, read: true } : r);
-        const stillUnread = updatedList.some(r => r.status !== 'error' && !r.read);
+        const stillUnread = updatedList.some(r => r.status !== 'error' && !r.read && r.relevantTotal > 0);
         setRunsByScheduleId(prev => ({ ...prev, [scheduleId]: updatedList }));
         setSchedules(prev => prev.map(s => s.id === scheduleId ? { ...s, hasUnread: stillUnread } : s));
       }
@@ -3788,18 +3799,18 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
 
                   <button onClick={() => toggleExpand(s)}
                     style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
-                    <span>{expandedId === s.id ? '▾' : '▸'}</span><span>Report history</span>
+                    <span>{expandedIds.has(s.id) ? '▾' : '▸'}</span><span>Report history</span>
                   </button>
-                  {expandedId === s.id && (
+                  {expandedIds.has(s.id) && (
                     <div style={{ marginTop: 8 }}>
-                      {runsLoading === s.id ? (
+                      {!(s.id in runsByScheduleId) ? (
                         <div style={{ display: 'flex', justifyContent: 'center', padding: 12 }}><Spinner size={14} /></div>
                       ) : (runsByScheduleId[s.id] || []).length === 0 ? (
                         <div style={{ color: C.faint, fontSize: 11, padding: '4px 0' }}>No reports generated yet</div>
                       ) : (runsByScheduleId[s.id] || []).map(r => (
                         <div key={r.runId} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '6px 8px', background: C.bg, borderRadius: 6, marginBottom: 5, fontSize: 11 }}>
                           <div style={{ minWidth: 0 }}>
-                            {!r.read && <span title="Unread" style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: '#3b82f6', marginRight: 6 }} />}
+                            {!r.read && r.relevantTotal > 0 && <span title="Unread" style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: '#3b82f6', marginRight: 6 }} />}
                             <span style={{ color: C.text }}>{formatDateLabelDMY(r.dateLabel)}</span>
                             <span style={{ color: r.status === 'error' ? '#f87171' : C.faint, marginLeft: 8 }}>
                               {r.status === 'error' ? '⚠ failed' : `$${r.costUsd.toFixed(4)} · ${r.sourceCount} sources`}

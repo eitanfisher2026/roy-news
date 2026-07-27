@@ -1750,9 +1750,9 @@ exports.listSchedules = onCall(
       .map(s => ({ ...s, access: scheduleAccessLevel(s, uid) }))
       .filter(s => s.access);
 
-    // hasUnread per schedule — a successful run this user hasn't opened yet.
-    // Read directly rather than via listReportRuns' full per-run mapping,
-    // since only existence-vs-read-map is needed here, not the metadata.
+    // hasUnread per schedule — a run this user hasn't opened yet that
+    // actually matched something. An empty ("not covered") run isn't worth
+    // flagging — there's nothing there to read.
     await Promise.all(mine.map(async (s) => {
       const [runsSnap, readSnap] = await Promise.all([
         db.ref(`reportRuns/${s.id}`).once('value'),
@@ -1760,7 +1760,11 @@ exports.listSchedules = onCall(
       ]);
       const runs = runsSnap.val() || {};
       const readMap = readSnap.val() || {};
-      s.hasUnread = Object.entries(runs).some(([runId, r]) => r.status === 'ok' && !readMap[runId]);
+      s.hasUnread = Object.entries(runs).some(([runId, r]) => {
+        if (r.status !== 'ok' || readMap[runId]) return false;
+        const relevantTotal = Object.values(r.results || {}).reduce((sum, src) => sum + (src.relevantCount || 0), 0);
+        return relevantTotal > 0;
+      });
     }));
 
     mine.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));

@@ -1749,6 +1749,20 @@ exports.listSchedules = onCall(
     const mine = all
       .map(s => ({ ...s, access: scheduleAccessLevel(s, uid) }))
       .filter(s => s.access);
+
+    // hasUnread per schedule — a successful run this user hasn't opened yet.
+    // Read directly rather than via listReportRuns' full per-run mapping,
+    // since only existence-vs-read-map is needed here, not the metadata.
+    await Promise.all(mine.map(async (s) => {
+      const [runsSnap, readSnap] = await Promise.all([
+        db.ref(`reportRuns/${s.id}`).once('value'),
+        db.ref(`users/${uid}/readReports/${s.id}`).once('value')
+      ]);
+      const runs = runsSnap.val() || {};
+      const readMap = readSnap.val() || {};
+      s.hasUnread = Object.entries(runs).some(([runId, r]) => r.status === 'ok' && !readMap[runId]);
+    }));
+
     mine.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
     return { schedules: mine };
   }
@@ -1803,8 +1817,12 @@ exports.listReportRuns = onCall(
     const schedule = scheduleSnap.val();
     if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
     requireScheduleAccess(schedule, request.auth.uid, 'read');
-    const snap = await db.ref(`reportRuns/${scheduleId}`).once('value');
+    const [snap, readSnap] = await Promise.all([
+      db.ref(`reportRuns/${scheduleId}`).once('value'),
+      db.ref(`users/${request.auth.uid}/readReports/${scheduleId}`).once('value')
+    ]);
     const val = snap.val() || {};
+    const readMap = readSnap.val() || {};
     // Metadata only — not the full per-source analysis payload, so browsing
     // history for a schedule with many runs stays lightweight.
     const runs = Object.entries(val).map(([runId, r]) => {
@@ -1815,7 +1833,10 @@ exports.listReportRuns = onCall(
         sourceCount: sources.length,
         // Total matched articles across all sources — lets the list mark which
         // runs actually found something without fetching the full analysis.
-        relevantTotal: sources.reduce((sum, s) => sum + (s.relevantCount || 0), 0)
+        relevantTotal: sources.reduce((sum, s) => sum + (s.relevantCount || 0), 0),
+        // Per-user read state — read reports/{scheduleId}/{runId} is written
+        // directly by the client (users/{uid} is already self-writable).
+        read: !!readMap[runId]
       };
     });
     runs.sort((a, b) => (b.generatedAt || '').localeCompare(a.generatedAt || ''));

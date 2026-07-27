@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.93';
+const VERSION = 'v1.94';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1042,7 +1042,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
 }
 
 // ─── Step 1: Country Selection ────────────────────────────────────────────────
-function CountryStep({ onCountryConfirmed, onError, user, onOpenSchedule }) {
+function CountryStep({ onCountryConfirmed, onError, user, onOpenSchedule, hasUnreadSchedules }) {
   const metaCacheKey = user ? `roy-news-countrymeta-${user.uid}` : null;
   const [input, setInput] = useState('');
   const [history, setHistory] = useState(() => {
@@ -1160,6 +1160,7 @@ function CountryStep({ onCountryConfirmed, onError, user, onOpenSchedule }) {
         <button onClick={onOpenSchedule}
           style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, width: '100%', padding: '12px', marginBottom: 16, background: C.card, border: '1px solid ' + C.border, borderRadius: 10, color: C.text, fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>
           🗓️ Scheduled Reports
+          {hasUnreadSchedules && <span title="Unread reports" style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#3b82f6' }} />}
         </button>
       )}
 
@@ -3517,6 +3518,19 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     try {
       const resp = await fns.httpsCallable('getReportRun')({ scheduleId, runId });
       setViewingRun({ scheduleId, runId, run: resp.data.run });
+      // Per-user read state — users/{uid} is already self-writable, so this
+      // goes straight to the DB rather than through a callable. Propagates
+      // up to the schedule-level and (via App's own listSchedules fetch)
+      // home-page badges by recomputing hasUnread from what's now known
+      // locally, instead of waiting on a full server round-trip.
+      if (uid) {
+        db.ref(`users/${uid}/readReports/${scheduleId}/${runId}`).set(true).catch(() => {});
+        const currentList = runsByScheduleId[scheduleId] || [];
+        const updatedList = currentList.map(r => r.runId === runId ? { ...r, read: true } : r);
+        const stillUnread = updatedList.some(r => r.status !== 'error' && !r.read);
+        setRunsByScheduleId(prev => ({ ...prev, [scheduleId]: updatedList }));
+        setSchedules(prev => prev.map(s => s.id === scheduleId ? { ...s, hasUnread: stillUnread } : s));
+      }
     } catch (e) {
       alert('Could not load report: ' + e.message);
     }
@@ -3583,6 +3597,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
                     <div style={{ minWidth: 0 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                        {s.hasUnread && <span title="Has unread reports" style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#3b82f6', flexShrink: 0 }} />}
                         <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{s.country}</span>
                         {s.access !== 'owner' && (
                           <button onClick={() => setSharedInfoId(sharedInfoId === s.id ? null : s.id)} title="Sharing info"
@@ -3784,6 +3799,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                       ) : (runsByScheduleId[s.id] || []).map(r => (
                         <div key={r.runId} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '6px 8px', background: C.bg, borderRadius: 6, marginBottom: 5, fontSize: 11 }}>
                           <div style={{ minWidth: 0 }}>
+                            {!r.read && <span title="Unread" style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: '#3b82f6', marginRight: 6 }} />}
                             <span style={{ color: C.text }}>{formatDateLabelDMY(r.dateLabel)}</span>
                             <span style={{ color: r.status === 'error' ? '#f87171' : C.faint, marginLeft: 8 }}>
                               {r.status === 'error' ? '⚠ failed' : `$${r.costUsd.toFixed(4)} · ${r.sourceCount} sources`}
@@ -3963,6 +3979,17 @@ function App() {
   const appStateRef = useRef({});
   const [scheduleCountries, setScheduleCountries] = useState([]);
   const [scheduleCountriesLoaded, setScheduleCountriesLoaded] = useState(false);
+  const [hasAnyUnreadSchedules, setHasAnyUnreadSchedules] = useState(false);
+
+  // Re-checked whenever the home page is showing (first load, and whenever
+  // coming back from the Scheduled Reports page after reading something) —
+  // this is what badges the home-page button itself.
+  useEffect(() => {
+    if (!user || !role || page !== 'main') return;
+    fns.httpsCallable('listSchedules')({}).then(resp => {
+      setHasAnyUnreadSchedules((resp.data.schedules || []).some(s => s.hasUnread));
+    }).catch(() => {});
+  }, [user, role, page]);
 
   // Lazy-loaded the first time the Scheduled Reports page is opened, then
   // cached for the rest of the session — it needs the full source list per
@@ -4286,7 +4313,7 @@ function App() {
   } else if (step === 'loading' && loadingConfig) {
     content = <CancelableLoader {...loadingConfig} onCancel={cancel} />;
   } else if (step === 'country') {
-    content = <CountryStep onCountryConfirmed={handleCountryConfirmed} onError={addError} user={user} onOpenSchedule={() => setPage('schedule')} />;
+    content = <CountryStep onCountryConfirmed={handleCountryConfirmed} onError={addError} user={user} onOpenSchedule={() => setPage('schedule')} hasUnreadSchedules={hasAnyUnreadSchedules} />;
   } else if (step === 'config') {
     content = <ConfigStep country={country} user={user} onGo={handleGo} onBack={() => setStep('country')} />;
   } else if (step === 'sources') {

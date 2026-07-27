@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v1.96';
+const VERSION = 'v1.97';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -4023,6 +4023,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
 // MAIN APP
 // ─────────────────────────────────────────────────────────────────────────────
 function App() {
+  const [confirm, confirmDialog] = useConfirm();
   const [user, setUser] = useState(undefined); // undefined=checking, null=logged out, object=logged in
   const [role, setRole] = useState(undefined); // undefined=checking, null=not authorized, 'admin'|'user'=authorized
   const [page, setPage] = useState('main');
@@ -4255,34 +4256,57 @@ function App() {
     setLoadingConfig(null);
   }
 
+  async function runPeriodAnalysis({ topics, startDate, endDate, periodReportWords }) {
+    cancelledRef.current = false;
+    setLoadingConfig({
+      title: `Analyzing ${country.name} coverage…`,
+      durationSec: 60,
+      steps: ['Researching media patterns…', 'Grouping by political lean…', 'Comparing narratives…', 'Writing synthesis…']
+    });
+    setStep('loading');
+    try {
+      const fn = fns.httpsCallable('fetchPeriodSummary', { timeout: 130000 });
+      const [personaSnap, aiSettings] = await Promise.all([db.ref(`users/${user.uid}/persona`).once('value'), getAISettings(user.uid)]);
+      const persona = personaSnap.val() || '';
+      const resp = await fn({ country: country.name, countryKey: country.key, topics, startDate, endDate, periodReportWords: periodReportWords || 150, persona, ...aiSettings });
+      if (cancelledRef.current) return;
+      setPeriodResult(resp.data.result);
+      setPeriodContext({ topics, persona });
+      setResultUsage(resp.data.usage || null);
+      localStorage.setItem(`roy-news-lastrun-${user.uid}-${country.key}`, new Date().toISOString().slice(0, 10));
+      setStep('period-results');
+    } catch (e) {
+      if (cancelledRef.current) return;
+      addError('Period Analysis', e);
+      setStep('config');
+    }
+    setLoadingConfig(null);
+  }
+
   async function handleGo({ mode, topics, contextTopics, date, summaryWords, maxArticles, lookbackDays, startDate, endDate, periodReportWords }) {
     cancelledRef.current = false;
 
     if (mode === 'period') {
       setPeriodDates({ startDate, endDate });
-      setLoadingConfig({
-        title: `Analyzing ${country.name} coverage…`,
-        durationSec: 60,
-        steps: ['Researching media patterns…', 'Grouping by political lean…', 'Comparing narratives…', 'Writing synthesis…']
-      });
-      setStep('loading');
+      const periodArgs = { topics, startDate, endDate, periodReportWords };
       try {
-        const fn = fns.httpsCallable('fetchPeriodSummary', { timeout: 130000 });
-        const [personaSnap, aiSettings] = await Promise.all([db.ref(`users/${user.uid}/persona`).once('value'), getAISettings(user.uid)]);
-        const persona = personaSnap.val() || '';
-        const resp = await fn({ country: country.name, countryKey: country.key, topics, startDate, endDate, periodReportWords: periodReportWords || 150, persona, ...aiSettings });
-        if (cancelledRef.current) return;
-        setPeriodResult(resp.data.result);
-        setPeriodContext({ topics, persona });
-        setResultUsage(resp.data.usage || null);
-        localStorage.setItem(`roy-news-lastrun-${user.uid}-${country.key}`, new Date().toISOString().slice(0, 10));
-        setStep('period-results');
+        const groundingResp = await fns.httpsCallable('checkPeriodGrounding')({ countryKey: country.key, topics, startDate, endDate });
+        const { grounded, general } = groundingResp.data;
+        const parts = [];
+        if (grounded.length > 0) parts.push(`For ${grounded.join(', ')}, I'll combine real archived coverage from your Scheduled Reports with general media-landscape knowledge.`);
+        if (general.length > 0) parts.push(`For ${general.join(', ')}, no scheduled report covers ${general.length > 1 ? 'these topics' : 'this topic'} for this period, so I'll rely on general knowledge alone.`);
+        confirm({
+          title: 'Before analyzing…',
+          message: parts.join(' ') || 'Ready to analyze based on general media-landscape knowledge.',
+          confirmLabel: 'Continue',
+          danger: false,
+          onConfirm: () => runPeriodAnalysis(periodArgs)
+        });
       } catch (e) {
-        if (cancelledRef.current) return;
-        addError('Period Analysis', e);
-        setStep('config');
+        // The pre-flight check itself failing shouldn't block the feature —
+        // proceed as if nothing was grounded rather than getting the user stuck.
+        runPeriodAnalysis(periodArgs);
       }
-      setLoadingConfig(null);
       return;
     }
 
@@ -4397,6 +4421,7 @@ function App() {
       {header}
       <div style={{ minHeight: 'calc(100vh - 56px)' }}>{content}</div>
       <ErrorPanel errors={errors} onDismiss={dismissError} />
+      {confirmDialog}
     </div>
   );
 }

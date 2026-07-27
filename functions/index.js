@@ -297,10 +297,11 @@ Respond in {{lang}} ONLY. Return ONLY valid JSON (no markdown, no explanation):
 
   period: `You are a media analyst with deep knowledge of {{country}}'s press landscape.
 
-Analyze how {{country}}'s media covered the following topics between {{startDate}} and {{endDate}}, drawing on your training knowledge of each outlet's editorial patterns and typical coverage during this period.
+Analyze how {{country}}'s media covered the following topics between {{startDate}} and {{endDate}}. For any topic where real archived coverage is provided below, treat it as verified ground truth — anchor your analysis on it and do not contradict it — and combine it with your general knowledge of the country's media landscape for context, for outlets not represented in that archived data, and for the cross-source synthesis. For any topic without archived coverage provided, draw on your training knowledge of each outlet's editorial patterns and typical coverage during this period, exactly as you would otherwise.
 
 Topics: {{topicList}}
 {{personaLine}}
+{{groundingSection}}
 Organize your analysis by political lean (government-aligned, opposition, independent), then by topic within each group. Focus on divergent narratives and what each camp emphasized, downplayed, or framed differently.
 Write approximately {{reportLen}} for each topic entry inside a group.
 
@@ -1166,6 +1167,83 @@ exports.translateResults = onCall(
 // ─────────────────────────────────────────────────────────────────────────────
 // AGENT 4: Period Summary
 // ─────────────────────────────────────────────────────────────────────────────
+// Finds, per requested topic, which of this country's schedules (any of
+// them — the archive isn't personal data, it's a shared cache) track a
+// matching topic AND have successful report runs overlapping the requested
+// date range. Returns { 'israel': [{ schedule, runs }], ... } keyed by
+// lowercased topic — only entries with real overlapping data are included.
+// This is intentionally the single source of truth for "is this topic
+// grounded", used by both the pre-flight check and the actual analysis call.
+async function findGroundingSchedules(countryKey, topics, startDate, endDate) {
+  const schedulesSnap = await db.ref('schedules').once('value');
+  const schedules = Object.values(schedulesSnap.val() || {}).filter(s => s.countryKey === countryKey);
+  const grounding = {};
+
+  await Promise.all(schedules.map(async (schedule) => {
+    const scheduleTopics = new Set((schedule.topics || []).map(t => t.toLowerCase()));
+    const matchingTopics = topics.filter(t => scheduleTopics.has(t.toLowerCase()));
+    if (matchingTopics.length === 0) return;
+
+    const runsSnap = await db.ref(`reportRuns/${schedule.id}`).once('value');
+    const runs = Object.values(runsSnap.val() || {})
+      .filter(r => r.status === 'ok' && r.periodEnd >= startDate && r.periodStart <= endDate);
+    if (runs.length === 0) return;
+
+    for (const t of matchingTopics) {
+      const key = t.toLowerCase();
+      (grounding[key] = grounding[key] || []).push({ schedule, runs });
+    }
+  }));
+
+  return grounding;
+}
+
+// Cheap pre-flight check — no AI call — so the client can tell the user
+// exactly what's about to happen (which topics get real archived grounding,
+// which fall back to general knowledge) before they commit to the analysis.
+exports.checkPeriodGrounding = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { countryKey, topics, startDate, endDate } = request.data || {};
+    if (!countryKey || !topics?.length || !startDate || !endDate) {
+      throw new HttpsError('invalid-argument', 'countryKey, topics, startDate, endDate required');
+    }
+    const grounding = await findGroundingSchedules(countryKey, topics, startDate, endDate);
+    const grounded = topics.filter(t => grounding[t.toLowerCase()]);
+    const general = topics.filter(t => !grounding[t.toLowerCase()]);
+    return { grounded, general };
+  }
+);
+
+// Builds the "real archived coverage" text block injected into the period
+// prompt — only covered (real match) entries, capped so a long-running
+// schedule doesn't balloon the prompt.
+function buildGroundingSection(grounding, topics) {
+  const blocks = [];
+  for (const topic of topics) {
+    const matches = grounding[topic.toLowerCase()];
+    if (!matches) continue;
+    const lines = [];
+    for (const { runs } of matches) {
+      for (const run of runs) {
+        for (const src of Object.values(run.results || {})) {
+          const ta = (src.analysis?.topicAnalyses || []).find(t => (t.topic || '').toLowerCase() === topic.toLowerCase());
+          if (ta && ta.covered) {
+            const quotes = ta.quotes?.length ? ` Quotes: ${ta.quotes.map(q => `"${q}"`).join('; ')}` : '';
+            lines.push(`- ${src.source.name} (${src.source.lean}), ${run.dateLabel}: [${ta.tone || 'neutral'}] ${ta.summary}${quotes}`);
+          }
+        }
+      }
+    }
+    if (lines.length > 0) {
+      blocks.push(`Real archived coverage for "${topic}":\n${lines.slice(0, 40).join('\n')}`);
+    }
+  }
+  if (blocks.length === 0) return '';
+  return `\n${blocks.join('\n\n')}\n`;
+}
+
 exports.fetchPeriodSummary = onCall(
   { timeoutSeconds: 120, memory: '512MiB', region: 'us-central1' },
   async (request) => {
@@ -1182,8 +1260,10 @@ exports.fetchPeriodSummary = onCall(
     const ai = makeAI(request.data);
     const topicList = topics.join(', ');
     const customPrompts = await getCustomPrompts();
+    const grounding = countryKey ? await findGroundingSchedules(countryKey, topics, startDate, endDate) : {};
+    const groundingSection = buildGroundingSection(grounding, topics);
     const prompt = fillPrompt(customPrompts.period || DEFAULT_PROMPTS.period, {
-      country, topicList, startDate, endDate, reportLen, personaLine
+      country, topicList, startDate, endDate, reportLen, personaLine, groundingSection
     });
 
     const { text, usage } = await callAI(ai, prompt, 4000);

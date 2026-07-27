@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v2.0';
+const VERSION = 'v2.1';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3332,6 +3332,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [expandedIds, setExpandedIds] = useState(new Set());
   const [runsByScheduleId, setRunsByScheduleId] = useState({});
   const [viewingRun, setViewingRun] = useState(null); // { scheduleId, run }
+  const [viewingRunLoadingId, setViewingRunLoadingId] = useState(null); // runId currently being opened
   const [busyId, setBusyId] = useState(null);
 
   const [sourcesExpandedId, setSourcesExpandedId] = useState(null);
@@ -3580,6 +3581,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   }
 
   async function viewRun(scheduleId, runId) {
+    setViewingRunLoadingId(runId);
     try {
       const resp = await fns.httpsCallable('getReportRun')({ scheduleId, runId });
       setViewingRun({ scheduleId, runId, run: resp.data.run });
@@ -3599,6 +3601,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     } catch (e) {
       alert('Could not load report: ' + e.message);
     }
+    setViewingRunLoadingId(null);
   }
 
   // Deliberately placed inside the report detail view, not the list row —
@@ -3874,9 +3877,11 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                             </span>
                           </div>
                           {r.status !== 'error' && (
-                            <button onClick={() => viewRun(s.id, r.runId)} title={r.relevantTotal > 0 ? `${r.relevantTotal} matched article${r.relevantTotal !== 1 ? 's' : ''}` : 'No matches found'}
-                              style={{ ...SMALL_BTN, fontSize: 10, flexShrink: 0, color: r.relevantTotal > 0 ? '#4ade80' : C.faint, borderColor: r.relevantTotal > 0 ? '#14532d' : C.border }}>
-                              {r.relevantTotal > 0 ? '● View' : '○ View'}
+                            <button onClick={() => viewRun(s.id, r.runId)} disabled={viewingRunLoadingId === r.runId} title={r.relevantTotal > 0 ? `${r.relevantTotal} matched article${r.relevantTotal !== 1 ? 's' : ''}` : 'No matches found'}
+                              style={{ ...SMALL_BTN, fontSize: 10, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5, color: r.relevantTotal > 0 ? '#4ade80' : C.faint, borderColor: r.relevantTotal > 0 ? '#14532d' : C.border }}>
+                              {viewingRunLoadingId === r.runId
+                                ? <><Spinner size={10} />&nbsp;View</>
+                                : (r.relevantTotal > 0 ? '● View' : '○ View')}
                             </button>
                           )}
                         </div>
@@ -3991,14 +3996,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
           onClick={() => setViewingRun(null)}>
           <div className="panel" style={{ maxWidth: 640, width: '100%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }} onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{formatDateLabelDMY(viewingRun.run.dateLabel)}</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{formatDateLabelDMY(viewingRun.run.dateLabel)}</div>
                 <button onClick={() => handleDeleteRun(viewingRun.scheduleId, viewingRun.runId, viewingRun.run.dateLabel)}
                   style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d', fontSize: 11 }}>
                   🗑️ Delete report
                 </button>
-                <button onClick={() => setViewingRun(null)} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 20 }}>×</button>
               </div>
+              <button onClick={() => setViewingRun(null)} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 20 }}>×</button>
             </div>
             <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>
               ${(viewingRun.run.costUsd || 0).toFixed(4)} · {viewingRun.run.provider}/{viewingRun.run.model} · {viewingRun.run.inputTokens}+{viewingRun.run.outputTokens} tokens

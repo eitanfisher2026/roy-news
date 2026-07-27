@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v2.4';
+const VERSION = 'v2.5';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3675,13 +3675,16 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     });
   }
 
+  function scheduleTopicsLabel(s) {
+    const contextSet = new Set(s.contextTopics || []);
+    return s.topics.map(t => contextSet.has(t) ? `${t}🧭` : t).join(', ');
+  }
+
   function scheduleSummary(s) {
     const when = s.frequency === 'weekly'
       ? `Weekly ${s.startDay.slice(0, 3)} ${String(s.hourUtc).padStart(2, '0')}:00`
       : `Daily ${String(s.hourUtc).padStart(2, '0')}:00`;
-    const contextSet = new Set(s.contextTopics || []);
-    const topicsLabel = s.topics.map(t => contextSet.has(t) ? `${t}🧭` : t).join(', ');
-    return `${when} UTC · ${topicsLabel} · ${s.sourceIds.length} src`;
+    return `${when} UTC · ${s.sourceIds.length} src`;
   }
 
   return (
@@ -3729,7 +3732,8 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                           Owned by {s.createdByEmail}
                         </div>
                       )}
-                      <div style={{ fontSize: 11, color: C.faint, marginTop: 3, lineHeight: 1.5 }}>{scheduleSummary(s)}</div>
+                      <div style={{ fontSize: 12, color: C.text, fontWeight: 600, marginTop: 4, lineHeight: 1.4 }}>{scheduleTopicsLabel(s)}</div>
+                      <div style={{ fontSize: 11, color: C.faint, marginTop: 2, lineHeight: 1.5 }}>{scheduleSummary(s)}</div>
                       <div style={{ fontSize: 11, color: s.lastRunStatus === 'error' ? '#f87171' : C.faint, marginTop: 1 }}>
                         {s.lastRunAt ? `${s.lastRunStatus === 'ok' ? '✓' : '⚠'} ${formatDMYTime(s.lastRunAt)}` : 'Never run yet'}
                       </div>

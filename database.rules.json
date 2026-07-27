@@ -12,6 +12,10 @@
       "contextAnalysisMode": {
         ".read": "auth != null && root.child('authorizedUids').child(auth.uid).exists()",
         ".write": false
+      },
+      "topics": {
+        ".read": "auth != null && root.child('authorizedUids').child(auth.uid).exists()",
+        ".write": "auth != null && root.child('authorizedUids').child(auth.uid).exists()"
       }
     },
     "countries": {

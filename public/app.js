@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v2.3';
+const VERSION = 'v2.4';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1329,10 +1329,12 @@ function ConfigStep({ country, user, onGo, onBack }) {
   const [showTopicHelp, setShowTopicHelp] = useState(false);
   const [showDateInfo, setShowDateInfo]   = useState(false);
 
-  // Load topic list from Firebase on mount; if none saved yet, keeps localStorage-seeded defaults
+  // Topic list (custom topics, hidden defaults, context tags) is shared by
+  // everyone with access — one person adding "Anutin" means everyone sees it,
+  // instead of each user rebuilding their own list from scratch. Which topics
+  // are actually checked for this run stays per-user (see localStorage below).
   useEffect(() => {
-    if (!uid) { setTopicsLoaded(true); return; }
-    db.ref(`users/${uid}/topics`).once('value').then(snap => {
+    db.ref('config/topics').once('value').then(snap => {
       const data = snap.val();
       if (data) {
         setCustomTopics(data.custom || []);
@@ -1341,12 +1343,12 @@ function ConfigStep({ country, user, onGo, onBack }) {
       }
       setTopicsLoaded(true);
     }).catch(() => setTopicsLoaded(true));
-  }, [uid]);
+  }, []);
 
   // Sync topic list to Firebase whenever it changes (only after initial load)
   useEffect(() => {
-    if (!uid || !topicsLoaded) return;
-    db.ref(`users/${uid}/topics`).set({ custom: customTopics, removedDefaults: [...removedDefaultTopics], context: [...contextTopics] });
+    if (!topicsLoaded) return;
+    db.ref('config/topics').set({ custom: customTopics, removedDefaults: [...removedDefaultTopics], context: [...contextTopics] });
   }, [customTopics, removedDefaultTopics, contextTopics, topicsLoaded, uid]);
 
   // Save session preferences to localStorage
@@ -1426,9 +1428,11 @@ function ConfigStep({ country, user, onGo, onBack }) {
           <span style={{ color: C.faint, fontSize: 13 }}>{country.name}</span>
         </div>
 
-        {/* Topic grid */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 6 }}>
-          {allTopics.map(t => {
+        {/* Topic grid — alphabetical, with what's already selected pulled into
+            its own section up top so it doesn't get lost among everyone's
+            accumulated custom topics (the list is shared; selection isn't). */}
+        {(() => {
+          const renderChip = t => {
             const active = selectedTopics.has(t);
             const isContext = contextTopics.has(t);
             return (
@@ -1442,8 +1446,29 @@ function ConfigStep({ country, user, onGo, onBack }) {
                   style={{ opacity: 0.6, fontSize: 15, lineHeight: 1, marginLeft: 2 }}>×</span>
               </button>
             );
-          })}
-        </div>
+          };
+          const sortedAll = [...allTopics].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+          const selectedList = sortedAll.filter(t => selectedTopics.has(t));
+          const unselectedList = sortedAll.filter(t => !selectedTopics.has(t));
+          return (
+            <>
+              {selectedList.length > 0 && (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 11, color: '#60a5fa', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+                    Selected ({selectedList.length})
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>{selectedList.map(renderChip)}</div>
+                </div>
+              )}
+              {selectedList.length > 0 && (
+                <div style={{ fontSize: 11, color: C.faint, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+                  All topics
+                </div>
+              )}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 6 }}>{unselectedList.map(renderChip)}</div>
+            </>
+          );
+        })()}
         <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>Tap a topic's "exact"/"context" tag to switch how it's matched — exact looks for the literal word, context judges by theme (costs a bit more).</div>
 
         {/* Add custom topic */}

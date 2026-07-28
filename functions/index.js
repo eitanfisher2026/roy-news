@@ -1859,6 +1859,25 @@ exports.deleteSchedule = onCall(
   }
 );
 
+// Topics are a shared, global list now — deleting one from the picker could
+// silently break someone else's schedule that still names it. Checks every
+// schedule regardless of ownership (not just the caller's own), since the
+// point is to warn about impact on OTHER people's reports too.
+exports.checkTopicInUse = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { topic } = request.data || {};
+    if (!topic) throw new HttpsError('invalid-argument', 'topic required');
+    const snap = await db.ref('schedules').once('value');
+    const schedules = Object.values(snap.val() || {});
+    const usedBy = schedules
+      .filter(s => (s.topics || []).some(t => t.toLowerCase() === topic.toLowerCase()))
+      .map(s => ({ country: s.country, createdByEmail: s.createdByEmail }));
+    return { inUse: usedBy.length > 0, usedBy };
+  }
+);
+
 exports.listSchedules = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {

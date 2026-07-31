@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v2.9';
+const VERSION = 'v3.0';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -446,6 +446,29 @@ function TypeBadge({ type }) {
     <span style={{ background: '#1a2d42', color: C.muted, borderRadius: 4, padding: '1px 7px', fontSize: 11, whiteSpace: 'nowrap' }}>
       {TYPE_LABELS[type] || type}
     </span>
+  );
+}
+
+// Small "about this source" toggle — same leanDescription/notes info the
+// Select Sources screen already shows, made reusable so anywhere a source
+// appears (results, period analysis, scheduled reports) can offer it too.
+// Renders nothing if there's no lean description/notes to show. Place inside
+// a flex row that has flexWrap: 'wrap' — the expanded panel uses
+// flexBasis: '100%' to drop onto its own line within that same row.
+function SourceInfoToggle({ source }) {
+  const [open, setOpen] = useState(false);
+  if (!source?.leanDescription && !source?.notes) return null;
+  return (
+    <>
+      <button onClick={e => { e.stopPropagation(); setOpen(o => !o); }} title="About this source"
+        style={{ background: 'none', border: 'none', color: open ? '#60a5fa' : C.faint, cursor: 'pointer', fontSize: 14, padding: '0 2px', lineHeight: 1, flexShrink: 0 }}>ℹ️</button>
+      {open && (
+        <div style={{ flexBasis: '100%', marginTop: 6 }} onClick={e => e.stopPropagation()}>
+          {source.leanDescription && <div style={{ color: C.muted, fontSize: 12, lineHeight: 1.55 }}>{source.leanDescription}</div>}
+          {source.notes && <div style={{ color: C.faint, fontSize: 11, marginTop: 4 }}>{source.notes}</div>}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1326,6 +1349,7 @@ function ConfigStep({ country, user, onGo, onBack }) {
 
   const [customInput, setCustomInput] = useState('');
   const [date, setDate]               = useState(todayStr());
+  const [periodChecking, setPeriodChecking] = useState(false);
   const [showTopicHelp, setShowTopicHelp] = useState(false);
   const [showDateInfo, setShowDateInfo]   = useState(false);
 
@@ -1646,13 +1670,25 @@ function ConfigStep({ country, user, onGo, onBack }) {
 
             {(() => {
               const { startDate, endDate } = computePeriodDates();
-              const disabled = selectedTopics.size === 0 || !startDate || !endDate || startDate > endDate;
+              const disabled = selectedTopics.size === 0 || !startDate || !endDate || startDate > endDate || periodChecking;
               return (
                 <button
-                  onClick={() => onGo({ mode: 'period', topics: [...selectedTopics], periodReportWords, ...computePeriodDates() })}
+                  onClick={async () => {
+                    setPeriodChecking(true);
+                    try {
+                      // onGo resolves once the pre-flight grounding check is
+                      // done and the confirm dialog is up (or, on failure,
+                      // once the analysis itself has been kicked off) — this
+                      // spinner only covers that initial network round-trip,
+                      // which previously had no feedback at all.
+                      await onGo({ mode: 'period', topics: [...selectedTopics], periodReportWords, ...computePeriodDates() });
+                    } finally {
+                      setPeriodChecking(false);
+                    }
+                  }}
                   disabled={disabled}
-                  style={{ ...BTN('#7c3aed'), width: '100%', padding: '12px', fontSize: 15, opacity: disabled ? 0.4 : 1 }}>
-                  📆 Analyze Period
+                  style={{ ...BTN('#7c3aed'), width: '100%', padding: '12px', fontSize: 15, opacity: disabled ? 0.4 : 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                  {periodChecking ? <><Spinner size={14} /> Checking…</> : '📆 Analyze Period'}
                 </button>
               );
             })()}
@@ -1844,18 +1880,32 @@ function PeriodResultView({ country, result, startDate, endDate, topics, persona
     const [open, setOpen] = useState(true);
     const color = leanColors[group.lean] || '#64748b';
     const bg    = leanBg[group.lean]    || '#0f1217';
+    const registeredSources = country.setup?.sources || [];
     return (
       <div style={{ marginBottom: 16, borderRadius: 10, overflow: 'hidden', border: '1px solid ' + C.border }}>
-        <button onClick={() => setOpen(o => !o)}
-          style={{ display: 'flex', width: '100%', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: bg, border: 'none', cursor: 'pointer', textAlign: 'left', borderBottom: open ? '1px solid ' + C.border : 'none' }}>
+        {/* A div, not a button — the per-outlet info toggle below is itself a
+            button, and buttons can't nest inside buttons. */}
+        <div onClick={() => setOpen(o => !o)}
+          style={{ display: 'flex', width: '100%', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: bg, cursor: 'pointer', textAlign: 'left', borderBottom: open ? '1px solid ' + C.border : 'none' }}>
           <div>
             <div style={{ fontWeight: 700, fontSize: 14, color: color }}>{group.label || group.lean}</div>
             {group.outlets?.length > 0 && (
-              <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{group.outlets.join(' · ')}</div>
+              <div style={{ fontSize: 11, color: C.faint, marginTop: 2, display: 'flex', flexWrap: 'wrap', alignItems: 'center' }}>
+                {group.outlets.map((name, oi) => {
+                  const matched = registeredSources.find(s => s.name.toLowerCase() === name.toLowerCase());
+                  return (
+                    <span key={oi} style={{ display: 'inline-flex', alignItems: 'center' }}>
+                      {oi > 0 && <span style={{ margin: '0 4px' }}>·</span>}
+                      <span>{name}</span>
+                      {matched && <SourceInfoToggle source={matched} />}
+                    </span>
+                  );
+                })}
+              </div>
             )}
           </div>
           <span style={{ color: C.faint, fontSize: 12 }}>{open ? '▲' : '▼'}</span>
-        </button>
+        </div>
         {open && (
           <div style={{ padding: '12px 16px', background: C.panel }}>
             {group.overallNarrative && (
@@ -2113,6 +2163,7 @@ function SourceColumn({ sourceResult, requestedDate }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
           <span style={{ fontWeight: 800, fontSize: 15, color: C.text }}>{source.name}</span>
           {source.nameOriginal && source.nameOriginal !== source.name && <span style={{ color: C.faint, fontSize: 12 }}>{source.nameOriginal}</span>}
+          <SourceInfoToggle source={source} />
         </div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
           <LeanBadge lean={source.lean} />
@@ -3491,10 +3542,11 @@ function ScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClose }
         .sort((a, b) => compareByMatchScore(topicMatchScore(a.analysis, a.relevantCount), topicMatchScore(b.analysis, b.relevantCount)))
         .map((r, i) => (
         <div key={i} style={{ marginBottom: 18, paddingBottom: 14, borderBottom: '1px solid ' + C.border }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
             <span style={{ fontWeight: 700, fontSize: 13, color: C.text }}>{r.source.name}</span>
             <LeanBadge lean={r.source.lean} />
             <span style={{ fontSize: 11, color: C.faint }}>{r.articleCount} scanned · {r.relevantCount ?? 0} kept</span>
+            <SourceInfoToggle source={r.source} />
           </div>
           {groupTopicAnalyses(r.analysis?.topicAnalyses).map((ta, j) => <TopicCard key={j} analysis={ta} />)}
         </div>

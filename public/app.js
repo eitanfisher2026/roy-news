@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v2.7';
+const VERSION = 'v2.8';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3399,6 +3399,106 @@ function TopicModeChips({ topics, contextSet, onToggle }) {
   );
 }
 
+// A single scheduled report run's detail view — same shape as the
+// point-in-time results (results keyed by source id), so it reuses the same
+// buildShareText/extractTexts/applyTranslations helpers. Keyed by runId at
+// the call site so switching to a different report remounts this with a
+// clean slate instead of carrying over the previous run's translation state.
+function ScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClose }) {
+  const [isHebrew, setIsHebrew] = useState(false);
+  const [hebrewResults, setHebrewResults] = useState(null);
+  const [translating, setTranslating] = useState(false);
+  const [translateProgress, setTranslateProgress] = useState(0);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [resultCopied, setResultCopied] = useState(false);
+
+  const displayResults = isHebrew && hebrewResults ? hebrewResults : run.results;
+
+  async function handleTranslate() {
+    if (isHebrew) { setIsHebrew(false); return; }
+    if (hebrewResults) { setIsHebrew(true); return; }
+    setTranslating(true);
+    setTranslateProgress(0);
+    try {
+      const { texts, paths } = extractTexts(run.results);
+      const CONCURRENCY = 6;
+      const allTranslations = new Array(texts.length);
+      for (let i = 0; i < texts.length; i += CONCURRENCY) {
+        const batch = texts.slice(i, i + CONCURRENCY);
+        const translated = await Promise.all(batch.map(t => translateViaGoogle(t)));
+        translated.forEach((t, j) => { allTranslations[i + j] = t; });
+        setTranslateProgress(Math.round(((i + batch.length) / texts.length) * 100));
+      }
+      setHebrewResults(applyTranslations(run.results, paths, allTranslations));
+      setIsHebrew(true);
+    } catch (e) {
+      alert('Could not translate: ' + e.message);
+    }
+    setTranslating(false);
+    setTranslateProgress(0);
+  }
+
+  async function handleCopyResult() {
+    const text = buildShareText({ name: scheduleCountry }, dateLabel, displayResults, false);
+    await navigator.clipboard?.writeText(text);
+    setResultCopied(true);
+    setTimeout(() => setResultCopied(false), 2500);
+  }
+
+  async function handleShareResult() {
+    const text = buildShareText({ name: scheduleCountry }, dateLabel, displayResults, false);
+    const title = `Roy News — ${scheduleCountry} · ${formatDateLabelDMY(dateLabel)}`;
+    if (navigator.share) {
+      navigator.share({ title, text }).catch(() => {});
+    } else {
+      await navigator.clipboard?.writeText(text);
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 2500);
+    }
+  }
+
+  return (
+    <div className="panel" style={{ maxWidth: 640, width: '100%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }} onClick={e => e.stopPropagation()}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{formatDateLabelDMY(dateLabel)}</div>
+          <button onClick={onDelete} style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d', fontSize: 11 }}>
+            🗑️ Delete report
+          </button>
+        </div>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 20 }}>×</button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+        <button onClick={handleTranslate} disabled={translating}
+          style={{ ...SMALL_BTN, background: isHebrew ? '#1e3a5f' : C.card, borderColor: isHebrew ? '#3b82f6' : C.border, fontWeight: isHebrew ? 700 : 400, minWidth: 130 }}>
+          {translating
+            ? <><Spinner size={12} /> &nbsp;{translateProgress > 0 ? `${translateProgress}%` : 'Starting…'}</>
+            : isHebrew ? '🇮🇱 עברית ON' : '🇮🇱 Translate to עב'}
+        </button>
+        <button onClick={handleCopyResult} style={SMALL_BTN}>{resultCopied ? '✓ Copied!' : '📋 Copy Result'}</button>
+        <button onClick={handleShareResult} style={SMALL_BTN}>{shareCopied ? '✓ Shared!' : '🔗 Share Result'}</button>
+      </div>
+
+      <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>
+        ${(run.costUsd || 0).toFixed(4)} · {run.provider}/{run.model} · {run.inputTokens}+{run.outputTokens} tokens
+      </div>
+      {Object.values(displayResults || {})
+        .sort((a, b) => compareByMatchScore(topicMatchScore(a.analysis, a.relevantCount), topicMatchScore(b.analysis, b.relevantCount)))
+        .map((r, i) => (
+        <div key={i} style={{ marginBottom: 18, paddingBottom: 14, borderBottom: '1px solid ' + C.border }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <span style={{ fontWeight: 700, fontSize: 13, color: C.text }}>{r.source.name}</span>
+            <LeanBadge lean={r.source.lean} />
+            <span style={{ fontSize: 11, color: C.faint }}>{r.articleCount} scanned · {r.relevantCount ?? 0} kept</span>
+          </div>
+          {groupTopicAnalyses(r.analysis?.topicAnalyses).map((ta, j) => <TopicCard key={j} analysis={ta} />)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const uid = user?.uid;
   const [confirm, confirmDialog] = useConfirm();
@@ -4093,33 +4193,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       {viewingRun && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
           onClick={() => setViewingRun(null)}>
-          <div className="panel" style={{ maxWidth: 640, width: '100%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }} onClick={e => e.stopPropagation()}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{formatDateLabelDMY(viewingRun.run.dateLabel)}</div>
-                <button onClick={() => handleDeleteRun(viewingRun.scheduleId, viewingRun.runId, viewingRun.run.dateLabel)}
-                  style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d', fontSize: 11 }}>
-                  🗑️ Delete report
-                </button>
-              </div>
-              <button onClick={() => setViewingRun(null)} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 20 }}>×</button>
-            </div>
-            <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>
-              ${(viewingRun.run.costUsd || 0).toFixed(4)} · {viewingRun.run.provider}/{viewingRun.run.model} · {viewingRun.run.inputTokens}+{viewingRun.run.outputTokens} tokens
-            </div>
-            {Object.values(viewingRun.run.results || {})
-              .sort((a, b) => compareByMatchScore(topicMatchScore(a.analysis, a.relevantCount), topicMatchScore(b.analysis, b.relevantCount)))
-              .map((r, i) => (
-              <div key={i} style={{ marginBottom: 18, paddingBottom: 14, borderBottom: '1px solid ' + C.border }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                  <span style={{ fontWeight: 700, fontSize: 13, color: C.text }}>{r.source.name}</span>
-                  <LeanBadge lean={r.source.lean} />
-                  <span style={{ fontSize: 11, color: C.faint }}>{r.articleCount} scanned · {r.relevantCount ?? 0} kept</span>
-                </div>
-                {groupTopicAnalyses(r.analysis?.topicAnalyses).map((ta, j) => <TopicCard key={j} analysis={ta} />)}
-              </div>
-            ))}
-          </div>
+          <ScheduledRunView
+            key={viewingRun.runId}
+            scheduleCountry={schedules.find(s => s.id === viewingRun.scheduleId)?.country || ''}
+            dateLabel={viewingRun.run.dateLabel}
+            run={viewingRun.run}
+            onDelete={() => handleDeleteRun(viewingRun.scheduleId, viewingRun.runId, viewingRun.run.dateLabel)}
+            onClose={() => setViewingRun(null)}
+          />
         </div>
       )}
       {confirmDialog}

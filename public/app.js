@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v2.8';
+const VERSION = 'v2.9';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2252,7 +2252,11 @@ function SourceColumn({ sourceResult, requestedDate }) {
 async function translateViaGoogle(text) {
   if (!text || !text.trim()) return text;
   try {
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=he&dt=t&q=${encodeURIComponent(text)}`;
+    // sl=auto (not a fixed 'en') — verbatim quotes can be in the source
+    // outlet's own language (Thai, Khmer, ...), not just English, and forcing
+    // sl=en makes Google assume those words are already English instead of
+    // translating them.
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=he&dt=t&q=${encodeURIComponent(text)}`;
     const resp = await fetch(url);
     if (!resp.ok) return text;
     const data = await resp.json();

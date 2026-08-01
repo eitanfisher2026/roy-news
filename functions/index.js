@@ -424,9 +424,13 @@ async function fetchRss(url, limit = 25) {
   return feed.items
     .map(item => ({
       title: (item.title || '').trim(),
-      // 1500 rather than a shorter cut — a topic mentioned partway through a
-      // longer description was invisible to the keyword check below 600.
-      text: (item.contentSnippet || item.description || '').slice(0, 1500).trim(),
+      // This text is shown to readers directly now (scheduled reports display
+      // it raw, no AI rewrite), so a mid-sentence cutoff is more visible than
+      // it used to be when this only fed keyword matching/AI input. 3000
+      // covers almost every real feed's description length in practice —
+      // simpler than sentence-boundary-aware trimming for a case that rarely
+      // triggers either way.
+      text: (item.contentSnippet || item.description || '').slice(0, 3000).trim(),
       link: item.link || '',
       date: item.pubDate || ''
     }))

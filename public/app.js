@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.5';
+const VERSION = 'v3.6';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2443,16 +2443,6 @@ function ResultsView({ country, results, date, includeIsrael, usage, user, onNew
     setTranslateProgress(0);
   }
 
-  function handleShare() {
-    const url = window.location.href;
-    const text = `Roy News — ${country.name} media analysis for ${formatDisplayDate(date)}`;
-    if (navigator.share) {
-      navigator.share({ title: 'Roy News', text, url }).catch(() => {});
-    } else {
-      navigator.clipboard?.writeText(url).then(() => alert('Link copied to clipboard!'));
-    }
-  }
-
   async function handleShareResult() {
     const text = buildShareText(country, date, displayResults, includeIsrael);
     const title = `Roy News — ${country.name} · ${formatDisplayDate(date)}`;
@@ -3779,7 +3769,6 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [sendNowMsg, setSendNowMsg] = useState({}); // scheduleId -> status message
 
   const [sourcesExpandedId, setSourcesExpandedId] = useState(null);
-  const [sourceBusyId, setSourceBusyId] = useState(null);
   // Fetched fresh (not from the once-at-load `countries` prop) whenever a
   // schedule's Sources section is opened or edit started, so a feed fixed on
   // the Sources page shows up here without needing a full app reload, and so
@@ -4519,12 +4508,20 @@ function App() {
 
   // Re-checked whenever the home page is showing (first load, and whenever
   // coming back from the Scheduled Reports page after reading something) —
-  // this is what badges the home-page button itself.
+  // this is what badges the home-page button itself. Delayed slightly so
+  // this Cloud Function call (cold-start-prone) doesn't compete for network
+  // with the country-lookup fetch that's actually on screen during the
+  // critical first-paint window — the unread dot showing up a moment late
+  // is unnoticeable, unlike a slower country search.
   useEffect(() => {
     if (!user || !role || page !== 'main') return;
-    fns.httpsCallable('listSchedules')({}).then(resp => {
-      setHasAnyUnreadSchedules((resp.data.schedules || []).some(s => s.hasUnread));
-    }).catch(() => {});
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      fns.httpsCallable('listSchedules')({}).then(resp => {
+        if (!cancelled) setHasAnyUnreadSchedules((resp.data.schedules || []).some(s => s.hasUnread));
+      }).catch(() => {});
+    }, 500);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [user, role, page]);
 
   // Lazy-loaded the first time the Scheduled Reports page is opened, then

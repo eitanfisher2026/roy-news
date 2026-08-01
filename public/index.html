@@ -34,15 +34,15 @@
   </script>
 
   <!-- React -->
-  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script defer src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script defer src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script defer src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
   <!-- Firebase -->
-  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-functions-compat.js"></script>
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.0/firebase-functions-compat.js"></script>
 </head>
 <body class="bg-gray-950 min-h-screen text-white">
   <div id="root">
@@ -51,7 +51,7 @@
       <div>Loading Roy News...</div>
     </div>
   </div>
-  <script type="text/babel" src="app.js?v=3.5" data-type="module"></script>
+  <script type="text/babel" src="app.js?v=3.6" data-type="module"></script>
   <script>
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => {});

@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.4';
+const VERSION = 'v3.5';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3526,6 +3526,7 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
   const [translateProgress, setTranslateProgress] = useState(0);
   const [shareCopied, setShareCopied] = useState(false);
   const [resultCopied, setResultCopied] = useState(false);
+  const [showTranslateInfo, setShowTranslateInfo] = useState(false);
 
   const displayDays = isHebrew && hebrewDays ? hebrewDays : (run.days || []);
 
@@ -3573,8 +3574,13 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
   }
 
   return (
-    <div className="panel" style={{ maxWidth: 640, width: '100%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }} onClick={e => e.stopPropagation()}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+    <div className="panel print-root" style={{ maxWidth: 640, width: '100%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }} onClick={e => e.stopPropagation()}>
+      <div className="print-header" style={{ display: 'none' }}>
+        <div style={{ fontSize: 22, fontWeight: 800 }}>📰 Roy News — {scheduleCountry}</div>
+        <div style={{ fontSize: 14, color: '#475569', marginTop: 4 }}>{formatDateLabelDMY(dateLabel)}</div>
+      </div>
+
+      <div className="no-print" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{formatDateLabelDMY(dateLabel)}</div>
           <button onClick={onDelete} style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d', fontSize: 11 }}>
@@ -3584,16 +3590,28 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
         <button onClick={onClose} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 20 }}>×</button>
       </div>
 
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+      <div className="no-print" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
         <button onClick={handleTranslate} disabled={translating}
           style={{ ...SMALL_BTN, background: isHebrew ? '#1e3a5f' : C.card, borderColor: isHebrew ? '#3b82f6' : C.border, fontWeight: isHebrew ? 700 : 400, minWidth: 130 }}>
           {translating
             ? <><Spinner size={12} /> &nbsp;{translateProgress > 0 ? `${translateProgress}%` : 'Starting…'}</>
             : isHebrew ? '🇮🇱 עברית ON' : '🇮🇱 Translate to עב'}
         </button>
-        <button onClick={handleCopyResult} style={SMALL_BTN}>{resultCopied ? '✓ Copied!' : '📋 Copy Result'}</button>
+        <button onClick={() => setShowTranslateInfo(o => !o)}
+          style={{ background: 'none', border: 'none', color: showTranslateInfo ? '#60a5fa' : C.faint, cursor: 'pointer', fontSize: 18, padding: '0 2px', lineHeight: 1 }}
+          title="About translation">ℹ️</button>
+        <button onClick={handleCopyResult} style={SMALL_BTN}>{resultCopied ? '✓ Copied!' : '📋 Copy'}</button>
         <button onClick={handleShareResult} style={SMALL_BTN}>{shareCopied ? '✓ Shared!' : '🔗 Share Result'}</button>
+        <button onClick={() => window.print()} style={SMALL_BTN} title="Opens print dialog — select 'Save as PDF'">🖨️ Print/PDF</button>
       </div>
+
+      {showTranslateInfo && (
+        <div className="no-print" style={{ padding: '10px 14px', background: '#0a1525', border: '1px solid #1e3a5f', borderRadius: 8, marginBottom: 10, fontSize: 12, color: C.muted, lineHeight: 1.7 }}>
+          The report text is the source's own RSS wording — translated to <strong style={{ color: C.text }}>English</strong> where needed, never rewritten.<br/>
+          Translation uses <strong style={{ color: C.text }}>Google Translate</strong> (free) and is cached — toggling is instant after the first time.<br/>
+          <strong style={{ color: C.text }}>Share Result</strong> — on mobile opens your device's share sheet (WhatsApp, Gmail, etc.); on desktop copies the report to clipboard.
+        </div>
+      )}
 
       {displayDays.length === 0 ? (
         <div style={{ color: C.faint, fontSize: 13, padding: '10px 0' }}>No matches found for this period.</div>

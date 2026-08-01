@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.3';
+const VERSION = 'v3.4';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1810,13 +1810,6 @@ function applyPeriodTranslations(result, paths, translations) {
 }
 function buildPeriodShareText(country, startDate, endDate, result, followUps) {
   let text = `📰 Roy News — ${country.name} Period Analysis\n${formatDisplayDate(startDate)} → ${formatDisplayDate(endDate)}\n`;
-  (result.leanGroups || []).forEach(g => {
-    text += `\n── ${g.label || g.lean} ──\n`;
-    if (g.overallNarrative) text += `${g.overallNarrative}\n`;
-    (g.topics || []).forEach(t => {
-      text += `\n${t.topic}${t.tone ? ` [${t.tone}]` : ''}\n${(t.summary || '').slice(0, 220)}\n`;
-    });
-  });
   const s = result.synthesis;
   if (s) {
     text += '\n─── Synthesis ───\n';
@@ -1825,6 +1818,13 @@ function buildPeriodShareText(country, startDate, endDate, result, followUps) {
     if (s.blindSpots) text += `Blind Spots: ${s.blindSpots}\n`;
     if (s.evolution)  text += `Evolution: ${s.evolution}\n`;
   }
+  (result.leanGroups || []).forEach(g => {
+    text += `\n── ${g.label || g.lean} ──\n`;
+    if (g.overallNarrative) text += `${g.overallNarrative}\n`;
+    (g.topics || []).forEach(t => {
+      text += `\n${t.topic}${t.tone ? ` [${t.tone}]` : ''}\n${(t.summary || '').slice(0, 220)}\n`;
+    });
+  });
   if (followUps?.length > 0) {
     text += '\n─── Follow-up Q&A ───\n';
     followUps.forEach(f => { text += `\nQ: ${f.question}\nA: ${f.answer}\n`; });
@@ -2085,15 +2085,10 @@ function PeriodResultView({ country, result, startDate, endDate, topics, persona
         </div>
       )}
 
-      {/* Lean groups */}
-      {leanGroups.length === 0
-        ? <div style={{ color: C.muted, padding: 24, textAlign: 'center' }}>No data returned — try again.</div>
-        : leanGroups.map((g, i) => <LeanGroupCard key={i} group={g} />)
-      }
-
-      {/* Synthesis */}
+      {/* Synthesis — leads the report; the per-lean breakdown below is the
+          supporting detail. */}
       {synthesis && (
-        <div style={{ marginTop: 20, padding: 18, background: '#0a1220', borderRadius: 10, border: '1px solid #1e3a5f' }}>
+        <div style={{ marginBottom: 20, padding: 18, background: '#0a1220', borderRadius: 10, border: '1px solid #1e3a5f' }}>
           <div style={{ fontWeight: 700, fontSize: 14, color: '#60a5fa', marginBottom: 14 }}>Synthesis</div>
           {[
             ['Consensus', synthesis.consensus],
@@ -2108,6 +2103,12 @@ function PeriodResultView({ country, result, startDate, endDate, topics, persona
           ))}
         </div>
       )}
+
+      {/* Lean groups */}
+      {leanGroups.length === 0
+        ? <div style={{ color: C.muted, padding: 24, textAlign: 'center' }}>No data returned — try again.</div>
+        : leanGroups.map((g, i) => <LeanGroupCard key={i} group={g} />)
+      }
 
       {/* Follow-up conversation — the analysis above is fixed, but you can
           ask about it instead of writing a whole new prompt from scratch. */}

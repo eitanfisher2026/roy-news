@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.2';
+const VERSION = 'v3.3';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1429,6 +1429,20 @@ function ConfigStep({ country, user, onGo, onBack }) {
 
   const allTopics = [...DEFAULT_TOPICS.filter(t => !removedDefaultTopics.has(t)), ...customTopics];
   const isPeriod = mode === 'period';
+
+  // Drops any selected topic that no longer exists in the current global
+  // list (e.g. a topic that got renamed/recapitalized, like "iran" ->
+  // "Iran" during an earlier cleanup) — otherwise a stale entry from
+  // localStorage rides along on every future submission forever, invisible
+  // since no chip renders for it once it no longer matches allTopics.
+  useEffect(() => {
+    if (!topicsLoaded) return;
+    const validSet = new Set(allTopics);
+    setSelectedTopics(prev => {
+      const cleaned = new Set([...prev].filter(t => validSet.has(t)));
+      return cleaned.size === prev.size ? prev : cleaned;
+    });
+  }, [topicsLoaded, customTopics, removedDefaultTopics]);
 
   function WordsStepper({ label, sublabel, value, onChange, min = 30, max = 500, step = 25, unit = 'words' }) {
     const [showInfo, setShowInfo] = useState(false);

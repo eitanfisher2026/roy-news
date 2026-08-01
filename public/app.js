@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.1';
+const VERSION = 'v3.2';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1065,7 +1065,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
 }
 
 // ─── Step 1: Country Selection ────────────────────────────────────────────────
-function CountryStep({ onCountryConfirmed, onError, user, onOpenSchedule, hasUnreadDaily, hasUnreadWeekly }) {
+function CountryStep({ onCountryConfirmed, onError, user, onOpenSchedule, hasUnreadSchedules }) {
   const metaCacheKey = user ? `roy-news-countrymeta-${user.uid}` : null;
   const [input, setInput] = useState('');
   const [history, setHistory] = useState(() => {
@@ -1180,18 +1180,11 @@ function CountryStep({ onCountryConfirmed, onError, user, onOpenSchedule, hasUnr
       </div>
 
       {onOpenSchedule && (
-        <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
-          <button onClick={() => onOpenSchedule('daily')}
-            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, flex: 1, padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 10, color: C.text, fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>
-            📅 Daily Reports
-            {hasUnreadDaily && <span title="Unread reports" style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#3b82f6' }} />}
-          </button>
-          <button onClick={() => onOpenSchedule('weekly')}
-            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, flex: 1, padding: '12px', background: C.card, border: '1px solid ' + C.border, borderRadius: 10, color: C.text, fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>
-            🗓️ Weekly Reports
-            {hasUnreadWeekly && <span title="Unread reports" style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#3b82f6' }} />}
-          </button>
-        </div>
+        <button onClick={onOpenSchedule}
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, width: '100%', padding: '12px', marginBottom: 16, background: C.card, border: '1px solid ' + C.border, borderRadius: 10, color: C.text, fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>
+          🗓️ Scheduled Reports
+          {hasUnreadSchedules && <span title="Unread reports" style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#3b82f6' }} />}
+        </button>
       )}
 
       <div className="panel" style={{ padding: 24 }}>
@@ -3719,7 +3712,7 @@ function ScheduledRunView(props) {
   return Array.isArray(props.run.days) ? <RawScheduledRunView {...props} /> : <LegacyScheduledRunView {...props} />;
 }
 
-function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequencyFilter = null }) {
+function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const uid = user?.uid;
   const [confirm, confirmDialog] = useConfirm();
   const [open, setOpen] = useState(defaultOpen);
@@ -3731,10 +3724,10 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
   const [newSourceIds, setNewSourceIds] = useState(new Set());
   const [newTopics, setNewTopics] = useState('');
   const [newContextTopics, setNewContextTopics] = useState(new Set());
-  const [newFrequency, setNewFrequency] = useState(() => frequencyFilter || 'daily');
-  const [newStartDay, setNewStartDay] = useState('monday');
+  const [newWeeklyDay, setNewWeeklyDay] = useState('monday');
   const [newHourUtc, setNewHourUtc] = useState(6);
-  const [newSendEmail, setNewSendEmail] = useState(false);
+  const [newSendDailyEmail, setNewSendDailyEmail] = useState(false);
+  const [newSendWeeklyEmail, setNewSendWeeklyEmail] = useState(false);
   const [newEmailRecipients, setNewEmailRecipients] = useState('');
   const [estimate, setEstimate] = useState(null);
   const [estimating, setEstimating] = useState(false);
@@ -3749,6 +3742,8 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
   const [viewingRun, setViewingRun] = useState(null); // { scheduleId, run }
   const [viewingRunLoadingId, setViewingRunLoadingId] = useState(null); // runId currently being opened
   const [busyId, setBusyId] = useState(null);
+  const [sendingNowId, setSendingNowId] = useState(null); // `${scheduleId}:${type}` currently sending
+  const [sendNowMsg, setSendNowMsg] = useState({}); // scheduleId -> status message
 
   const [sourcesExpandedId, setSourcesExpandedId] = useState(null);
   const [sourceBusyId, setSourceBusyId] = useState(null);
@@ -3776,10 +3771,10 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
   const [editingId, setEditingId] = useState(null);
   const [editTopics, setEditTopics] = useState('');
   const [editContextTopics, setEditContextTopics] = useState(new Set());
-  const [editFrequency, setEditFrequency] = useState('daily');
-  const [editStartDay, setEditStartDay] = useState('monday');
+  const [editWeeklyDay, setEditWeeklyDay] = useState('monday');
   const [editHourUtc, setEditHourUtc] = useState(6);
-  const [editSendEmail, setEditSendEmail] = useState(false);
+  const [editSendDailyEmail, setEditSendDailyEmail] = useState(false);
+  const [editSendWeeklyEmail, setEditSendWeeklyEmail] = useState(false);
   const [editEmailRecipients, setEditEmailRecipients] = useState('');
   const [editSelected, setEditSelected] = useState(new Set());
   const [savingEdit, setSavingEdit] = useState(false);
@@ -3815,10 +3810,10 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
     setEditingId(s.id);
     setEditTopics(s.topics.join(', '));
     setEditContextTopics(new Set(s.contextTopics || []));
-    setEditFrequency(s.frequency);
-    setEditStartDay(s.startDay || 'monday');
+    setEditWeeklyDay(s.weeklyDay || 'monday');
     setEditHourUtc(s.hourUtc);
-    setEditSendEmail(!!s.sendEmail);
+    setEditSendDailyEmail(!!s.sendDailyEmail);
+    setEditSendWeeklyEmail(!!s.sendWeeklyEmail);
     setEditEmailRecipients((s.emailRecipients || []).join(', '));
     setEditSelected(new Set(s.sourceIds));
     loadCountrySourcesLive(s.countryKey);
@@ -3837,10 +3832,10 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
     if (topics.length === 0) { alert('At least one topic is required.'); return; }
     if (editSelected.size === 0) { alert('At least one source is required.'); return; }
     const fields = {
-      topics, contextTopics: topics.filter(t => editContextTopics.has(t)), frequency: editFrequency,
-      startDay: editFrequency === 'weekly' ? editStartDay : null,
-      hourUtc: editHourUtc,
-      sendEmail: editSendEmail, emailRecipients: editEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean),
+      topics, contextTopics: topics.filter(t => editContextTopics.has(t)),
+      weeklyDay: editWeeklyDay, hourUtc: editHourUtc,
+      sendDailyEmail: editSendDailyEmail, sendWeeklyEmail: editSendWeeklyEmail,
+      emailRecipients: editEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean),
       sourceIds: [...editSelected]
     };
     setSavingEdit(true);
@@ -3889,7 +3884,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
       const aiSettings = await getAISettings(uid);
       const resp = await fns.httpsCallable('estimateScheduleCost')({
         sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => newContextTopics.has(t)),
-        frequency: newFrequency, ...aiSettings
+        ...aiSettings
       });
       setEstimate(resp.data);
     } catch (e) {
@@ -3906,14 +3901,15 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
     try {
       await fns.httpsCallable('createSchedule')({
         country: selectedCountry.country, countryKey: selectedCountry.countryKey,
-        sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => newContextTopics.has(t)), frequency: newFrequency,
-        startDay: newStartDay, hourUtc: newHourUtc,
-        sendEmail: newSendEmail, emailRecipients: newEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean)
+        sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => newContextTopics.has(t)),
+        weeklyDay: newWeeklyDay, hourUtc: newHourUtc,
+        sendDailyEmail: newSendDailyEmail, sendWeeklyEmail: newSendWeeklyEmail,
+        emailRecipients: newEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean)
       });
       setCreateMsg('✓ Schedule created');
       setShowCreate(false);
       setNewCountryKey(''); setNewSourceIds(new Set()); setNewTopics(''); setNewContextTopics(new Set()); setEstimate(null);
-      setNewSendEmail(false); setNewEmailRecipients('');
+      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipients('');
       await loadSchedules();
     } catch (e) {
       setCreateMsg('⚠ ' + e.message);
@@ -3930,6 +3926,24 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
       alert('Could not update schedule: ' + e.message);
     }
     setBusyId(null);
+  }
+
+  // Manual test/trigger — sends whatever the latest report of that type
+  // already contains (or, for weekly with none yet, builds one on the spot
+  // from existing daily history) regardless of the schedule's own
+  // sendDailyEmail/sendWeeklyEmail toggles.
+  async function handleSendNow(schedule, type) {
+    const key = `${schedule.id}:${type}`;
+    setSendingNowId(key);
+    setSendNowMsg(prev => ({ ...prev, [schedule.id]: '' }));
+    try {
+      const resp = await fns.httpsCallable('sendReportEmailNow')({ scheduleId: schedule.id, type });
+      setSendNowMsg(prev => ({ ...prev, [schedule.id]: `✓ Sent ${type} report (${formatDateLabelDMY(resp.data.dateLabel)}) to ${(schedule.emailRecipients || []).join(', ')}` }));
+    } catch (e) {
+      setSendNowMsg(prev => ({ ...prev, [schedule.id]: '⚠ ' + e.message }));
+    }
+    setSendingNowId(null);
+    setTimeout(() => setSendNowMsg(prev => ({ ...prev, [schedule.id]: '' })), 6000);
   }
 
   function handleDelete(schedule) {
@@ -4049,13 +4063,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
   }
 
   function scheduleSummary(s) {
-    const when = s.frequency === 'weekly'
-      ? `Weekly ${s.startDay.slice(0, 3)} ${String(s.hourUtc).padStart(2, '0')}:00`
-      : `Daily ${String(s.hourUtc).padStart(2, '0')}:00`;
-    return `${when} UTC · ${s.sourceIds.length} src`;
+    const weeklyDayLabel = s.weeklyDay ? s.weeklyDay.slice(0, 3) : 'Mon';
+    return `Daily ${String(s.hourUtc).padStart(2, '0')}:00 UTC · Weekly digest ${weeklyDayLabel} · ${s.sourceIds.length} src`;
   }
-
-  const visibleSchedules = frequencyFilter ? schedules.filter(s => s.frequency === frequencyFilter) : schedules;
 
   return (
     <div style={{ marginBottom: 28 }}>
@@ -4064,10 +4074,10 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
         style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: '12px 14px', background: open ? C.card : '#0f1e35', border: '1px solid ' + (open ? C.borderLight : C.border), borderRadius: 9, cursor: 'pointer', color: C.text }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 16 }}>{frequencyFilter === 'weekly' ? '🗓️' : '📅'}</span>
+          <span style={{ fontSize: 16 }}>🗓️</span>
           <div style={{ textAlign: 'left' }}>
-            <div style={{ fontWeight: 700, fontSize: 13 }}>{frequencyFilter === 'weekly' ? 'Weekly' : frequencyFilter === 'daily' ? 'Daily' : ''} Scheduled Reports</div>
-            <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>Recurring {frequencyFilter || 'daily/weekly'} topic digests, built from a continuously-archived feed</div>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>Scheduled Reports</div>
+            <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>Recurring daily/weekly topic digests, built from a continuously-archived feed</div>
           </div>
         </div>
         <span style={{ color: C.faint, fontSize: 12 }}>{open ? '▲ Hide' : '▼ Show'}</span>
@@ -4080,11 +4090,11 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
           ) : (
             <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border }}>
 
-              {visibleSchedules.length === 0 && !showCreate && (
+              {schedules.length === 0 && !showCreate && (
                 <div style={{ color: C.faint, fontSize: 12, padding: '4px 10px 12px' }}>No scheduled reports yet</div>
               )}
 
-              {visibleSchedules.map(s => (
+              {schedules.map(s => (
                 <div key={s.id} style={{ padding: '10px 12px', background: '#0f1e35', borderRadius: 7, marginBottom: 8, border: '1px solid ' + C.border }}>
                   <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
                     <div style={{ minWidth: 0 }}>
@@ -4174,24 +4184,13 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
                       <TopicModeChips topics={editTopicsArray()} contextSet={editContextTopics}
                         onToggle={t => setEditContextTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; })} />
 
-                      <div style={{ display: 'flex', gap: 0, marginBottom: 10, borderRadius: 7, overflow: 'hidden', border: '1px solid ' + C.border }}>
-                        {['daily', 'weekly'].map(f => (
-                          <button key={f} onClick={() => setEditFrequency(f)}
-                            style={{ flex: 1, padding: '7px 0', fontSize: 12, fontWeight: editFrequency === f ? 700 : 400, cursor: 'pointer', border: 'none', background: editFrequency === f ? '#1d4ed8' : C.card, color: editFrequency === f ? 'white' : C.muted, textTransform: 'capitalize' }}>
-                            {f}
-                          </button>
-                        ))}
-                      </div>
-
                       <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
-                        {editFrequency === 'weekly' && (
-                          <div style={{ flex: 1 }}>
-                            <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Start day</label>
-                            <select value={editStartDay} onChange={e => setEditStartDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%' }}>
-                              {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
-                            </select>
-                          </div>
-                        )}
+                        <div style={{ flex: 1 }}>
+                          <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly digest day</label>
+                          <select value={editWeeklyDay} onChange={e => setEditWeeklyDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                            {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
+                          </select>
+                        </div>
                         <div style={{ flex: 1 }}>
                           <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Run time (UTC)</label>
                           <select value={editHourUtc} onChange={e => setEditHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
@@ -4201,14 +4200,16 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
                       </div>
 
                       <div style={{ marginBottom: 14, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: editSendEmail ? 8 : 0 }}>
-                          <label style={{ fontSize: 12, color: C.text, fontWeight: 600 }}>📧 Send by email</label>
-                          <button onClick={() => setEditSendEmail(v => !v)}
-                            style={{ ...SMALL_BTN, color: editSendEmail ? '#4ade80' : C.faint, borderColor: editSendEmail ? '#14532d' : C.border, fontSize: 11, padding: '5px 10px' }}>
-                            {editSendEmail ? '● On' : '○ Off'}
-                          </button>
+                        <label style={{ fontSize: 12, color: C.text, fontWeight: 600, display: 'block', marginBottom: 8 }}>📧 Send by email</label>
+                        <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
+                            <input type="checkbox" checked={editSendDailyEmail} onChange={e => setEditSendDailyEmail(e.target.checked)} /> Daily
+                          </label>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
+                            <input type="checkbox" checked={editSendWeeklyEmail} onChange={e => setEditSendWeeklyEmail(e.target.checked)} /> Weekly
+                          </label>
                         </div>
-                        {editSendEmail && (
+                        {(editSendDailyEmail || editSendWeeklyEmail) && (
                           <textarea value={editEmailRecipients} onChange={e => setEditEmailRecipients(e.target.value)}
                             placeholder="email1@example.com, email2@example.com"
                             className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 50, resize: 'vertical' }} />
@@ -4283,6 +4284,24 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
                     </>
                   )}
 
+                  {s.access !== 'read' && (
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                      <button onClick={() => handleSendNow(s, 'daily')} disabled={sendingNowId === `${s.id}:daily`}
+                        title="Send whatever the latest daily report contains, right now — a way to test delivery"
+                        style={{ ...SMALL_BTN, fontSize: 10, padding: '4px 8px' }}>
+                        {sendingNowId === `${s.id}:daily` ? <><Spinner size={9} />&nbsp;Sending…</> : '📧 Send Now · Daily'}
+                      </button>
+                      <button onClick={() => handleSendNow(s, 'weekly')} disabled={sendingNowId === `${s.id}:weekly`}
+                        title="Send the latest weekly digest, building one from existing daily reports if none exists yet"
+                        style={{ ...SMALL_BTN, fontSize: 10, padding: '4px 8px' }}>
+                        {sendingNowId === `${s.id}:weekly` ? <><Spinner size={9} />&nbsp;Sending…</> : '📧 Send Now · Weekly'}
+                      </button>
+                    </div>
+                  )}
+                  {sendNowMsg[s.id] && (
+                    <div style={{ fontSize: 11, color: sendNowMsg[s.id].startsWith('✓') ? '#4ade80' : '#f87171', marginTop: 4 }}>{sendNowMsg[s.id]}</div>
+                  )}
+
                   <button onClick={() => toggleExpand(s)}
                     style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
                     <span>{expandedIds.has(s.id) ? '▾' : '▸'}</span><span>Report history</span>
@@ -4297,6 +4316,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
                         <div key={r.runId} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '6px 8px', background: C.bg, borderRadius: 6, marginBottom: 5, fontSize: 11 }}>
                           <div style={{ minWidth: 0 }}>
                             {!r.read && r.relevantTotal > 0 && <span title="Unread" style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: '#3b82f6', marginRight: 6 }} />}
+                            <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3, color: r.runType === 'weekly' ? '#a78bfa' : '#60a5fa', border: '1px solid ' + (r.runType === 'weekly' ? '#4c1d95' : '#1e3a5f'), borderRadius: 4, padding: '1px 5px', marginRight: 6 }}>
+                              {r.runType === 'weekly' ? 'Weekly' : 'Daily'}
+                            </span>
                             <span style={{ color: C.text }}>{formatDateLabelDMY(r.dateLabel)}</span>
                             <span style={{ color: r.status === 'error' ? '#f87171' : C.faint, marginLeft: 8 }}>
                               {r.status === 'error' ? '⚠ failed' : `$${r.costUsd.toFixed(4)} · ${r.sourceCount} sources`}
@@ -4352,26 +4374,17 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
                   <TopicModeChips topics={topicsArray()} contextSet={newContextTopics}
                     onToggle={t => { setNewContextTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; }); setEstimate(null); }} />
 
-                  {!frequencyFilter && (
-                    <div style={{ display: 'flex', gap: 0, marginBottom: 10, borderRadius: 7, overflow: 'hidden', border: '1px solid ' + C.border }}>
-                      {['daily', 'weekly'].map(f => (
-                        <button key={f} onClick={() => setNewFrequency(f)}
-                          style={{ flex: 1, padding: '7px 0', fontSize: 12, fontWeight: newFrequency === f ? 700 : 400, cursor: 'pointer', border: 'none', background: newFrequency === f ? '#1d4ed8' : C.card, color: newFrequency === f ? 'white' : C.muted, textTransform: 'capitalize' }}>
-                          {f}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                  <div style={{ fontSize: 11, color: C.faint, marginBottom: 10 }}>
+                    Every schedule archives and builds a daily report automatically. A weekly digest — the same days bundled together — also builds on the day below.
+                  </div>
 
                   <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
-                    {newFrequency === 'weekly' && (
-                      <div style={{ flex: 1 }}>
-                        <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Start day</label>
-                        <select value={newStartDay} onChange={e => setNewStartDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%' }}>
-                          {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
-                        </select>
-                      </div>
-                    )}
+                    <div style={{ flex: 1 }}>
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly digest day</label>
+                      <select value={newWeeklyDay} onChange={e => setNewWeeklyDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                        {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
+                      </select>
+                    </div>
                     <div style={{ flex: 1 }}>
                       <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Run time (UTC)</label>
                       <select value={newHourUtc} onChange={e => setNewHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
@@ -4381,14 +4394,16 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false, frequency
                   </div>
 
                   <div style={{ marginBottom: 12, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: newSendEmail ? 8 : 0 }}>
-                      <label style={{ fontSize: 12, color: C.text, fontWeight: 600 }}>📧 Send by email</label>
-                      <button onClick={() => setNewSendEmail(v => !v)}
-                        style={{ ...SMALL_BTN, color: newSendEmail ? '#4ade80' : C.faint, borderColor: newSendEmail ? '#14532d' : C.border, fontSize: 11, padding: '5px 10px' }}>
-                        {newSendEmail ? '● On' : '○ Off'}
-                      </button>
+                    <label style={{ fontSize: 12, color: C.text, fontWeight: 600, display: 'block', marginBottom: 8 }}>📧 Send by email</label>
+                    <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
+                        <input type="checkbox" checked={newSendDailyEmail} onChange={e => setNewSendDailyEmail(e.target.checked)} /> Daily
+                      </label>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
+                        <input type="checkbox" checked={newSendWeeklyEmail} onChange={e => setNewSendWeeklyEmail(e.target.checked)} /> Weekly
+                      </label>
                     </div>
-                    {newSendEmail && (
+                    {(newSendDailyEmail || newSendWeeklyEmail) && (
                       <textarea value={newEmailRecipients} onChange={e => setNewEmailRecipients(e.target.value)}
                         placeholder="email1@example.com, email2@example.com"
                         className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 50, resize: 'vertical' }} />
@@ -4467,19 +4482,15 @@ function App() {
   const appStateRef = useRef({});
   const [scheduleCountries, setScheduleCountries] = useState([]);
   const [scheduleCountriesLoaded, setScheduleCountriesLoaded] = useState(false);
-  const [hasAnyUnreadDaily, setHasAnyUnreadDaily] = useState(false);
-  const [hasAnyUnreadWeekly, setHasAnyUnreadWeekly] = useState(false);
-  const [scheduleFrequency, setScheduleFrequency] = useState('daily');
+  const [hasAnyUnreadSchedules, setHasAnyUnreadSchedules] = useState(false);
 
   // Re-checked whenever the home page is showing (first load, and whenever
   // coming back from the Scheduled Reports page after reading something) —
-  // this is what badges the two home-page buttons.
+  // this is what badges the home-page button itself.
   useEffect(() => {
     if (!user || !role || page !== 'main') return;
     fns.httpsCallable('listSchedules')({}).then(resp => {
-      const schedules = resp.data.schedules || [];
-      setHasAnyUnreadDaily(schedules.some(s => s.frequency === 'daily' && s.hasUnread));
-      setHasAnyUnreadWeekly(schedules.some(s => s.frequency === 'weekly' && s.hasUnread));
+      setHasAnyUnreadSchedules((resp.data.schedules || []).some(s => s.hasUnread));
     }).catch(() => {});
   }, [user, role, page]);
 
@@ -4820,18 +4831,16 @@ function App() {
         <div className="panel" style={{ padding: 24 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
             <button onClick={() => setPage('main')} style={BACK_BTN}>← Back</button>
-            <h2 style={{ fontSize: 17, fontWeight: 800, margin: 0, color: C.text }}>
-              {scheduleFrequency === 'weekly' ? '🗓️ Weekly Scheduled Reports' : '📅 Daily Scheduled Reports'}
-            </h2>
+            <h2 style={{ fontSize: 17, fontWeight: 800, margin: 0, color: C.text }}>🗓️ Scheduled Reports</h2>
           </div>
-          <ScheduledReportsPanel user={user} countries={scheduleCountries} defaultOpen frequencyFilter={scheduleFrequency} />
+          <ScheduledReportsPanel user={user} countries={scheduleCountries} defaultOpen />
         </div>
       </div>
     );
   } else if (step === 'loading' && loadingConfig) {
     content = <CancelableLoader {...loadingConfig} onCancel={cancel} />;
   } else if (step === 'country') {
-    content = <CountryStep onCountryConfirmed={handleCountryConfirmed} onError={addError} user={user} onOpenSchedule={f => { setScheduleFrequency(f); setPage('schedule'); }} hasUnreadDaily={hasAnyUnreadDaily} hasUnreadWeekly={hasAnyUnreadWeekly} />;
+    content = <CountryStep onCountryConfirmed={handleCountryConfirmed} onError={addError} user={user} onOpenSchedule={() => setPage('schedule')} hasUnreadSchedules={hasAnyUnreadSchedules} />;
   } else if (step === 'config') {
     content = <ConfigStep country={country} user={user} onGo={handleGo} onBack={() => setStep('country')} />;
   } else if (step === 'sources') {

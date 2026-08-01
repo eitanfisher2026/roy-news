@@ -6,13 +6,9 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const OpenAI = require('openai');
 const Parser = require('rss-parser');
 const nodemailer = require('nodemailer');
+const { defineSecret } = require('firebase-functions/params');
 
-// TODO: re-enable once GMAIL_APP_PASSWORD exists in Secret Manager (needs
-// the Secret Manager API enabled on this project first — see sendReportEmail).
-// Merely calling defineSecret() here blocks deployment of the ENTIRE
-// codebase if the secret doesn't exist yet, so it stays out until then.
-// const { defineSecret } = require('firebase-functions/params');
-// const gmailAppPassword = defineSecret('GMAIL_APP_PASSWORD');
+const gmailAppPassword = defineSecret('GMAIL_APP_PASSWORD');
 
 admin.initializeApp();
 const db = admin.database();
@@ -923,14 +919,6 @@ function computeRunSourceCount(run) {
 async function sendReportEmail(schedule, run) {
   const recipients = (schedule.emailRecipients || []).filter(Boolean);
   if (recipients.length === 0) return;
-  // TODO: temporarily disabled — see the defineSecret note near the top of
-  // this file. Re-enable by uncommenting the gmailAppPassword import there,
-  // adding `secrets: [gmailAppPassword]` back to generateScheduledReports,
-  // and restoring the transporter/sendMail block below, once
-  // GMAIL_APP_PASSWORD exists in Secret Manager.
-  console.log(`sendReportEmail: skipped (email delivery not yet configured) — would have sent to ${recipients.join(', ')}`);
-  return;
-  /* eslint-disable no-unreachable */
   try {
     const transporter = nodemailer.createTransport({
       service: 'gmail',
@@ -1921,12 +1909,7 @@ function scheduleIsDue(schedule, now) {
 }
 
 exports.generateScheduledReports = onSchedule(
-  // secrets: [gmailAppPassword] is added back once the Gmail App Password
-  // secret exists in Secret Manager (see sendReportEmail) — declaring it
-  // before the secret exists blocks deployment of the *entire* codebase,
-  // not just this function, since Firebase validates every declared secret
-  // up front.
-  { schedule: 'every 60 minutes', region: 'us-central1', memory: '512MiB', timeoutSeconds: 540, timeZone: 'Etc/UTC' },
+  { schedule: 'every 60 minutes', region: 'us-central1', memory: '512MiB', timeoutSeconds: 540, timeZone: 'Etc/UTC', secrets: [gmailAppPassword] },
   async () => {
     const now = new Date();
     const schedulesSnap = await db.ref('schedules').once('value');

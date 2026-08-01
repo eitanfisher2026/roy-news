@@ -5,6 +5,14 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const OpenAI = require('openai');
 const Parser = require('rss-parser');
+const nodemailer = require('nodemailer');
+
+// TODO: re-enable once GMAIL_APP_PASSWORD exists in Secret Manager (needs
+// the Secret Manager API enabled on this project first — see sendReportEmail).
+// Merely calling defineSecret() here blocks deployment of the ENTIRE
+// codebase if the secret doesn't exist yet, so it stays out until then.
+// const { defineSecret } = require('firebase-functions/params');
+// const gmailAppPassword = defineSecret('GMAIL_APP_PASSWORD');
 
 admin.initializeApp();
 const db = admin.database();
@@ -793,6 +801,156 @@ function splitTopicsByMode(topics, contextTopics) {
   };
 }
 
+// ─── Raw (no-AI-summary) scheduled reports ────────────────────────────────────
+// Same free public endpoint app.js's translateViaGoogle hits client-side —
+// server-side fetch has no CORS restriction, so this just calls it directly.
+// sl=auto (not a fixed source language) since a source's RSS text may already
+// be partly English (e.g. proper nouns) mixed with its native language.
+async function translateToEnglish(text) {
+  if (!text || !text.trim()) return text;
+  try {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=${encodeURIComponent(text)}`;
+    const resp = await fetch(url);
+    if (!resp.ok) return text;
+    const data = await resp.json();
+    if (!Array.isArray(data?.[0])) return text;
+    return data[0].map(s => s?.[0] || '').join('');
+  } catch {
+    return text;
+  }
+}
+
+// A source's own RSS text needs no translation call at all if it only
+// publishes in English — zero cost, zero latency for the common case.
+function sourceIsEnglishOnly(source) {
+  const langs = source?.languages || [];
+  return langs.length === 0 || langs.every(l => (l || '').toLowerCase() === 'english');
+}
+
+// Groups a single source's topic matches by identical matched-article-index-
+// set — two topics that matched the exact same article(s) collapse into one
+// combined header ("Israel (context), middle east (context)") instead of
+// repeating the same article's text under each topic separately. Mirrors the
+// client-side groupTopicAnalyses merge in app.js, but this has to happen
+// server-side since the emailed report needs the same grouping the in-app
+// viewer shows.
+function groupSourceTopicsByMatch(topicOrder, contextSet, topicKeywordMatches) {
+  const groups = [];
+  const groupIndexBySignature = new Map();
+  for (const topic of topicOrder) {
+    const indices = (topicKeywordMatches[topic] || []).slice().sort((a, b) => a - b);
+    if (indices.length === 0) continue;
+    const signature = indices.join(',');
+    if (groupIndexBySignature.has(signature)) {
+      groups[groupIndexBySignature.get(signature)].topicNames.push(topic);
+      continue;
+    }
+    groups.push({ topicNames: [topic], indices });
+    groupIndexBySignature.set(signature, groups.length - 1);
+  }
+  return groups.map(g => ({
+    label: g.topicNames.map(t => `${t} (${contextSet.has(t.toLowerCase()) ? 'context' : 'exact'})`).join(', '),
+    topicNames: g.topicNames,
+    indices: g.indices
+  }));
+}
+
+// Assembles one day's topic sections across all sources: buckets sources that
+// ended up under the identical topic-name combination together, so the report
+// reads "Topic: X, Y" once with every source that had that exact combination
+// listed beneath it, rather than one section per source.
+function buildDayTopicGroups(topicOrder, contextTopics, perSourceMatchData) {
+  const contextSet = new Set((contextTopics || []).map(t => t.toLowerCase()));
+  const bucketsByLabel = new Map();
+  for (const { source, topicKeywordMatches, translatedArticles } of perSourceMatchData) {
+    const groups = groupSourceTopicsByMatch(topicOrder, contextSet, topicKeywordMatches);
+    for (const g of groups) {
+      if (!bucketsByLabel.has(g.label)) {
+        bucketsByLabel.set(g.label, { label: g.label, topicNames: g.topicNames, sources: [] });
+      }
+      bucketsByLabel.get(g.label).sources.push({
+        sourceId: source.id, sourceName: source.name, sourceLean: source.lean,
+        articles: g.indices.map(i => translatedArticles[i - 1])
+      });
+    }
+  }
+  // Preserve the schedule's own topic order for section ordering.
+  return [...bucketsByLabel.values()].sort((a, b) =>
+    topicOrder.indexOf(a.topicNames[0]) - topicOrder.indexOf(b.topicNames[0])
+  );
+}
+
+// Shared by the in-app viewer's Share/Copy and the emailed report body, so
+// the two never drift apart.
+function buildRawReportText(country, dateLabel, days) {
+  let text = `📰 Roy News — ${country} Report\n${dateLabel}\n`;
+  for (const d of days) {
+    text += `\n=== Day: ${d.day} ===\n`;
+    for (const t of d.topics) {
+      text += `\nTopic: ${t.label}\n`;
+      for (const s of t.sources) {
+        text += `  Source: ${s.sourceName}\n`;
+        for (const a of s.articles) {
+          text += `    ${a.title}\n    ${a.text}\n`;
+        }
+      }
+    }
+  }
+  text += `\n─────────────────\nGenerated by Roy News`;
+  return text;
+}
+
+// Handles both the new days-shaped runs and legacy results-shaped runs, so
+// old reports keep their correct unread/badge counts without needing a
+// one-time data migration.
+function computeRunRelevantTotal(run) {
+  if (Array.isArray(run.days)) {
+    let total = 0;
+    for (const d of run.days) for (const t of d.topics || []) for (const s of t.sources || []) total += (s.articles || []).length;
+    return total;
+  }
+  return Object.values(run.results || {}).reduce((sum, s) => sum + (s.relevantCount || 0), 0);
+}
+function computeRunSourceCount(run) {
+  if (Array.isArray(run.days)) {
+    const ids = new Set();
+    for (const d of run.days) for (const t of d.topics || []) for (const s of t.sources || []) ids.add(s.sourceId);
+    return ids.size;
+  }
+  return run.results ? Object.keys(run.results).length : 0;
+}
+
+async function sendReportEmail(schedule, run) {
+  const recipients = (schedule.emailRecipients || []).filter(Boolean);
+  if (recipients.length === 0) return;
+  // TODO: temporarily disabled — see the defineSecret note near the top of
+  // this file. Re-enable by uncommenting the gmailAppPassword import there,
+  // adding `secrets: [gmailAppPassword]` back to generateScheduledReports,
+  // and restoring the transporter/sendMail block below, once
+  // GMAIL_APP_PASSWORD exists in Secret Manager.
+  console.log(`sendReportEmail: skipped (email delivery not yet configured) — would have sent to ${recipients.join(', ')}`);
+  return;
+  /* eslint-disable no-unreachable */
+  try {
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user: OWNER_EMAIL, pass: gmailAppPassword.value() }
+    });
+    const body = buildRawReportText(schedule.country, run.dateLabel, run.days || []);
+    const kind = schedule.frequency === 'weekly' ? 'Weekly' : 'Daily';
+    await transporter.sendMail({
+      from: `Roy News <${OWNER_EMAIL}>`,
+      to: recipients.join(', '),
+      subject: `Roy News — ${schedule.country} ${kind} Report (${run.dateLabel})`,
+      text: body
+    });
+  } catch (e) {
+    // A failed email must never fail the report run itself — the run is
+    // already durably recorded and viewable in-app regardless.
+    console.error('sendReportEmail failed', e.message);
+  }
+}
+
 function notCoveredAnalysis(topics, dateLabel) {
   return {
     topicAnalyses: topics.map(t => ({
@@ -855,6 +1013,44 @@ Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], 
   } catch {
     // A failed classification call should fail closed (no matches, no main
     // analysis call either), not fail open into a full-body-priced pass.
+    return empty;
+  }
+}
+
+// Same idea as classifyContextTopicsByHeader but reads each full article
+// (title + text) instead of just the headline, and — unlike that header
+// pass, which is deliberately a loose "first pass" refined by a later full
+// read in the old AI-summary pipeline — this IS the final decision, since
+// the raw-report pipeline has no follow-up analysis call to correct it.
+// Used for 'fullBody' context mode there, where accuracy over speed/cost is
+// the point.
+async function classifyContextTopicsByFullBody(articles, contextTopics, ai, uid, email) {
+  const empty = Object.fromEntries(contextTopics.map(t => [t, []]));
+  if (articles.length === 0) return empty;
+
+  const articlesList = articles.map((a, i) => `${i + 1}. ${a.title}\n${a.text}`).join('\n\n');
+  const prompt = `Below is a numbered list of full articles. For each theme listed, return the numbers of the articles that are genuinely about that theme, judging from the full article text — this is the final decision for what gets included in a report, so be precise rather than inclusive.
+
+Articles:
+${articlesList}
+
+Themes: ${contextTopics.join(', ')}
+
+Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], "other theme": [] }`;
+
+  try {
+    const { text, usage } = await callAI(ai, prompt, 500);
+    if (usage) await persistCost(uid, email, ai, calcCostUsd(ai, usage.input_tokens || 0, usage.output_tokens || 0));
+    const parsed = extractJson(text, '{') || {};
+    const normalized = {};
+    for (const [k, v] of Object.entries(parsed)) normalized[k.trim().toLowerCase()] = v;
+    const result = {};
+    for (const t of contextTopics) {
+      const v = normalized[t.trim().toLowerCase()];
+      result[t] = Array.isArray(v) ? v.filter(n => Number.isInteger(n) && n >= 1 && n <= articles.length) : [];
+    }
+    return result;
+  } catch {
     return empty;
   }
 }
@@ -1231,11 +1427,26 @@ function buildGroundingSection(grounding, topics) {
     const lines = [];
     for (const { runs } of matches) {
       for (const run of runs) {
-        for (const src of Object.values(run.results || {})) {
-          const ta = (src.analysis?.topicAnalyses || []).find(t => (t.topic || '').toLowerCase() === topic.toLowerCase());
-          if (ta && ta.covered) {
-            const quotes = ta.quotes?.length ? ` Quotes: ${ta.quotes.map(q => `"${q}"`).join('; ')}` : '';
-            lines.push(`- ${src.source.name} (${src.source.lean}), ${run.dateLabel}: [${ta.tone || 'neutral'}] ${ta.summary}${quotes}`);
+        if (Array.isArray(run.days)) {
+          // New raw-report shape — real excerpts instead of an AI summary,
+          // which is arguably better grounding than the old paraphrase was.
+          for (const day of run.days) {
+            for (const t of day.topics || []) {
+              if (!t.topicNames.some(n => n.toLowerCase() === topic.toLowerCase())) continue;
+              for (const src of t.sources || []) {
+                for (const a of src.articles || []) {
+                  lines.push(`- ${src.sourceName} (${src.sourceLean}), ${day.day}: "${a.title}" — ${a.text}`);
+                }
+              }
+            }
+          }
+        } else {
+          for (const src of Object.values(run.results || {})) {
+            const ta = (src.analysis?.topicAnalyses || []).find(t => (t.topic || '').toLowerCase() === topic.toLowerCase());
+            if (ta && ta.covered) {
+              const quotes = ta.quotes?.length ? ` Quotes: ${ta.quotes.map(q => `"${q}"`).join('; ')}` : '';
+              lines.push(`- ${src.source.name} (${src.source.lean}), ${run.dateLabel}: [${ta.tone || 'neutral'}] ${ta.summary}${quotes}`);
+            }
           }
         }
       }
@@ -1710,6 +1921,11 @@ function scheduleIsDue(schedule, now) {
 }
 
 exports.generateScheduledReports = onSchedule(
+  // secrets: [gmailAppPassword] is added back once the Gmail App Password
+  // secret exists in Secret Manager (see sendReportEmail) — declaring it
+  // before the secret exists blocks deployment of the *entire* codebase,
+  // not just this function, since Firebase validates every declared secret
+  // up front.
   { schedule: 'every 60 minutes', region: 'us-central1', memory: '512MiB', timeoutSeconds: 540, timeZone: 'Etc/UTC' },
   async () => {
     const now = new Date();
@@ -1731,53 +1947,79 @@ exports.generateScheduledReports = onSchedule(
       try {
         const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
         const ai = makeAI(aiSettingsSnap.val() || {});
-        const customPrompts = await getCustomPrompts();
 
         let sources = (await db.ref(`countries/${schedule.countryKey}/setup/sources`).once('value')).val() || [];
         sources = sources.filter(s => (schedule.sourceIds || []).includes(s.id));
 
-        const summaryLen = `~${Math.min(Math.max(schedule.summaryWords || 100, 30), 300)}-word summary`;
-        let totalInputTokens = 0, totalOutputTokens = 0;
-        const results = {};
+        const topics = schedule.topics || [];
+        const contextTopics = schedule.contextTopics || [];
+        const { exactTopics, actualContextTopics } = splitTopicsByMode(topics, contextTopics);
+
         // Collected but not applied until the whole run is durably recorded
         // below — if anything in this run throws, nothing here ever executes,
         // so a retried run still sees the full, unpruned archive to work from.
         const pendingDeletions = {};
+        const days = [];
 
-        await Promise.all(sources.map(async (source) => {
-          const articles = await readArchivedArticles(schedule.countryKey, source.id, dayKeys);
-          const { text, usage, relevantIndices, topicKeywordMatches, contextTopics: usedContextTopics } = await analyzeArticlesForTopics({
-            ai, source, articles, topics: schedule.topics, contextTopics: schedule.contextTopics || [],
-            country: schedule.country, dateLabel, summaryLen, customPrompts,
-            uid: schedule.createdBy, email: schedule.createdByEmail, contextMode
-          });
-          totalInputTokens  += usage?.input_tokens  || 0;
-          totalOutputTokens += usage?.output_tokens || 0;
-          const analysis = finalizeAnalysis(text, relevantIndices, topicKeywordMatches, dateLabel, usedContextTopics);
-          results[source.id] = { source, articleCount: articles.length, relevantCount: relevantIndices.length, analysis };
+        for (const day of dayKeys) {
+          const perSourceMatchData = [];
 
-          // Keep only the articles that mattered to this report; drop the
-          // rest from the archive. Note: if another schedule shares this same
-          // source with different topics (or a wider date range), it may now
-          // find fewer archived articles than before — pruning is per-schedule,
-          // applied immediately, by deliberate choice.
-          const relevantSet = new Set(relevantIndices);
-          articles.forEach((a, i) => { if (!relevantSet.has(i + 1)) pendingDeletions[a._archivePath] = null; });
-        }));
+          await Promise.all(sources.map(async (source) => {
+            const articles = await readArchivedArticles(schedule.countryKey, source.id, [day]);
+            if (articles.length === 0) return;
 
-        const costUsd = calcCostUsd(ai, totalInputTokens, totalOutputTokens);
-        await persistCost(schedule.createdBy, schedule.createdByEmail, ai, costUsd);
+            const exactMatches = exactTopics.length > 0
+              ? await computeTopicKeywordMatches(articles, exactTopics, source, ai, schedule.createdBy, schedule.createdByEmail)
+              : {};
+            let contextMatches = {};
+            if (actualContextTopics.length > 0) {
+              contextMatches = contextMode === 'fullBody'
+                ? await classifyContextTopicsByFullBody(articles, actualContextTopics, ai, schedule.createdBy, schedule.createdByEmail)
+                : await classifyContextTopicsByHeader(articles, actualContextTopics, ai, schedule.createdBy, schedule.createdByEmail);
+            }
+            const topicKeywordMatches = { ...exactMatches, ...contextMatches };
+            const relevantIndices = relevantIndicesFromMatches(topicKeywordMatches);
 
-        await runRef.set({
+            // Keep only the articles that mattered to this report; drop the
+            // rest from the archive. Note: if another schedule shares this same
+            // source with different topics (or a wider date range), it may now
+            // find fewer archived articles than before — pruning is per-schedule,
+            // applied immediately, by deliberate choice.
+            const relevantSet = new Set(relevantIndices);
+            articles.forEach((a, i) => { if (!relevantSet.has(i + 1)) pendingDeletions[a._archivePath] = null; });
+            if (relevantIndices.length === 0) return;
+
+            // Only the matched articles get translated — same "only pay for
+            // what's relevant" principle as the AI-summary path used to apply
+            // to its analysis call, just applied to translation now instead.
+            const isEnglish = sourceIsEnglishOnly(source);
+            const translatedArticles = articles.map(a => ({ title: a.title, text: a.text, link: a.link }));
+            await Promise.all(relevantIndices.map(async (i) => {
+              if (isEnglish) return;
+              const a = articles[i - 1];
+              const [title, text] = await Promise.all([translateToEnglish(a.title), translateToEnglish(a.text)]);
+              translatedArticles[i - 1] = { title, text, link: a.link };
+            }));
+
+            perSourceMatchData.push({ source, topicKeywordMatches, translatedArticles });
+          }));
+
+          const topicGroups = buildDayTopicGroups(topics, contextTopics, perSourceMatchData);
+          if (topicGroups.length > 0) days.push({ day, topics: topicGroups });
+        }
+
+        const run = {
           scheduleId, generatedAt: now.toISOString(), periodStart, periodEnd, dateLabel,
-          results, costUsd, inputTokens: totalInputTokens, outputTokens: totalOutputTokens,
-          provider: ai.type, model: ai.model, status: 'ok'
-        });
+          days, costUsd: 0, inputTokens: 0, outputTokens: 0, provider: ai.type, model: ai.model, status: 'ok'
+        };
+        await runRef.set(run);
         await db.ref(`schedules/${scheduleId}`).update({ lastRunAt: now.toISOString(), lastRunStatus: 'ok', lastPeriodEnd: periodEnd });
 
         if (Object.keys(pendingDeletions).length > 0) {
           try { await db.ref().update(pendingDeletions); } catch {}
         }
+
+        if (schedule.sendEmail) await sendReportEmail(schedule, run);
       } catch (e) {
         // Deliberately does NOT set lastPeriodEnd on failure, so the next
         // hourly tick retries this same period instead of silently skipping it.
@@ -1789,12 +2031,29 @@ exports.generateScheduledReports = onSchedule(
 );
 
 // ─── Schedule management (admin-only, mirrors other admin-gated writes) ──────
+// Recipients are arbitrary email addresses, not tied to authorizedUids —
+// anyone with a valid-looking address can be added, format-checked only.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function sanitizeEmailList(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const raw of list) {
+    const email = String(raw || '').trim().toLowerCase();
+    if (!email || !EMAIL_RE.test(email) || seen.has(email)) continue;
+    seen.add(email);
+    out.push(email);
+  }
+  return out;
+}
+
 exports.createSchedule = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
     await requireAuthorized(request);
-    const { country, countryKey, sourceIds, topics, frequency, startDay, hourUtc, summaryWords, maxArticles } = request.data || {};
+    const { country, countryKey, sourceIds, topics, frequency, startDay, hourUtc, summaryWords, maxArticles, sendEmail } = request.data || {};
     const contextTopics = Array.isArray(request.data?.contextTopics) ? request.data.contextTopics : [];
+    const emailRecipients = sanitizeEmailList(request.data?.emailRecipients);
     if (!country || !countryKey || !sourceIds?.length || !topics?.length) {
       throw new HttpsError('invalid-argument', 'country, countryKey, sourceIds, and topics required');
     }
@@ -1808,6 +2067,7 @@ exports.createSchedule = onCall(
       startDay: frequency === 'weekly' ? startDay : null,
       hourUtc: hour,
       summaryWords: summaryWords || 100, maxArticles: maxArticles || 25,
+      sendEmail: !!sendEmail, emailRecipients,
       enabled: true,
       createdBy: request.auth.uid, createdByEmail: request.auth.token.email || null,
       createdAt: new Date().toISOString(),
@@ -1829,7 +2089,8 @@ exports.updateSchedule = onCall(
     const schedule = snap.val();
     if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
     requireScheduleAccess(schedule, request.auth.uid, 'write');
-    const allowed = ['sourceIds', 'topics', 'contextTopics', 'frequency', 'startDay', 'hourUtc', 'summaryWords', 'maxArticles', 'enabled'];
+    if (updates.emailRecipients !== undefined) updates.emailRecipients = sanitizeEmailList(updates.emailRecipients);
+    const allowed = ['sourceIds', 'topics', 'contextTopics', 'frequency', 'startDay', 'hourUtc', 'summaryWords', 'maxArticles', 'enabled', 'sendEmail', 'emailRecipients'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
     if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');
@@ -1903,8 +2164,7 @@ exports.listSchedules = onCall(
       const readMap = readSnap.val() || {};
       s.hasUnread = Object.entries(runs).some(([runId, r]) => {
         if (r.status !== 'ok' || readMap[runId]) return false;
-        const relevantTotal = Object.values(r.results || {}).reduce((sum, src) => sum + (src.relevantCount || 0), 0);
-        return relevantTotal > 0;
+        return computeRunRelevantTotal(r) > 0;
       });
     }));
 
@@ -1971,14 +2231,13 @@ exports.listReportRuns = onCall(
     // Metadata only — not the full per-source analysis payload, so browsing
     // history for a schedule with many runs stays lightweight.
     const runs = Object.entries(val).map(([runId, r]) => {
-      const sources = r.results ? Object.values(r.results) : [];
       return {
         runId, generatedAt: r.generatedAt, periodStart: r.periodStart, periodEnd: r.periodEnd,
         dateLabel: r.dateLabel, costUsd: r.costUsd || 0, status: r.status, error: r.error || null,
-        sourceCount: sources.length,
+        sourceCount: computeRunSourceCount(r),
         // Total matched articles across all sources — lets the list mark which
         // runs actually found something without fetching the full analysis.
-        relevantTotal: sources.reduce((sum, s) => sum + (s.relevantCount || 0), 0),
+        relevantTotal: computeRunRelevantTotal(r),
         // Per-user read state — read reports/{scheduleId}/{runId} is written
         // directly by the client (users/{uid} is already self-writable).
         read: !!readMap[runId]
@@ -2029,32 +2288,33 @@ exports.estimateScheduleCost = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
     await requireAuthorized(request);
-    const { sourceIds, topics, contextTopics, summaryWords, frequency } = request.data || {};
+    const { sourceIds, topics, contextTopics, frequency } = request.data || {};
     if (!sourceIds?.length || !topics?.length) throw new HttpsError('invalid-argument', 'sourceIds and topics required');
 
     const ai = makeAI(request.data);
-    const words = Math.min(Math.max(summaryWords || 100, 30), 300);
-
     const contextSet = new Set((contextTopics || []).map(t => t.toLowerCase()));
     const hasContext = topics.some(t => contextSet.has(t.toLowerCase()));
     const contextMode = hasContext ? await getContextAnalysisMode() : null;
 
-    // Heuristic: exact-only assumes ~3 relevant articles matched per source
-    // at ~120 words each. A context topic in 'fullBody' mode has no
-    // pre-filter — every article goes to the main call — so the assumed
-    // volume is much closer to the actual per-source article limit instead
-    // of just the handful an exact match would have found.
-    const assumedArticles = contextMode === 'fullBody' ? 15 : 3;
-    const inputTokensPerSource = 300 + Math.round((assumedArticles * 120) * 1.3);
-    const outputTokensPerSource = Math.round(topics.length * (words * 1.3 + 60));
-    let perRunInputTokens = inputTokensPerSource * sourceIds.length;
-    let perRunOutputTokens = outputTokensPerSource * sourceIds.length;
+    // The report itself no longer costs anything to write (raw RSS text,
+    // no AI prose) — exact-topic matching is a substring check plus a
+    // one-time, permanently-cached per-topic-per-language translation, so
+    // it's ~free. The only ongoing AI cost is context-topic classification,
+    // which now runs once PER DAY the report covers (the report is built
+    // day-by-day), not once per whole period — a weekly schedule runs this
+    // ~7x more often than a daily one, per report.
+    const daysPerRun = frequency === 'weekly' ? 7 : 1;
+    let perRunInputTokens = 0, perRunOutputTokens = 0;
 
-    if (contextMode === 'header') {
-      // Small added classification pass per source: ~10 short titles in,
-      // a small JSON list of numbers out.
-      perRunInputTokens += 150 * sourceIds.length;
-      perRunOutputTokens += 60 * sourceIds.length;
+    if (hasContext) {
+      const assumedArticlesPerDay = 10;
+      // 'fullBody' reads each full article (title + text) to classify —
+      // pricier but a real judgment; 'header' reads only the headlines.
+      const inputTokensPerSourcePerDay = contextMode === 'fullBody'
+        ? Math.round(assumedArticlesPerDay * 120 * 1.3)
+        : 150;
+      perRunInputTokens = inputTokensPerSourcePerDay * sourceIds.length * daysPerRun;
+      perRunOutputTokens = 60 * sourceIds.length * daysPerRun;
     }
 
     const perRunUsd = calcCostUsd(ai, perRunInputTokens, perRunOutputTokens);

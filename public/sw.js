@@ -1,6 +1,6 @@
 // Bump this whenever the precache list or strategy below changes, to
 // invalidate old caches on activate.
-const CACHE = 'roy-news-v2';
+const CACHE = 'roy-news-v3';
 
 // Only the app's OWN files — third-party CDN scripts (React, Babel,
 // Firebase, Tailwind) are left to the browser's normal HTTP cache, which
@@ -31,9 +31,25 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
 
   const url = new URL(req.url);
+  const isDocument = req.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html';
+
+  if (isDocument) {
+    // Network-first for the app shell. An installed PWA can sit frozen in
+    // the background for days without ever re-navigating, so stale-while-
+    // revalidate (serve cached, refresh "for next time") can mean "next
+    // time" never comes — the old shell (pointing at the old app.js?v= URL)
+    // would keep loading forever. Always try the network first here; the
+    // cached copy is only a fallback for genuinely offline loads.
+    event.respondWith(
+      fetch(req).then(resp => {
+        if (resp && resp.ok) caches.open(CACHE).then(cache => cache.put(req, resp.clone()));
+        return resp;
+      }).catch(() => caches.match(req))
+    );
+    return;
+  }
+
   const isOwnStaticAsset = url.origin === self.location.origin && (
-    req.url === self.location.origin + '/' ||
-    url.pathname === '/index.html' ||
     url.pathname === '/styles.css' ||
     url.pathname === '/manifest.json' ||
     url.pathname.endsWith('/app.js')

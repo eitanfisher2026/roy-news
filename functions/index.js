@@ -829,12 +829,11 @@ function sourceIsEnglishOnly(source) {
 
 // Groups a single source's topic matches by identical matched-article-index-
 // set — two topics that matched the exact same article(s) collapse into one
-// combined header ("Israel (context), middle east (context)") instead of
-// repeating the same article's text under each topic separately. Mirrors the
-// client-side groupTopicAnalyses merge in app.js, but this has to happen
-// server-side since the emailed report needs the same grouping the in-app
-// viewer shows.
-function groupSourceTopicsByMatch(topicOrder, contextSet, topicKeywordMatches) {
+// combined header ("Israel, Middle East") instead of repeating the same
+// article's text under each topic separately. Mirrors the client-side
+// groupTopicAnalyses merge in app.js, but this has to happen server-side
+// since the emailed report needs the same grouping the in-app viewer shows.
+function groupSourceTopicsByMatch(topicOrder, topicKeywordMatches) {
   const groups = [];
   const groupIndexBySignature = new Map();
   for (const topic of topicOrder) {
@@ -849,7 +848,7 @@ function groupSourceTopicsByMatch(topicOrder, contextSet, topicKeywordMatches) {
     groupIndexBySignature.set(signature, groups.length - 1);
   }
   return groups.map(g => ({
-    label: g.topicNames.map(t => `${t} (${contextSet.has(t.toLowerCase()) ? 'context' : 'exact'})`).join(', '),
+    label: g.topicNames.join(', '),
     topicNames: g.topicNames,
     indices: g.indices
   }));
@@ -859,11 +858,10 @@ function groupSourceTopicsByMatch(topicOrder, contextSet, topicKeywordMatches) {
 // ended up under the identical topic-name combination together, so the report
 // reads "Topic: X, Y" once with every source that had that exact combination
 // listed beneath it, rather than one section per source.
-function buildDayTopicGroups(topicOrder, contextTopics, perSourceMatchData) {
-  const contextSet = new Set((contextTopics || []).map(t => t.toLowerCase()));
+function buildDayTopicGroups(topicOrder, perSourceMatchData) {
   const bucketsByLabel = new Map();
   for (const { source, topicKeywordMatches, translatedArticles } of perSourceMatchData) {
-    const groups = groupSourceTopicsByMatch(topicOrder, contextSet, topicKeywordMatches);
+    const groups = groupSourceTopicsByMatch(topicOrder, topicKeywordMatches);
     for (const g of groups) {
       if (!bucketsByLabel.has(g.label)) {
         bucketsByLabel.set(g.label, { label: g.label, topicNames: g.topicNames, sources: [] });
@@ -883,19 +881,29 @@ function buildDayTopicGroups(topicOrder, contextTopics, perSourceMatchData) {
 // Shared by the in-app viewer's Share/Copy and the emailed report body, so
 // the two never drift apart.
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 function formatDayLabel(dayStr) {
   const d = new Date(dayStr + 'T00:00:00Z');
   const dd = String(d.getUTCDate()).padStart(2, '0');
   const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
   return `${WEEKDAY_NAMES[d.getUTCDay()]} ${dd}.${mm}`;
 }
+function formatLongDateLabel(dayStr) {
+  const d = new Date(dayStr + 'T00:00:00Z');
+  return `${WEEKDAY_NAMES[d.getUTCDay()]}, ${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCDate()}`;
+}
+function titleCase(str) {
+  return String(str || '').replace(/\b\w/g, c => c.toUpperCase());
+}
 
-// Literal structure the user specified: Country / Day / Topic / Source /
-// article text — no banners, no emoji, no AI-written prose anywhere in it.
+// Plain-text fallback for clients that don't render HTML. A daily report is
+// one day, so the date only needs to appear once, in the header — Day: lines
+// only earn their place when a report actually spans more than one day.
 function buildRawReportText(country, days) {
-  let text = `Country: ${country}\n`;
+  const isMultiDay = days.length > 1;
+  let text = `${titleCase(country)}\n`;
   for (const d of days) {
-    text += `Day: ${formatDayLabel(d.day)}\n`;
+    if (isMultiDay) text += `Day: ${formatDayLabel(d.day)}\n`;
     for (const t of d.topics) {
       text += `Topic: ${t.label}\n`;
       for (const s of t.sources) {
@@ -907,6 +915,66 @@ function buildRawReportText(country, days) {
     }
   }
   return text;
+}
+
+function escapeHtml(str) {
+  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// HTML counterpart of buildRawReportText — same content, same Country / Day /
+// Topic / Source / article structure, just styled: headline and snippet
+// carry the visual weight, Day/Topic/Source shrink to small muted labels,
+// and a rule only appears between days (never between topic or source, and
+// never at all for a single-day report).
+function buildReportHtml(schedule, run) {
+  const days = run.days || [];
+  const kind = run.runType === 'weekly' ? 'Weekly' : 'Daily';
+  const isMultiDay = days.length > 1;
+  const dateHeader = isMultiDay
+    ? `${formatLongDateLabel(days[0].day)} – ${formatLongDateLabel(days[days.length - 1].day)}`
+    : (days[0] ? formatLongDateLabel(days[0].day) : '');
+
+  const sans = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+  let body = '';
+  days.forEach((d, di) => {
+    if (isMultiDay) {
+      body += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:${di === 0 ? '0 0 22px' : '28px 0 22px'};">`;
+      body += `<p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 18px;font-family:${sans};">${escapeHtml(formatDayLabel(d.day))}</p>`;
+    }
+    (d.topics || []).forEach((t, ti) => {
+      body += `<div style="margin-top:${ti === 0 ? '0' : '26px'};">`;
+      body += `<p style="font-size:12.5px;color:#90949c;margin:0 0 10px;font-family:${sans};">${escapeHtml(t.label)}</p>`;
+      (t.sources || []).forEach((s, si) => {
+        body += `<div style="margin-top:${si === 0 ? '0' : '14px'};">`;
+        body += `<p style="font-size:11px;font-weight:600;letter-spacing:0.07em;text-transform:uppercase;color:#90949c;margin:0 0 8px;font-family:${sans};">${escapeHtml(s.sourceName)}</p>`;
+        (s.articles || []).forEach((a, ai) => {
+          body += `<div style="margin-top:${ai === 0 ? '0' : '14px'};">`;
+          body += `<p style="font-size:15.5px;font-weight:600;color:#1c1e21;margin:0 0 4px;line-height:1.35;font-family:${sans};">${escapeHtml(a.title)}</p>`;
+          body += `<p style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0;font-family:${sans};">${escapeHtml(a.text)}</p>`;
+          body += `</div>`;
+        });
+        body += `</div>`;
+      });
+      body += `</div>`;
+    });
+  });
+
+  return `<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#eef0f3;">
+    <div style="max-width:640px;margin:0 auto;padding:32px 16px;">
+      <div style="background:#ffffff;border-radius:3px;box-shadow:0 1px 2px rgba(20,22,26,0.06),0 8px 24px rgba(20,22,26,0.07);">
+        <div style="padding:30px 28px 36px;font-family:${sans};">
+          <p style="font-family:Georgia,'Times New Roman',serif;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#90949c;margin:0 0 16px;">Roy News</p>
+          <p style="font-size:19px;font-weight:600;margin:0 0 3px;letter-spacing:-0.005em;color:#1c1e21;">${escapeHtml(titleCase(schedule.country))} — ${kind} Report</p>
+          <p style="font-size:13px;color:#90949c;margin:0 0 20px;">${escapeHtml(dateHeader)}</p>
+          <hr style="border:none;border-top:1px solid #e7e5e0;margin:0 0 22px;">
+          ${body}
+        </div>
+      </div>
+    </div>
+  </body>
+</html>`;
 }
 
 // Handles both the new days-shaped runs and legacy results-shaped runs, so
@@ -937,13 +1005,14 @@ async function sendReportEmail(schedule, run) {
       service: 'gmail',
       auth: { user: OWNER_EMAIL, pass: gmailAppPassword.value() }
     });
-    const body = buildRawReportText(schedule.country, run.days || []);
+    const days = run.days || [];
     const kind = run.runType === 'weekly' ? 'Weekly' : 'Daily';
     await transporter.sendMail({
       from: `Roy News <${OWNER_EMAIL}>`,
       to: recipients.join(', '),
-      subject: `Roy News — ${schedule.country} ${kind} Report (${run.dateLabel})`,
-      text: body
+      subject: `Roy News — ${titleCase(schedule.country)} ${kind} Report (${run.dateLabel})`,
+      text: buildRawReportText(schedule.country, days),
+      html: buildReportHtml(schedule, run)
     });
   } catch (e) {
     // A failed email must never fail the report run itself — the run is
@@ -1971,7 +2040,7 @@ async function generateDailyReportRun(scheduleId, schedule, ai, contextMode, now
     perSourceMatchData.push({ source, topicKeywordMatches, translatedArticles });
   }));
 
-  const topicGroups = buildDayTopicGroups(topics, contextTopics, perSourceMatchData);
+  const topicGroups = buildDayTopicGroups(topics, perSourceMatchData);
   const days = topicGroups.length > 0 ? [{ day: periodEnd, topics: topicGroups }] : [];
 
   const run = {

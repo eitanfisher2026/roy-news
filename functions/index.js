@@ -1988,7 +1988,7 @@ async function readArchivedArticles(countryKey, sourceId, dayKeys) {
 // it), and weekly is built by aggregating 7 of these already-stored runs
 // (see aggregateWeeklyFromDailyRuns) rather than re-running this over a week
 // pooled together.
-async function generateDailyReportRun(scheduleId, schedule, ai, contextMode, now) {
+async function generateDailyReportRun(scheduleId, schedule, ai, contextMode, now, sharedSourceKeys) {
   const periodEnd = yesterdayUTC();
 
   let sources = (await db.ref(`countries/${schedule.countryKey}/setup/sources`).once('value')).val() || [];
@@ -2021,12 +2021,18 @@ async function generateDailyReportRun(scheduleId, schedule, ai, contextMode, now
     const relevantIndices = relevantIndicesFromMatches(topicKeywordMatches);
 
     // Keep only the articles that mattered to this report; drop the rest
-    // from the archive. Note: if another schedule shares this same source
-    // with different topics, it may now find fewer archived articles than
-    // before — pruning is per-schedule, applied immediately, by deliberate
-    // choice.
+    // from the archive — UNLESS another enabled schedule for this same
+    // country also uses this source. Two schedules with different topics
+    // share the exact same archive node (country/source/day): if one prunes
+    // down to "just my relevant articles" first, the other schedule would
+    // then only have those leftovers to match against, and could mislabel
+    // them under its own unrelated topics. Only safe to prune when this
+    // schedule is the sole consumer of the source.
     const relevantSet = new Set(relevantIndices);
-    articles.forEach((a, i) => { if (!relevantSet.has(i + 1)) pendingDeletions[a._archivePath] = null; });
+    const isSharedSource = sharedSourceKeys.has(`${schedule.countryKey}:${source.id}`);
+    if (!isSharedSource) {
+      articles.forEach((a, i) => { if (!relevantSet.has(i + 1)) pendingDeletions[a._archivePath] = null; });
+    }
     if (relevantIndices.length === 0) return;
 
     // Only the matched articles get translated — same "only pay for what's
@@ -2087,6 +2093,19 @@ exports.generateScheduledReports = onSchedule(
     const schedules = schedulesSnap.val() || {};
     const contextMode = await getContextAnalysisMode();
 
+    // A source shared by more than one enabled schedule for the same country
+    // must never get pruned by just one of them — see the comment in
+    // generateDailyReportRun for why.
+    const sourceUsageCount = new Map();
+    for (const s of Object.values(schedules)) {
+      if (!s.enabled) continue;
+      for (const sourceId of (s.sourceIds || [])) {
+        const key = `${s.countryKey}:${sourceId}`;
+        sourceUsageCount.set(key, (sourceUsageCount.get(key) || 0) + 1);
+      }
+    }
+    const sharedSourceKeys = new Set([...sourceUsageCount.entries()].filter(([, count]) => count > 1).map(([key]) => key));
+
     for (const [scheduleId, schedule] of Object.entries(schedules)) {
       if (!schedule.enabled || now.getUTCHours() !== schedule.hourUtc) continue;
 
@@ -2102,7 +2121,7 @@ exports.generateScheduledReports = onSchedule(
         try {
           const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
           const ai = makeAI(aiSettingsSnap.val() || {});
-          const { run, pendingDeletions } = await generateDailyReportRun(scheduleId, schedule, ai, contextMode, now);
+          const { run, pendingDeletions } = await generateDailyReportRun(scheduleId, schedule, ai, contextMode, now, sharedSourceKeys);
           await runRef.set(run);
           await db.ref(`schedules/${scheduleId}`).update({ lastRunAt: now.toISOString(), lastRunStatus: 'ok', lastPeriodEnd: periodEnd });
           if (Object.keys(pendingDeletions).length > 0) {

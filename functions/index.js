@@ -827,55 +827,21 @@ function sourceIsEnglishOnly(source) {
   return langs.length === 0 || langs.every(l => (l || '').toLowerCase() === 'english');
 }
 
-// Groups a single source's topic matches by identical matched-article-index-
-// set — two topics that matched the exact same article(s) collapse into one
-// combined header ("Israel, Middle East") instead of repeating the same
-// article's text under each topic separately. Mirrors the client-side
-// groupTopicAnalyses merge in app.js, but this has to happen server-side
-// since the emailed report needs the same grouping the in-app viewer shows.
-function groupSourceTopicsByMatch(topicOrder, topicKeywordMatches) {
-  const groups = [];
-  const groupIndexBySignature = new Map();
-  for (const topic of topicOrder) {
-    const indices = (topicKeywordMatches[topic] || []).slice().sort((a, b) => a - b);
-    if (indices.length === 0) continue;
-    const signature = indices.join(',');
-    if (groupIndexBySignature.has(signature)) {
-      groups[groupIndexBySignature.get(signature)].topicNames.push(topic);
-      continue;
-    }
-    groups.push({ topicNames: [topic], indices });
-    groupIndexBySignature.set(signature, groups.length - 1);
-  }
-  return groups.map(g => ({
-    label: g.topicNames.join(', '),
-    topicNames: g.topicNames,
-    indices: g.indices
-  }));
-}
-
-// Assembles one day's topic sections across all sources: buckets sources that
-// ended up under the identical topic-name combination together, so the report
-// reads "Topic: X, Y" once with every source that had that exact combination
-// listed beneath it, rather than one section per source.
-function buildDayTopicGroups(topicOrder, perSourceMatchData) {
-  const bucketsByLabel = new Map();
-  for (const { source, topicKeywordMatches, translatedArticles } of perSourceMatchData) {
-    const groups = groupSourceTopicsByMatch(topicOrder, topicKeywordMatches);
-    for (const g of groups) {
-      if (!bucketsByLabel.has(g.label)) {
-        bucketsByLabel.set(g.label, { label: g.label, topicNames: g.topicNames, sources: [] });
-      }
-      bucketsByLabel.get(g.label).sources.push({
+// Assembles one day's sources: each source lists every article that matched
+// ANY of the schedule's topics (deduped/sorted by relevantIndicesFromMatches),
+// with no per-topic grouping — topics are shown once, informationally, in the
+// report header instead, since the schedule's whole topic list applies to the
+// report as a whole, not to any one article. Sources are ordered alphabetically.
+function buildDaySourceGroups(perSourceMatchData) {
+  return perSourceMatchData
+    .map(({ source, topicKeywordMatches, translatedArticles }) => {
+      const relevantIndices = relevantIndicesFromMatches(topicKeywordMatches);
+      return {
         sourceId: source.id, sourceName: source.name, sourceLean: source.lean,
-        articles: g.indices.map(i => translatedArticles[i - 1])
-      });
-    }
-  }
-  // Preserve the schedule's own topic order for section ordering.
-  return [...bucketsByLabel.values()].sort((a, b) =>
-    topicOrder.indexOf(a.topicNames[0]) - topicOrder.indexOf(b.topicNames[0])
-  );
+        articles: relevantIndices.map(i => translatedArticles[i - 1])
+      };
+    })
+    .sort((a, b) => a.sourceName.localeCompare(b.sourceName));
 }
 
 // Shared by the in-app viewer's Share/Copy and the emailed report body, so
@@ -899,19 +865,23 @@ function titleCase(str) {
 // Plain-text fallback for clients that don't render HTML. A daily report is
 // one day, so the date only needs to appear once, in the header — Day: lines
 // only earn their place when a report actually spans more than one day.
-function buildRawReportText(country, days) {
+// Topics are informative only — listed once up top, not used to group
+// articles — so the body groups directly by source, alphabetically.
+function buildRawReportText(schedule, run) {
+  const days = run.days || [];
   const isMultiDay = days.length > 1;
-  let text = `${titleCase(country)}\n`;
+  const topics = run.topics || schedule.topics || [];
+  let text = `${titleCase(schedule.country)}\n`;
+  if (topics.length > 0) text += `Topics: ${topics.join(', ')}\n`;
+  if (run.summary) text += `\nSummary\n${run.summary}\n`;
+  text += '\n';
   for (const d of days) {
     if (isMultiDay) text += `Day: ${formatDayLabel(d.day)}\n`;
-    for (const t of d.topics) {
-      text += `Topic: ${t.label}\n`;
-      for (const s of t.sources) {
-        text += `  Source: ${s.sourceName}\n`;
-        for (const a of s.articles) {
-          text += `   ${a.title}\n   ${a.text}\n`;
-          if (a.link) text += `   ${a.link}\n`;
-        }
+    for (const s of d.sources || []) {
+      text += `  Source: ${s.sourceName}\n`;
+      for (const a of s.articles) {
+        text += `   ${a.title}\n   ${a.text}\n`;
+        if (a.link) text += `   ${a.link}\n`;
       }
     }
   }
@@ -922,11 +892,12 @@ function escapeHtml(str) {
   return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// HTML counterpart of buildRawReportText — same content, same Country / Day /
-// Topic / Source / article structure, just styled: headline and snippet
-// carry the visual weight, Day/Topic/Source shrink to small muted labels,
-// and a rule only appears between days (never between topic or source, and
-// never at all for a single-day report).
+// HTML counterpart of buildRawReportText — same content, same structure, just
+// styled: headline and snippet carry the visual weight, Day/Source shrink to
+// small muted labels, and a rule only appears between days (never between
+// sources, and never at all for a single-day report). Topics are informative
+// only — one line in the header — so the body groups directly by source,
+// alphabetically, instead of by topic.
 function buildReportHtml(schedule, run) {
   const days = run.days || [];
   const kind = run.runType === 'weekly' ? 'Weekly' : 'Daily';
@@ -934,29 +905,31 @@ function buildReportHtml(schedule, run) {
   const dateHeader = isMultiDay
     ? `${formatLongDateLabel(days[0].day)} – ${formatLongDateLabel(days[days.length - 1].day)}`
     : (days[0] ? formatLongDateLabel(days[0].day) : '');
+  const topics = run.topics || schedule.topics || [];
 
   const sans = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+
+  const summaryHtml = run.summary ? `
+          <p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 10px;font-family:${sans};">Summary</p>
+          <p style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0 0 22px;font-family:${sans};">${escapeHtml(run.summary)}</p>
+          <hr style="border:none;border-top:1px solid #e7e5e0;margin:0 0 22px;">` : '';
+
   let body = '';
   days.forEach((d, di) => {
     if (isMultiDay) {
       body += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:${di === 0 ? '0 0 22px' : '28px 0 22px'};">`;
       body += `<p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 18px;font-family:${sans};">${escapeHtml(formatDayLabel(d.day))}</p>`;
     }
-    (d.topics || []).forEach((t, ti) => {
-      body += `<div style="margin-top:${ti === 0 ? '0' : '26px'};">`;
-      body += `<p style="font-size:12.5px;color:#90949c;margin:0 0 10px;font-family:${sans};">${escapeHtml(t.label)}</p>`;
-      (t.sources || []).forEach((s, si) => {
-        body += `<div style="margin-top:${si === 0 ? '0' : '14px'};">`;
-        body += `<p style="font-size:11px;font-weight:600;letter-spacing:0.07em;text-transform:uppercase;color:#90949c;margin:0 0 8px;font-family:${sans};">${escapeHtml(s.sourceName)}</p>`;
-        (s.articles || []).forEach((a, ai) => {
-          const titleHtml = a.link
-            ? `<a href="${escapeHtml(a.link)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(a.title)} ↗</a>`
-            : escapeHtml(a.title);
-          body += `<div style="margin-top:${ai === 0 ? '0' : '14px'};">`;
-          body += `<p style="font-size:15.5px;font-weight:600;color:#1c1e21;margin:0 0 4px;line-height:1.35;font-family:${sans};">${titleHtml}</p>`;
-          body += `<p style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0;font-family:${sans};">${escapeHtml(a.text)}</p>`;
-          body += `</div>`;
-        });
+    (d.sources || []).forEach((s, si) => {
+      body += `<div style="margin-top:${(di === 0 && si === 0) ? '0' : '26px'};">`;
+      body += `<p style="font-size:11px;font-weight:600;letter-spacing:0.07em;text-transform:uppercase;color:#90949c;margin:0 0 8px;font-family:${sans};">${escapeHtml(s.sourceName)}</p>`;
+      (s.articles || []).forEach((a, ai) => {
+        const titleHtml = a.link
+          ? `<a href="${escapeHtml(a.link)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(a.title)} ↗</a>`
+          : escapeHtml(a.title);
+        body += `<div style="margin-top:${ai === 0 ? '0' : '14px'};">`;
+        body += `<p style="font-size:15.5px;font-weight:600;color:#1c1e21;margin:0 0 4px;line-height:1.35;font-family:${sans};">${titleHtml}</p>`;
+        body += `<p style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0;font-family:${sans};">${escapeHtml(a.text)}</p>`;
         body += `</div>`;
       });
       body += `</div>`;
@@ -971,8 +944,10 @@ function buildReportHtml(schedule, run) {
         <div style="padding:30px 28px 36px;font-family:${sans};">
           <p style="font-family:Georgia,'Times New Roman',serif;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#90949c;margin:0 0 16px;">Roy News</p>
           <p style="font-size:19px;font-weight:600;margin:0 0 3px;letter-spacing:-0.005em;color:#1c1e21;">${escapeHtml(titleCase(schedule.country))} — ${kind} Report</p>
-          <p style="font-size:13px;color:#90949c;margin:0 0 20px;">${escapeHtml(dateHeader)}</p>
+          <p style="font-size:13px;color:#90949c;margin:0 0 3px;">${escapeHtml(dateHeader)}</p>
+          ${topics.length > 0 ? `<p style="font-size:13px;color:#90949c;margin:0 0 20px;">Topics: ${escapeHtml(topics.join(', '))}</p>` : ''}
           <hr style="border:none;border-top:1px solid #e7e5e0;margin:0 0 22px;">
+          ${summaryHtml}
           ${body}
         </div>
       </div>
@@ -987,7 +962,7 @@ function buildReportHtml(schedule, run) {
 function computeRunRelevantTotal(run) {
   if (Array.isArray(run.days)) {
     let total = 0;
-    for (const d of run.days) for (const t of d.topics || []) for (const s of t.sources || []) total += (s.articles || []).length;
+    for (const d of run.days) for (const s of d.sources || []) total += (s.articles || []).length;
     return total;
   }
   return Object.values(run.results || {}).reduce((sum, s) => sum + (s.relevantCount || 0), 0);
@@ -995,7 +970,7 @@ function computeRunRelevantTotal(run) {
 function computeRunSourceCount(run) {
   if (Array.isArray(run.days)) {
     const ids = new Set();
-    for (const d of run.days) for (const t of d.topics || []) for (const s of t.sources || []) ids.add(s.sourceId);
+    for (const d of run.days) for (const s of d.sources || []) ids.add(s.sourceId);
     return ids.size;
   }
   return run.results ? Object.keys(run.results).length : 0;
@@ -1009,13 +984,12 @@ async function sendReportEmail(schedule, run) {
       service: 'gmail',
       auth: { user: OWNER_EMAIL, pass: gmailAppPassword.value() }
     });
-    const days = run.days || [];
     const kind = run.runType === 'weekly' ? 'Weekly' : 'Daily';
     await transporter.sendMail({
       from: `Roy News <${OWNER_EMAIL}>`,
       to: recipients.join(', '),
       subject: `Roy News — ${titleCase(schedule.country)} ${kind} Report (${run.dateLabel})`,
-      text: buildRawReportText(schedule.country, days),
+      text: buildRawReportText(schedule, run),
       html: buildReportHtml(schedule, run)
     });
   } catch (e) {
@@ -1504,13 +1478,18 @@ function buildGroundingSection(grounding, topics) {
         if (Array.isArray(run.days)) {
           // New raw-report shape — real excerpts instead of an AI summary,
           // which is arguably better grounding than the old paraphrase was.
+          // Articles are no longer tagged per-topic (grouped by source only,
+          // per-article topic attribution was deliberately dropped) — so this
+          // grounds on "this schedule covers the topic at all" rather than
+          // "this exact article matched it". Coarser, but the period prompt
+          // already treats grounding as directional context, not a precise
+          // per-topic transcript.
+          const runTopics = run.topics || [];
+          if (!runTopics.some(rt => rt.toLowerCase() === topic.toLowerCase())) continue;
           for (const day of run.days) {
-            for (const t of day.topics || []) {
-              if (!t.topicNames.some(n => n.toLowerCase() === topic.toLowerCase())) continue;
-              for (const src of t.sources || []) {
-                for (const a of src.articles || []) {
-                  lines.push(`- ${src.sourceName} (${src.sourceLean}), ${day.day}: "${a.title}" — ${a.text}`);
-                }
+            for (const src of day.sources || []) {
+              for (const a of src.articles || []) {
+                lines.push(`- ${src.sourceName} (${src.sourceLean}), ${day.day}: "${a.title}" — ${a.text}`);
               }
             }
           }
@@ -2050,23 +2029,61 @@ async function generateDailyReportRun(scheduleId, schedule, ai, contextMode, now
     perSourceMatchData.push({ source, topicKeywordMatches, translatedArticles });
   }));
 
-  const topicGroups = buildDayTopicGroups(topics, perSourceMatchData);
-  const days = topicGroups.length > 0 ? [{ day: periodEnd, topics: topicGroups }] : [];
+  const sourceGroups = buildDaySourceGroups(perSourceMatchData);
+  const days = sourceGroups.length > 0 ? [{ day: periodEnd, sources: sourceGroups }] : [];
 
   const run = {
     scheduleId, generatedAt: now.toISOString(), periodStart: periodEnd, periodEnd, dateLabel: periodEnd,
-    days, runType: 'daily', costUsd: 0, inputTokens: 0, outputTokens: 0, provider: ai.type, model: ai.model, status: 'ok'
+    days, topics, runType: 'daily', costUsd: 0, inputTokens: 0, outputTokens: 0, provider: ai.type, model: ai.model, status: 'ok'
   };
   return { run, pendingDeletions, periodEnd };
 }
 
-// Builds a weekly digest purely from already-generated daily reportRuns —
-// no archive re-scan, no re-matching, no AI calls. This is what makes
-// "weekly" cheap (it used to independently re-process 7 pooled days, which
-// duplicated whatever the daily runs for those same days had already paid
-// for) and what makes a retroactive weekly report possible from existing
-// daily history (see sendReportEmailNow) without waiting for a real week.
-async function aggregateWeeklyFromDailyRuns(scheduleId, weeklyPeriodEnd, now) {
+// Strictly extractive weekly digest: the one AI call in the weekly path,
+// deliberately told to use ONLY the week's own collected article text — same
+// "no outside knowledge, no invented detail" rule the per-article analysis
+// prompt already follows elsewhere in this file, just applied across the
+// whole week's coverage instead of one outlet's one day.
+async function generateWeeklySummary(schedule, days, ai) {
+  const lines = [];
+  for (const d of days) {
+    for (const s of (d.sources || [])) {
+      for (const a of (s.articles || [])) {
+        lines.push(`[${s.sourceName}, ${d.day}] ${a.title} — ${a.text}`);
+      }
+    }
+  }
+  if (lines.length === 0) return null;
+
+  const wordCount = clampWeeklySummaryWords(schedule.weeklySummaryWords);
+  const prompt = `You are compiling a factual weekly news digest for ${titleCase(schedule.country)}, covering these topics: ${(schedule.topics || []).join(', ')}.
+
+Below is every article's headline and text collected this week, across all sources.
+
+RULES — follow exactly:
+1. Use ONLY the information in the articles below. Do NOT add outside knowledge, historical background, speculation, or your own analysis — every sentence must be directly supported by the article text.
+2. Do not mention "the articles" or "sources" — write a plain factual account of what was reported.
+3. Plain prose only — no markdown, no headers, no bullet points.
+4. Write approximately ${wordCount} words.
+
+Articles:
+${lines.join('\n')}
+
+Weekly summary:`;
+
+  const maxTokens = Math.min(4000, Math.round(wordCount * 2.2) + 300);
+  const { text, usage } = await callAI(ai, prompt, maxTokens);
+  return { text: (text || '').trim(), usage };
+}
+
+// Builds a weekly digest purely from already-generated daily reportRuns — no
+// archive re-scan, no re-matching. This is what makes "weekly" cheap (it used
+// to independently re-process 7 pooled days, which duplicated whatever the
+// daily runs for those same days had already paid for) and what makes a
+// retroactive weekly report possible from existing daily history (see
+// sendReportEmailNow) without waiting for a real week. The one exception is
+// the summary above, which does need its own AI call.
+async function aggregateWeeklyFromDailyRuns(scheduleId, schedule, weeklyPeriodEnd, now, ai) {
   const weeklyPeriodStart = addDaysUTC(weeklyPeriodEnd, -6);
   const snap = await db.ref(`reportRuns/${scheduleId}`).once('value');
   const runs = Object.values(snap.val() || {});
@@ -2078,10 +2095,27 @@ async function aggregateWeeklyFromDailyRuns(scheduleId, weeklyPeriodEnd, now) {
     .flatMap(r => r.days || [])
     .sort((a, b) => a.day.localeCompare(b.day));
 
+  let summary = null, costUsd = 0, inputTokens = 0, outputTokens = 0;
+  try {
+    const result = await generateWeeklySummary(schedule, days, ai);
+    if (result) {
+      summary = result.text;
+      inputTokens = result.usage?.input_tokens || 0;
+      outputTokens = result.usage?.output_tokens || 0;
+      costUsd = calcCostUsd(ai, inputTokens, outputTokens);
+      await persistCost(schedule.createdBy, schedule.createdByEmail, ai, costUsd);
+    }
+  } catch (e) {
+    // A failed summary must never fail the whole weekly digest — the
+    // per-source article listing is still useful on its own without it.
+    console.error('generateWeeklySummary failed', e.message);
+  }
+
   return {
     scheduleId, generatedAt: now.toISOString(), periodStart: weeklyPeriodStart, periodEnd: weeklyPeriodEnd,
     dateLabel: `${weeklyPeriodStart} to ${weeklyPeriodEnd}`,
-    days, runType: 'weekly', costUsd: 0, inputTokens: 0, outputTokens: 0, status: 'ok'
+    days, topics: schedule.topics || [], summary,
+    runType: 'weekly', costUsd, inputTokens, outputTokens, provider: ai.type, model: ai.model, status: 'ok'
   };
 }
 
@@ -2144,7 +2178,9 @@ exports.generateScheduledReports = onSchedule(
         if (!weeklyAlreadyDone) {
           const weeklyRunRef = db.ref(`reportRuns/${scheduleId}`).push();
           try {
-            const weeklyRun = await aggregateWeeklyFromDailyRuns(scheduleId, periodEnd, now);
+            const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
+            const ai = makeAI(aiSettingsSnap.val() || {});
+            const weeklyRun = await aggregateWeeklyFromDailyRuns(scheduleId, schedule, periodEnd, now, ai);
             await weeklyRunRef.set(weeklyRun);
             await db.ref(`schedules/${scheduleId}`).update({ lastWeeklyRunAt: now.toISOString(), lastWeeklyRunStatus: 'ok', lastWeeklyPeriodEnd: periodEnd });
             if (schedule.sendWeeklyEmail) await sendReportEmail(schedule, weeklyRun);
@@ -2175,6 +2211,10 @@ function sanitizeEmailList(list) {
   return out;
 }
 
+function clampWeeklySummaryWords(v) {
+  return Math.min(Math.max(parseInt(v) || 300, 50), 1000);
+}
+
 exports.createSchedule = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
@@ -2187,11 +2227,12 @@ exports.createSchedule = onCall(
     }
     if (!WEEKDAYS.includes(weeklyDay)) throw new HttpsError('invalid-argument', 'valid weeklyDay required');
     const hour = Math.min(Math.max(parseInt(hourUtc) || 0, 0), 23);
+    const weeklySummaryWords = clampWeeklySummaryWords(request.data?.weeklySummaryWords);
 
     const ref = db.ref('schedules').push();
     const schedule = {
       id: ref.key, country, countryKey, sourceIds, topics, contextTopics,
-      weeklyDay, hourUtc: hour,
+      weeklyDay, hourUtc: hour, weeklySummaryWords,
       sendDailyEmail: !!sendDailyEmail, sendWeeklyEmail: !!sendWeeklyEmail, emailRecipients,
       enabled: true,
       createdBy: request.auth.uid, createdByEmail: request.auth.token.email || null,
@@ -2216,7 +2257,8 @@ exports.updateSchedule = onCall(
     if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
     requireScheduleAccess(schedule, request.auth.uid, 'write');
     if (updates.emailRecipients !== undefined) updates.emailRecipients = sanitizeEmailList(updates.emailRecipients);
-    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients'];
+    if (updates.weeklySummaryWords !== undefined) updates.weeklySummaryWords = clampWeeklySummaryWords(updates.weeklySummaryWords);
+    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'weeklySummaryWords', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
     if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');
@@ -2277,7 +2319,9 @@ exports.sendReportEmailNow = onCall(
 
     if (!run && type === 'weekly') {
       const periodEnd = yesterdayUTC();
-      const built = await aggregateWeeklyFromDailyRuns(scheduleId, periodEnd, new Date());
+      const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
+      const ai = makeAI(aiSettingsSnap.val() || {});
+      const built = await aggregateWeeklyFromDailyRuns(scheduleId, schedule, periodEnd, new Date(), ai);
       if (built.days.length === 0) {
         throw new HttpsError('failed-precondition', 'No daily report history yet to build a weekly digest from.');
       }

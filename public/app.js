@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.7';
+const VERSION = 'v3.8';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3618,7 +3618,11 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
                   <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 4 }}>Source: {s.sourceName}</div>
                   {(s.articles || []).map((a, ai) => (
                     <div key={ai} style={{ marginBottom: 8, padding: '8px 10px', background: '#0f1e35', borderRadius: 6 }}>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 3 }}>{a.title}</div>
+                      {a.link
+                        ? <a href={a.link} target="_blank" rel="noopener noreferrer"
+                            style={{ color: '#60a5fa', fontSize: 12, fontWeight: 600, lineHeight: 1.4, textDecoration: 'none', display: 'block', marginBottom: 3 }}>{a.title} ↗</a>
+                        : <div style={{ fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 3 }}>{a.title}</div>
+                      }
                       <div style={{ fontSize: 12, color: '#cbd5e1', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{a.text}</div>
                     </div>
                   ))}

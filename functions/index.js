@@ -910,6 +910,7 @@ function buildRawReportText(country, days) {
         text += `  Source: ${s.sourceName}\n`;
         for (const a of s.articles) {
           text += `   ${a.title}\n   ${a.text}\n`;
+          if (a.link) text += `   ${a.link}\n`;
         }
       }
     }
@@ -918,7 +919,7 @@ function buildRawReportText(country, days) {
 }
 
 function escapeHtml(str) {
-  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 // HTML counterpart of buildRawReportText — same content, same Country / Day /
@@ -948,8 +949,11 @@ function buildReportHtml(schedule, run) {
         body += `<div style="margin-top:${si === 0 ? '0' : '14px'};">`;
         body += `<p style="font-size:11px;font-weight:600;letter-spacing:0.07em;text-transform:uppercase;color:#90949c;margin:0 0 8px;font-family:${sans};">${escapeHtml(s.sourceName)}</p>`;
         (s.articles || []).forEach((a, ai) => {
+          const titleHtml = a.link
+            ? `<a href="${escapeHtml(a.link)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(a.title)} ↗</a>`
+            : escapeHtml(a.title);
           body += `<div style="margin-top:${ai === 0 ? '0' : '14px'};">`;
-          body += `<p style="font-size:15.5px;font-weight:600;color:#1c1e21;margin:0 0 4px;line-height:1.35;font-family:${sans};">${escapeHtml(a.title)}</p>`;
+          body += `<p style="font-size:15.5px;font-weight:600;color:#1c1e21;margin:0 0 4px;line-height:1.35;font-family:${sans};">${titleHtml}</p>`;
           body += `<p style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0;font-family:${sans};">${escapeHtml(a.text)}</p>`;
           body += `</div>`;
         });

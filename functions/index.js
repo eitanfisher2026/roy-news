@@ -806,18 +806,62 @@ function splitTopicsByMode(topics, contextTopics) {
 // server-side fetch has no CORS restriction, so this just calls it directly.
 // sl=auto (not a fixed source language) since a source's RSS text may already
 // be partly English (e.g. proper nouns) mixed with its native language.
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+// This free/unofficial endpoint silently rate-limits under bursty concurrent
+// load — a schedule with several non-English sources, each with many matched
+// articles, used to fire 50-100+ simultaneous translate calls at once (two
+// per article, every source in parallel, every relevant article in
+// parallel). A rate-limited call used to fail straight through to the
+// original, UNTRANSLATED text with no retry and no signal — exactly what
+// produced Thai/Khmer/etc. text leaking into reports that are supposed to be
+// all-English. Capping concurrency here makes hitting the limit far less
+// likely in the first place.
+let translateInFlight = 0;
+const TRANSLATE_MAX_CONCURRENT = 6;
+const translateQueue = [];
+function runTranslateQueue() {
+  while (translateInFlight < TRANSLATE_MAX_CONCURRENT && translateQueue.length > 0) {
+    const job = translateQueue.shift();
+    translateInFlight++;
+    job().finally(() => { translateInFlight--; runTranslateQueue(); });
+  }
+}
+function withTranslateSlot(fn) {
+  return new Promise(resolve => {
+    translateQueue.push(() => fn().then(resolve, resolve));
+    runTranslateQueue();
+  });
+}
+
+async function translateToEnglishOnce(text) {
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=${encodeURIComponent(text)}`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`translate HTTP ${resp.status}`);
+  const data = await resp.json();
+  if (!Array.isArray(data?.[0])) throw new Error('translate: unexpected response shape');
+  return data[0].map(s => s?.[0] || '').join('');
+}
+
+// Retries transient failures (rate limit, blip) a couple of times before
+// falling back to the original text — that fallback should now be rare,
+// not the routine outcome it effectively was before.
 async function translateToEnglish(text) {
   if (!text || !text.trim()) return text;
-  try {
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=${encodeURIComponent(text)}`;
-    const resp = await fetch(url);
-    if (!resp.ok) return text;
-    const data = await resp.json();
-    if (!Array.isArray(data?.[0])) return text;
-    return data[0].map(s => s?.[0] || '').join('');
-  } catch {
+  return withTranslateSlot(async () => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return await translateToEnglishOnce(text);
+      } catch (e) {
+        if (attempt === 3) {
+          console.error('translateToEnglish: giving up after 3 attempts, text left untranslated:', e.message);
+          return text;
+        }
+        await sleep(300 * attempt);
+      }
+    }
     return text;
-  }
+  });
 }
 
 // A source's own RSS text needs no translation call at all if it only
@@ -976,6 +1020,26 @@ function computeRunSourceCount(run) {
   return run.results ? Object.keys(run.results).length : 0;
 }
 
+// A schedule has no user-set name (that field exists in the data model but
+// was never wired up in the UI, so it's always undefined in practice) — two
+// schedules for the same country only really differ by their topic list. The
+// old subject line had nothing but country + date, so e.g. a country's
+// "Israel/Middle East" schedule and its "Internal Politics" schedule
+// produced byte-identical subjects on the same day. Gmail (and most mail
+// clients) threads messages with identical subjects into one conversation,
+// which is what made "send all 4 now" look like only 2 arrived — all 4 sent
+// fine, they just paired up into 2 threads.
+// Kept short (~20 chars) specifically so it can't get truncated in an inbox
+// list view, per request — just enough to tell schedules apart at a glance.
+function scheduleShortTopicLabel(schedule) {
+  const topics = schedule.topics || [];
+  if (topics.length === 0) return '';
+  let label = topics[0];
+  if (label.length > 20) label = label.slice(0, 20).trim() + '…';
+  if (topics.length > 1) label += ` +${topics.length - 1}`;
+  return label;
+}
+
 async function sendReportEmail(schedule, run) {
   const recipients = (schedule.emailRecipients || []).filter(Boolean);
   if (recipients.length === 0) return;
@@ -985,10 +1049,11 @@ async function sendReportEmail(schedule, run) {
       auth: { user: OWNER_EMAIL, pass: gmailAppPassword.value() }
     });
     const kind = run.runType === 'weekly' ? 'Weekly' : 'Daily';
+    const topicLabel = scheduleShortTopicLabel(schedule);
     await transporter.sendMail({
       from: `Roy News <${OWNER_EMAIL}>`,
       to: recipients.join(', '),
-      subject: `Roy News — ${titleCase(schedule.country)} ${kind} Report (${run.dateLabel})`,
+      subject: `Roy News — ${titleCase(schedule.country)}${topicLabel ? ': ' + topicLabel : ''} ${kind} Report (${run.dateLabel})`,
       text: buildRawReportText(schedule, run),
       html: buildReportHtml(schedule, run)
     });
@@ -2125,7 +2190,18 @@ exports.generateScheduledReports = onSchedule(
     const now = new Date();
     const schedulesSnap = await db.ref('schedules').once('value');
     const schedules = schedulesSnap.val() || {};
-    const contextMode = await getContextAnalysisMode();
+    // Always the precise, full-article classifier here — NOT the global
+    // config/contextAnalysisMode toggle. That setting's 'header' mode is a
+    // deliberately loose "first pass, err on inclusion" classification
+    // (see classifyContextTopicsByHeader) meant to be corrected by a
+    // follow-up full-text analysis call — which only the old AI-summary
+    // pipeline (fetchNews) has. This raw scheduled pipeline has no such
+    // follow-up, so 'header' mode's loose guesses were standing as the
+    // FINAL decision — which is exactly what was letting unrelated articles
+    // (e.g. global wire stories) through under narrow topics like "Internal
+    // Politics". 'fullBody' costs more per run but is the only mode that's
+    // actually correct for a pipeline with no correction step.
+    const contextMode = 'fullBody';
 
     // A source shared by more than one enabled schedule for the same country
     // must never get pruned by just one of them — see the comment in
@@ -2511,7 +2587,10 @@ exports.estimateScheduleCost = onCall(
     const ai = makeAI(request.data);
     const contextSet = new Set((contextTopics || []).map(t => t.toLowerCase()));
     const hasContext = topics.some(t => contextSet.has(t.toLowerCase()));
-    const contextMode = hasContext ? await getContextAnalysisMode() : null;
+    // Matches generateScheduledReports, which always runs 'fullBody' now —
+    // see the comment there for why 'header' mode isn't a valid option for
+    // this pipeline, so the estimate here shouldn't offer it as one either.
+    const contextMode = hasContext ? 'fullBody' : null;
 
     // The report itself no longer costs anything to write (raw RSS text, no
     // AI prose) — exact-topic matching is a substring check plus a one-time,

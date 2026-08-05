@@ -1097,13 +1097,27 @@ async function getContextAnalysisMode() {
   } catch { return 'header'; }
 }
 
-async function classifyContextTopicsByHeader(articles, contextTopics, ai, uid, email) {
+// scope 'domestic' narrows a theme like "internal politics" or "economy" to
+// events/actors inside the schedule's own country — without it, a broad
+// theme matches that topic happening anywhere in the world, which is what
+// the AI would otherwise default to since nothing in the theme name itself
+// says "domestic only".
+function domesticScopeLine(scope, country, { loose } = {}) {
+  if (scope !== 'domestic' || !country) return '';
+  const uncertainty = loose
+    ? ` If it's unclear from the headline alone whether it's domestic or foreign, include it (this is just a first pass — the full read resolves unclear cases).`
+    : '';
+  return `\nScope: domestic only — count it only if the theme is genuinely about ${country} itself (its government, institutions, economy, or domestic actors), not international/global coverage of the theme that merely mentions ${country} in passing.${uncertainty}\n`;
+}
+
+async function classifyContextTopicsByHeader(articles, contextTopics, ai, uid, email, scope, country) {
   const empty = Object.fromEntries(contextTopics.map(t => [t, []]));
   if (articles.length === 0) return empty;
 
   const titlesList = articles.map((a, i) => `${i + 1}. ${a.title}`).join('\n');
+  const scopeLine = domesticScopeLine(scope, country, { loose: true });
   const prompt = `Below is a numbered list of article headlines. For each theme listed, return the numbers of the headlines that are plausibly about that theme, judging only from the headline — err on the side of including a headline if it's plausibly related, since this is just a first pass.
-
+${scopeLine}
 Headlines:
 ${titlesList}
 
@@ -1137,13 +1151,14 @@ Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], 
 // the raw-report pipeline has no follow-up analysis call to correct it.
 // Used for 'fullBody' context mode there, where accuracy over speed/cost is
 // the point.
-async function classifyContextTopicsByFullBody(articles, contextTopics, ai, uid, email) {
+async function classifyContextTopicsByFullBody(articles, contextTopics, ai, uid, email, scope, country) {
   const empty = Object.fromEntries(contextTopics.map(t => [t, []]));
   if (articles.length === 0) return empty;
 
   const articlesList = articles.map((a, i) => `${i + 1}. ${a.title}\n${a.text}`).join('\n\n');
+  const scopeLine = domesticScopeLine(scope, country);
   const prompt = `Below is a numbered list of full articles. For each theme listed, return the numbers of the articles that are genuinely about that theme, judging from the full article text — this is the final decision for what gets included in a report, so be precise rather than inclusive.
-
+${scopeLine}
 Articles:
 ${articlesList}
 
@@ -2058,8 +2073,8 @@ async function generateDailyReportRun(scheduleId, schedule, ai, contextMode, now
     let contextMatches = {};
     if (actualContextTopics.length > 0) {
       contextMatches = contextMode === 'fullBody'
-        ? await classifyContextTopicsByFullBody(articles, actualContextTopics, ai, schedule.createdBy, schedule.createdByEmail)
-        : await classifyContextTopicsByHeader(articles, actualContextTopics, ai, schedule.createdBy, schedule.createdByEmail);
+        ? await classifyContextTopicsByFullBody(articles, actualContextTopics, ai, schedule.createdBy, schedule.createdByEmail, schedule.searchScope, schedule.country)
+        : await classifyContextTopicsByHeader(articles, actualContextTopics, ai, schedule.createdBy, schedule.createdByEmail, schedule.searchScope, schedule.country);
     }
     const topicKeywordMatches = { ...exactMatches, ...contextMatches };
     const relevantIndices = relevantIndicesFromMatches(topicKeywordMatches);
@@ -2304,10 +2319,11 @@ exports.createSchedule = onCall(
     if (!WEEKDAYS.includes(weeklyDay)) throw new HttpsError('invalid-argument', 'valid weeklyDay required');
     const hour = Math.min(Math.max(parseInt(hourUtc) || 0, 0), 23);
     const weeklySummaryWords = clampWeeklySummaryWords(request.data?.weeklySummaryWords);
+    const searchScope = request.data?.searchScope === 'domestic' ? 'domestic' : 'global';
 
     const ref = db.ref('schedules').push();
     const schedule = {
-      id: ref.key, country, countryKey, sourceIds, topics, contextTopics,
+      id: ref.key, country, countryKey, sourceIds, topics, contextTopics, searchScope,
       weeklyDay, hourUtc: hour, weeklySummaryWords,
       sendDailyEmail: !!sendDailyEmail, sendWeeklyEmail: !!sendWeeklyEmail, emailRecipients,
       enabled: true,
@@ -2334,7 +2350,8 @@ exports.updateSchedule = onCall(
     requireScheduleAccess(schedule, request.auth.uid, 'write');
     if (updates.emailRecipients !== undefined) updates.emailRecipients = sanitizeEmailList(updates.emailRecipients);
     if (updates.weeklySummaryWords !== undefined) updates.weeklySummaryWords = clampWeeklySummaryWords(updates.weeklySummaryWords);
-    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'weeklySummaryWords', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients'];
+    if (updates.searchScope !== undefined) updates.searchScope = updates.searchScope === 'domestic' ? 'domestic' : 'global';
+    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'weeklySummaryWords', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
     if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');

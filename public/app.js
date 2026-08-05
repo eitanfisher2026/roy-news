@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.9';
+const VERSION = 'v3.10';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3459,6 +3459,29 @@ function TopicModeChips({ topics, contextSet, onToggle }) {
   );
 }
 
+// Domestic restricts context (🧭) topics to coverage specifically about the
+// schedule's own country; Global (default) leaves them unrestricted, same as
+// before this toggle existed. Only affects context-mode topics — exact
+// topics (e.g. "Israel, Gaza") already scope themselves via keyword match.
+function SearchScopeToggle({ value, onChange }) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Search scope for 🧭 context topics</label>
+      <div style={{ display: 'flex', gap: 6 }}>
+        {['global', 'domestic'].map(v => (
+          <button key={v} type="button" onClick={() => onChange(v)}
+            style={{ fontSize: 12, padding: '5px 12px', borderRadius: 6, border: '1px solid ' + (value === v ? '#7c3aed' : C.border), cursor: 'pointer', background: value === v ? '#7c3aed' : 'transparent', color: value === v ? 'white' : C.muted }}>
+            {v === 'domestic' ? 'Domestic' : 'Global'}
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: 10, color: C.faint, marginTop: 3 }}>
+        {value === 'domestic' ? 'Only coverage specifically about this schedule’s own country.' : 'Coverage of the topic anywhere in the world (default).'}
+      </div>
+    </div>
+  );
+}
+
 // A single scheduled report run's detail view — same shape as the
 // point-in-time results (results keyed by source id), so it reuses the same
 // buildShareText/extractTexts/applyTranslations helpers. Keyed by runId at
@@ -3761,6 +3784,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [newSourceIds, setNewSourceIds] = useState(new Set());
   const [newTopics, setNewTopics] = useState('');
   const [newContextTopics, setNewContextTopics] = useState(new Set());
+  const [newSearchScope, setNewSearchScope] = useState('global');
   const [newWeeklyDay, setNewWeeklyDay] = useState('monday');
   const [newHourUtc, setNewHourUtc] = useState(6);
   const [newWeeklySummaryWords, setNewWeeklySummaryWords] = useState(300);
@@ -3808,6 +3832,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [editingId, setEditingId] = useState(null);
   const [editTopics, setEditTopics] = useState('');
   const [editContextTopics, setEditContextTopics] = useState(new Set());
+  const [editSearchScope, setEditSearchScope] = useState('global');
   const [editWeeklyDay, setEditWeeklyDay] = useState('monday');
   const [editHourUtc, setEditHourUtc] = useState(6);
   const [editWeeklySummaryWords, setEditWeeklySummaryWords] = useState(300);
@@ -3848,6 +3873,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditingId(s.id);
     setEditTopics(s.topics.join(', '));
     setEditContextTopics(new Set(s.contextTopics || []));
+    setEditSearchScope(s.searchScope === 'domestic' ? 'domestic' : 'global');
     setEditWeeklyDay(s.weeklyDay || 'monday');
     setEditHourUtc(s.hourUtc);
     setEditWeeklySummaryWords(s.weeklySummaryWords || 300);
@@ -3871,7 +3897,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     if (topics.length === 0) { alert('At least one topic is required.'); return; }
     if (editSelected.size === 0) { alert('At least one source is required.'); return; }
     const fields = {
-      topics, contextTopics: topics.filter(t => editContextTopics.has(t)),
+      topics, contextTopics: topics.filter(t => editContextTopics.has(t)), searchScope: editSearchScope,
       weeklyDay: editWeeklyDay, hourUtc: editHourUtc, weeklySummaryWords: editWeeklySummaryWords,
       sendDailyEmail: editSendDailyEmail, sendWeeklyEmail: editSendWeeklyEmail,
       emailRecipients: editEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean),
@@ -3940,14 +3966,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     try {
       await fns.httpsCallable('createSchedule')({
         country: selectedCountry.country, countryKey: selectedCountry.countryKey,
-        sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => newContextTopics.has(t)),
+        sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => newContextTopics.has(t)), searchScope: newSearchScope,
         weeklyDay: newWeeklyDay, hourUtc: newHourUtc, weeklySummaryWords: newWeeklySummaryWords,
         sendDailyEmail: newSendDailyEmail, sendWeeklyEmail: newSendWeeklyEmail,
         emailRecipients: newEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean)
       });
       setCreateMsg('✓ Schedule created');
       setShowCreate(false);
-      setNewCountryKey(''); setNewSourceIds(new Set()); setNewTopics(''); setNewContextTopics(new Set()); setEstimate(null);
+      setNewCountryKey(''); setNewSourceIds(new Set()); setNewTopics(''); setNewContextTopics(new Set()); setNewSearchScope('global'); setEstimate(null);
       setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipients(''); setNewWeeklySummaryWords(300);
       await loadSchedules();
     } catch (e) {
@@ -4098,7 +4124,8 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
 
   function scheduleTopicsLabel(s) {
     const contextSet = new Set(s.contextTopics || []);
-    return s.topics.map(t => contextSet.has(t) ? `${t}🧭` : t).join(', ');
+    const label = s.topics.map(t => contextSet.has(t) ? `${t}🧭` : t).join(', ');
+    return s.searchScope === 'domestic' ? `${label} · 🏠 domestic` : label;
   }
 
   function scheduleSummary(s) {
@@ -4222,6 +4249,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                         placeholder="Israel, Gaza" style={{ fontSize: 13, marginBottom: 6, width: '100%' }} />
                       <TopicModeChips topics={editTopicsArray()} contextSet={editContextTopics}
                         onToggle={t => setEditContextTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; })} />
+                      <SearchScopeToggle value={editSearchScope} onChange={setEditSearchScope} />
 
                       <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
                         <div style={{ flex: 1 }}>
@@ -4418,6 +4446,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                     placeholder="Israel, Gaza" style={{ fontSize: 13, marginBottom: 6, width: '100%' }} />
                   <TopicModeChips topics={topicsArray()} contextSet={newContextTopics}
                     onToggle={t => { setNewContextTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; }); setEstimate(null); }} />
+                  <SearchScopeToggle value={newSearchScope} onChange={setNewSearchScope} />
 
                   <div style={{ fontSize: 11, color: C.faint, marginBottom: 10 }}>
                     Every schedule archives and builds a daily report automatically. A weekly digest — the same days bundled together — also builds on the day below.

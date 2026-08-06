@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.15';
+const VERSION = 'v3.16';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -151,13 +151,13 @@ function useTopicRegistry() {
       setTopicRegistry(data);
       setTopicRegistryLoaded(true);
     });
-    // Kicks off the one-time migration if nothing's there yet — a no-op if
-    // it already ran (getTopicRegistry checks before writing). The .on
-    // listener above picks up the result once it's written.
-    ref.once('value').then(snap => {
-      const data = snap.val();
-      if (!data || Object.keys(data).length === 0) fns.httpsCallable('getTopicRegistry')({}).catch(() => {});
-    });
+    // Always calls getTopicRegistry, not just when empty — it doubles as the
+    // first-time migration AND an idempotent case-dedupe pass (merges any
+    // "Economy"/"economy"-style duplicates), so it needs to run on every
+    // load, not just once. It's a cheap read plus a write only when
+    // something's actually out of sync, and the .on listener above picks up
+    // whatever it settles on.
+    fns.httpsCallable('getTopicRegistry')({}).catch(() => {});
     return () => { mounted = false; ref.off('value', cb); };
   }, []);
   return [topicRegistry, topicRegistryLoaded];

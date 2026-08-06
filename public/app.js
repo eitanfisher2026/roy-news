@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.12';
+const VERSION = 'v3.13';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2606,6 +2606,7 @@ const ANTHROPIC_MODELS = [
 
 function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
   const [confirm, confirmDialog] = useConfirm();
+  const [settingsTab, setSettingsTab] = useState('general');
   const [persona, setPersona] = useState('');
   const [personaSaved, setPersonaSaved] = useState(false);
 
@@ -3034,8 +3035,19 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
           <span className="version-tag" style={{ marginLeft: 'auto' }}>{VERSION}</span>
         </div>
 
+        {/* Tabs — everything below is grouped under one of these instead of a
+            long scroll of stacked collapsible sections. */}
+        <div style={{ display: 'flex', background: C.bg, borderRadius: 10, padding: 3, marginBottom: 22, border: '1px solid ' + C.border, gap: 3 }}>
+          {[['general', 'General'], ...(isAdmin ? [['users', 'Users']] : []), ['topics', 'Topics'], ['profile', 'Profile']].map(([key, label]) => (
+            <button key={key} onClick={() => setSettingsTab(key)}
+              style={{ flex: 1, padding: '8px 0', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 700, background: settingsTab === key ? C.card : 'transparent', color: settingsTab === key ? '#60a5fa' : C.faint, boxShadow: settingsTab === key ? '0 1px 3px rgba(0,0,0,0.3)' : 'none', transition: 'all 0.15s' }}>
+              {label}
+            </button>
+          ))}
+        </div>
+
         {/* Account */}
-        {user && (
+        {settingsTab === 'profile' && user && (
           <div style={{ marginBottom: 28 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 14, textTransform: 'uppercase', letterSpacing: 0.5 }}>Account</div>
             <div style={{ padding: '12px 14px', background: C.card, borderRadius: 9, border: '1px solid ' + C.border, display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -3053,7 +3065,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
         )}
 
         {/* Manage Users (admin only) */}
-        {isAdmin && (
+        {settingsTab === 'users' && isAdmin && (
           <div style={{ marginBottom: 28 }}>
             <button
               onClick={() => { setUsersOpen(o => { if (!o) loadAuthUsers(); return !o; }); }}
@@ -3123,6 +3135,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
         )}
 
         {/* Usage & Costs */}
+        {settingsTab === 'general' && (
         <div style={{ marginBottom: 28 }}>
           <button
             onClick={() => { setCostsOpen(o => { if (!o) loadCosts(); return !o; }); }}
@@ -3201,8 +3214,10 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
             </div>
           )}
         </div>
+        )}
 
         {/* Your Profile */}
+        {settingsTab === 'profile' && (
         <div style={{ marginBottom: 28 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>Your Profile</div>
           <div style={{ fontSize: 12, color: C.faint, marginBottom: 12, lineHeight: 1.6 }}>
@@ -3235,8 +3250,10 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
             {personaSaved && <span style={{ fontSize: 12, color: '#4ade80' }}>✓ Saved</span>}
           </div>
         </div>
+        )}
 
         {/* AI Provider */}
+        {settingsTab === 'general' && (
         <div style={{ marginBottom: 28 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 14, textTransform: 'uppercase', letterSpacing: 0.5 }}>AI Provider</div>
           <div style={{ fontSize: 12, color: C.faint, marginBottom: 14, lineHeight: 1.6 }}>
@@ -3381,8 +3398,10 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
             Android: use Chrome or Edge browser
           </div>
         </div>
+        )}
 
         {/* Context Topic Analysis */}
+        {settingsTab === 'topics' && (
         <div style={{ marginBottom: 28 }}>
           <button
             onClick={() => { setContextModeOpen(o => { if (!o) loadContextMode(); return !o; }); }}
@@ -3540,8 +3559,10 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
             </div>
           )}
         </div>
+        )}
 
         {/* Prompt Templates */}
+        {settingsTab === 'general' && (
         <div style={{ marginBottom: 28 }}>
           <button
             onClick={() => { setPromptsOpen(o => { if (!o) loadPrompts(); return !o; }); }}
@@ -3704,6 +3725,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
             })
           }
         </div>
+        )}
       </div>
       {confirmDialog}
       {suggestModal && (

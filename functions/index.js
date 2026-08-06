@@ -2518,6 +2518,64 @@ exports.getAllTopicUsage = onCall(
 // trusting client input for what "default" means.
 const REGISTRY_DEFAULT_TOPICS = ['Gaza', 'Iran & Nuclear', 'Hezbollah', 'Israel', 'USA', 'Economy', 'Internal Politics', 'Security & Terrorism', 'Refugees', 'Normalization'];
 
+// Topic names, and their include/exclude words, are case-insensitive — "Economy"
+// and "economy" are the same topic. Merges case-variant duplicate topics (keeping
+// whichever casing is isDefault, or was seen first) and case-variant duplicate
+// words within one topic's include/exclude lists, unioning their fields. A no-op
+// (no write) once the registry is already clean, so this is cheap to run on
+// every load rather than needing a separate one-off cleanup step.
+function dedupeWordsCaseInsensitive(words) {
+  const seen = new Set();
+  const out = [];
+  for (const w of (words || [])) {
+    const key = w.toLowerCase();
+    if (!seen.has(key)) { seen.add(key); out.push(w); }
+  }
+  return out;
+}
+
+function normalizeTopicRegistry(registry) {
+  let changed = false;
+  const byLower = {};
+  for (const [name, rawEntry] of Object.entries(registry)) {
+    const entry = { ...rawEntry };
+    const dedupedInclude = dedupeWordsCaseInsensitive(entry.include);
+    const dedupedExclude = dedupeWordsCaseInsensitive(entry.exclude);
+    if (entry.include && dedupedInclude.length !== entry.include.length) { entry.include = dedupedInclude; changed = true; }
+    if (entry.exclude && dedupedExclude.length !== entry.exclude.length) { entry.exclude = dedupedExclude; changed = true; }
+
+    const key = name.toLowerCase();
+    if (!byLower[key]) {
+      byLower[key] = { name, entry };
+      continue;
+    }
+    changed = true;
+    const existing = byLower[key];
+    const keepExisting = existing.entry.isDefault || !entry.isDefault;
+    const primary = keepExisting ? existing.entry : entry;
+    const secondary = keepExisting ? entry : existing.entry;
+    byLower[key] = {
+      name: keepExisting ? existing.name : name,
+      entry: {
+        mode: primary.mode === 'classify' || secondary.mode === 'classify' ? 'classify' : 'exact',
+        isDefault: !!(primary.isDefault || secondary.isDefault),
+        include: dedupeWordsCaseInsensitive([...(primary.include || []), ...(secondary.include || [])]),
+        exclude: dedupeWordsCaseInsensitive([...(primary.exclude || []), ...(secondary.exclude || [])]),
+        ...((primary.compiledPrompt || secondary.compiledPrompt) ? {
+          compiledPrompt: primary.compiledPrompt || secondary.compiledPrompt,
+          compiledAt: primary.compiledAt || secondary.compiledAt
+        } : {}),
+        ...((primary.wordsUpdatedAt || secondary.wordsUpdatedAt) ? {
+          wordsUpdatedAt: [primary.wordsUpdatedAt, secondary.wordsUpdatedAt].filter(Boolean).sort().pop()
+        } : {})
+      }
+    };
+  }
+  const normalized = {};
+  for (const { name, entry } of Object.values(byLower)) normalized[name] = entry;
+  return { normalized, changed };
+}
+
 // One-time migration from the old per-flow topic storage (config/topics,
 // used only by the point-in-time picker, and each schedule's own free-typed
 // topics/contextTopics arrays) into one shared registry keyed by topic name.
@@ -2529,37 +2587,39 @@ exports.getTopicRegistry = onCall(
   async (request) => {
     await requireAuthorized(request);
     const snap = await db.ref('config/topicRegistry').once('value');
-    const existing = snap.val();
-    if (existing && Object.keys(existing).length > 0) return { topics: existing };
+    let registry = snap.val();
 
-    const [legacySnap, schedulesSnap] = await Promise.all([
-      db.ref('config/topics').once('value'),
-      db.ref('schedules').once('value')
-    ]);
-    const legacy = legacySnap.val() || {};
-    const removedDefaults = new Set(legacy.removedDefaults || []);
-    const legacyContext = new Set((legacy.context || []).map(t => t.toLowerCase()));
-    const schedules = Object.values(schedulesSnap.val() || {});
+    if (!registry || Object.keys(registry).length === 0) {
+      const [legacySnap, schedulesSnap] = await Promise.all([
+        db.ref('config/topics').once('value'),
+        db.ref('schedules').once('value')
+      ]);
+      const legacy = legacySnap.val() || {};
+      const removedDefaults = new Set(legacy.removedDefaults || []);
+      const legacyContext = new Set((legacy.context || []).map(t => t.toLowerCase()));
+      const schedules = Object.values(schedulesSnap.val() || {});
 
-    const registry = {};
-    const ensureTopic = (name, mode, isDefault) => {
-      if (!name) return;
-      if (!registry[name]) registry[name] = { mode, isDefault };
-      else if (mode === 'classify' && registry[name].mode !== 'classify') registry[name].mode = 'classify';
-    };
-    REGISTRY_DEFAULT_TOPICS.filter(t => !removedDefaults.has(t))
-      .forEach(t => ensureTopic(t, legacyContext.has(t.toLowerCase()) ? 'classify' : 'exact', true));
-    (legacy.custom || [])
-      .forEach(t => ensureTopic(t, legacyContext.has(t.toLowerCase()) ? 'classify' : 'exact', false));
-    for (const s of schedules) {
-      const schedContext = new Set((s.contextTopics || []).map(t => t.toLowerCase()));
-      for (const t of (s.topics || [])) {
-        ensureTopic(t, schedContext.has(t.toLowerCase()) ? 'classify' : 'exact', false);
+      registry = {};
+      const ensureTopic = (name, mode, isDefault) => {
+        if (!name) return;
+        if (!registry[name]) registry[name] = { mode, isDefault };
+        else if (mode === 'classify' && registry[name].mode !== 'classify') registry[name].mode = 'classify';
+      };
+      REGISTRY_DEFAULT_TOPICS.filter(t => !removedDefaults.has(t))
+        .forEach(t => ensureTopic(t, legacyContext.has(t.toLowerCase()) ? 'classify' : 'exact', true));
+      (legacy.custom || [])
+        .forEach(t => ensureTopic(t, legacyContext.has(t.toLowerCase()) ? 'classify' : 'exact', false));
+      for (const s of schedules) {
+        const schedContext = new Set((s.contextTopics || []).map(t => t.toLowerCase()));
+        for (const t of (s.topics || [])) {
+          ensureTopic(t, schedContext.has(t.toLowerCase()) ? 'classify' : 'exact', false);
+        }
       }
     }
 
-    await db.ref('config/topicRegistry').set(registry);
-    return { topics: registry };
+    const { normalized, changed } = normalizeTopicRegistry(registry);
+    if (changed) await db.ref('config/topicRegistry').set(normalized);
+    return { topics: normalized };
   }
 );
 

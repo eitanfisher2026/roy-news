@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.14';
+const VERSION = 'v3.15';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1488,8 +1488,10 @@ function ConfigStep({ country, user, onGo, onBack }) {
     if (!topicRegistryLoaded) return;
     const validSet = new Set(allTopics);
     setSelectedTopics(prev => {
-      const cleaned = new Set([...prev].filter(t => validSet.has(t)));
-      return cleaned.size === prev.size ? prev : cleaned;
+      const cleaned = new Set([...prev]
+        .map(t => validSet.has(t) ? t : toCanonicalTopicName(t, topicRegistry))
+        .filter(t => validSet.has(t)));
+      return cleaned.size === prev.size && [...cleaned].every(t => prev.has(t)) ? prev : cleaned;
     });
   }, [topicRegistryLoaded, topicRegistry]);
 
@@ -2760,7 +2762,12 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
 
   async function addTopic() {
     const name = newTopicName.trim();
-    if (!name || topicRegistry[name]) return;
+    if (!name) return;
+    const existing = Object.keys(topicRegistry).find(k => k.toLowerCase() === name.toLowerCase());
+    if (existing) {
+      alert(`"${existing}" already exists — topic names aren't case-sensitive.`);
+      return;
+    }
     await db.ref(`config/topicRegistry/${name}`).set({ mode: newTopicMode, isDefault: false });
     setNewTopicName('');
     setNewTopicMode('exact');
@@ -2795,6 +2802,10 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
     });
   }
 
+  // Words within a list are case-insensitive too — "Election" and "election"
+  // are the same include word.
+  function hasWordCI(list, w) { return (list || []).some(x => x.toLowerCase() === w.toLowerCase()); }
+
   // Include/exclude words write straight to the registry as they're edited
   // (same immediate-write convention the rest of this shared list already
   // uses) — "Update Prompts" is the deliberate, separate step that bakes
@@ -2803,7 +2814,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
     const w = topicWordInput[kind].trim();
     if (!w) return;
     const current = topicRegistry[name]?.[kind] || [];
-    if (!current.includes(w)) {
+    if (!hasWordCI(current, w)) {
       db.ref(`config/topicRegistry/${name}`).update({ [kind]: [...current, w], wordsUpdatedAt: new Date().toISOString() });
     }
     setTopicWordInput(prev => ({ ...prev, [kind]: '' }));
@@ -2820,7 +2831,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
     try {
       const resp = await fns.httpsCallable('suggestTopicWords')({ topic: name });
       const current = topicRegistry[name]?.include || [];
-      const words = (resp.data.include || []).filter(w => !current.includes(w));
+      const words = (resp.data.include || []).filter(w => !hasWordCI(current, w));
       if (words.length === 0) {
         alert('No new suggestions right now — try adding a few words yourself first, or try again shortly.');
       } else {
@@ -2843,7 +2854,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
   async function confirmSuggestModal() {
     const { topic, checked } = suggestModal;
     const current = topicRegistry[topic]?.include || [];
-    const toAdd = [...checked].filter(w => !current.includes(w));
+    const toAdd = [...checked].filter(w => !hasWordCI(current, w));
     setSuggestModal(null);
     if (toAdd.length === 0) return;
     await db.ref(`config/topicRegistry/${topic}`).update({ include: [...current, ...toAdd], wordsUpdatedAt: new Date().toISOString() });
@@ -3510,7 +3521,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
                         <div key={name} style={{ border: '1px solid ' + C.border, borderRadius: 8, overflow: 'hidden' }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: '#0f1e35', flexWrap: 'wrap' }}>
                             <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: C.text, minWidth: 100 }}>
-                              {name}{t.isDefault && <span style={{ color: C.faint, fontWeight: 400 }}> (default)</span>}
+                              {name}
                             </div>
                             {topicUsageLoaded && (
                               usedBy.length > 0 ? (
@@ -3781,6 +3792,16 @@ const WEEKDAY_OPTIONS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday',
 // (exact/classify) is read-only here — it's now one setting per topic,
 // managed centrally in Settings → Topics, not overridable per schedule.
 // Shared by the create and edit forms in ScheduledReportsPanel below.
+// Topic names are case-insensitive, but a schedule saved before that was
+// true (or with a typed-in casing that predates a registry entry) may still
+// store a different-case spelling — this maps it back to whatever casing the
+// registry currently considers canonical, so picker checkboxes and toggles
+// (which compare by exact string) work correctly against old data.
+function toCanonicalTopicName(raw, registry) {
+  const match = Object.keys(registry).find(k => k.toLowerCase() === raw.toLowerCase());
+  return match || raw;
+}
+
 function TopicPicker({ registry, selected, onToggle }) {
   const names = Object.keys(registry).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
   if (names.length === 0) {
@@ -3789,7 +3810,7 @@ function TopicPicker({ registry, selected, onToggle }) {
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
       {names.map(t => {
-        const active = selected.has(t);
+        const active = [...selected].some(s => s.toLowerCase() === t.toLowerCase());
         const isClassify = registry[t]?.mode === 'classify';
         return (
           <button key={t} onClick={() => onToggle(t)} type="button"
@@ -4216,7 +4237,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
 
   function startEdit(s) {
     setEditingId(s.id);
-    setEditSelectedTopics(new Set(s.topics || []));
+    setEditSelectedTopics(new Set((s.topics || []).map(t => toCanonicalTopicName(t, topicRegistry))));
     setEditSearchScope(s.searchScope === 'domestic' ? 'domestic' : 'global');
     setEditWeeklyDay(s.weeklyDay || 'monday');
     setEditHourUtc(s.hourUtc);

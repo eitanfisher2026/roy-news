@@ -1110,7 +1110,22 @@ function domesticScopeLine(scope, country, { loose } = {}) {
   return `\nScope: domestic only — count it only if the theme is genuinely about ${country} itself (its government, institutions, economy, or domestic actors), not international/global coverage of the theme that merely mentions ${country} in passing.${uncertainty}\n`;
 }
 
-async function classifyContextTopicsByHeader(articles, contextTopics, ai, uid, email, scope, country) {
+// topicGuidance is an optional { [topicName]: compiledPrompt } map — the
+// static, pre-compiled include/exclude instructions from that topic's
+// registry entry (see buildCompiledTopicPrompt on the client, which is what
+// actually produces this string; nothing here re-derives it from raw word
+// lists on every run). Topics without guidance just render as a bare name,
+// identical to today's behavior.
+function buildThemesBlock(contextTopics, topicGuidance) {
+  const hasGuidance = contextTopics.some(t => topicGuidance && topicGuidance[t]);
+  if (!hasGuidance) return `Themes: ${contextTopics.join(', ')}`;
+  return `Themes:\n` + contextTopics.map(t => {
+    const g = topicGuidance && topicGuidance[t];
+    return g ? `- ${t} — ${g}` : `- ${t}`;
+  }).join('\n');
+}
+
+async function classifyContextTopicsByHeader(articles, contextTopics, ai, uid, email, scope, country, topicGuidance) {
   const empty = Object.fromEntries(contextTopics.map(t => [t, []]));
   if (articles.length === 0) return empty;
 
@@ -1121,7 +1136,7 @@ ${scopeLine}
 Headlines:
 ${titlesList}
 
-Themes: ${contextTopics.join(', ')}
+${buildThemesBlock(contextTopics, topicGuidance)}
 
 Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], "other theme": [] }`;
 
@@ -1151,7 +1166,7 @@ Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], 
 // the raw-report pipeline has no follow-up analysis call to correct it.
 // Used for 'fullBody' context mode there, where accuracy over speed/cost is
 // the point.
-async function classifyContextTopicsByFullBody(articles, contextTopics, ai, uid, email, scope, country) {
+async function classifyContextTopicsByFullBody(articles, contextTopics, ai, uid, email, scope, country, topicGuidance) {
   const empty = Object.fromEntries(contextTopics.map(t => [t, []]));
   if (articles.length === 0) return empty;
 
@@ -1162,7 +1177,7 @@ ${scopeLine}
 Articles:
 ${articlesList}
 
-Themes: ${contextTopics.join(', ')}
+${buildThemesBlock(contextTopics, topicGuidance)}
 
 Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], "other theme": [] }`;
 
@@ -1194,6 +1209,7 @@ async function analyzeArticlesForTopics({ ai, source, articles, topics, contextT
   }
 
   const { exactTopics, actualContextTopics } = splitTopicsByMode(topics, contextTopics);
+  const topicGuidance = await loadTopicGuidance(actualContextTopics);
 
   const exactMatches = exactTopics.length > 0
     ? await computeTopicKeywordMatches(articles, exactTopics, source, ai, uid, email)
@@ -1205,7 +1221,7 @@ async function analyzeArticlesForTopics({ ai, source, articles, topics, contextT
       const allIdx = articles.map((_, i) => i + 1);
       for (const t of actualContextTopics) contextMatches[t] = allIdx;
     } else {
-      contextMatches = await classifyContextTopicsByHeader(articles, actualContextTopics, ai, uid, email);
+      contextMatches = await classifyContextTopicsByHeader(articles, actualContextTopics, ai, uid, email, undefined, undefined, topicGuidance);
     }
   }
 
@@ -1223,10 +1239,18 @@ async function analyzeArticlesForTopics({ ai, source, articles, topics, contextT
     const idx = topicKeywordMatches[t].map(origIdx => origToLocal.get(origIdx));
     return `- ${t}: ${idx.length > 0 ? idx.map(i => `article ${i}`).join(', ') : 'none'}`;
   }).join('\n');
+  // Folds each context topic's compiled include/exclude guidance (if any)
+  // into the same {{topicList}} placeholder the prompt already has, rather
+  // than adding a new template variable — a topic with no compiled guidance
+  // renders exactly as it did before this feature existed.
+  const topicListText = topics.map(t => {
+    const g = topicGuidance[t];
+    return g ? `${t} (${g})` : t;
+  }).join(', ');
 
   const prompt = fillPrompt(customPrompts.analysis || DEFAULT_PROMPTS.analysis, {
     sourceName: source.name, sourceLean: source.lean, country,
-    leanDescription: source.leanDescription, date: dateLabel, topicList: topics.join(', '),
+    leanDescription: source.leanDescription, date: dateLabel, topicList: topicListText,
     articlesText, topicMatchesText, lang: 'English', summaryLen
   });
 
@@ -2040,6 +2064,22 @@ async function readArchivedArticles(countryKey, sourceId, dayKeys) {
   return articles;
 }
 
+// Reads each named topic's pre-compiled prompt fragment from the shared
+// registry — a plain field lookup, not a rebuild from raw include/exclude
+// words. Topics with no compiledPrompt yet (or missing from the registry
+// entirely) are simply omitted, so classify behavior is unchanged for them.
+async function loadTopicGuidance(topicNames) {
+  if (!topicNames || topicNames.length === 0) return {};
+  const snap = await db.ref('config/topicRegistry').once('value');
+  const registry = snap.val() || {};
+  const guidance = {};
+  for (const name of topicNames) {
+    const entry = registry[name];
+    if (entry && entry.compiledPrompt) guidance[name] = entry.compiledPrompt;
+  }
+  return guidance;
+}
+
 // The one per-day pass: fetch that day's archived articles per source, match
 // topics, translate what matched, group into day-topic-source sections.
 // Always a single day now — daily generation is unconditional (every enabled
@@ -2057,6 +2097,11 @@ async function generateDailyReportRun(scheduleId, schedule, ai, contextMode, now
   const contextTopics = schedule.contextTopics || [];
   const { exactTopics, actualContextTopics } = splitTopicsByMode(topics, contextTopics);
 
+  // One read for the whole run (not per source/day) — topicGuidance is just
+  // each context topic's already-compiled prompt fragment, so this is a
+  // cheap lookup, not a rebuild of anything from raw include/exclude words.
+  const topicGuidance = await loadTopicGuidance(actualContextTopics);
+
   // Collected but not applied until the whole run is durably recorded by the
   // caller — if anything here throws, nothing here ever executes, so a
   // retried run still sees the full, unpruned archive to work from.
@@ -2073,8 +2118,8 @@ async function generateDailyReportRun(scheduleId, schedule, ai, contextMode, now
     let contextMatches = {};
     if (actualContextTopics.length > 0) {
       contextMatches = contextMode === 'fullBody'
-        ? await classifyContextTopicsByFullBody(articles, actualContextTopics, ai, schedule.createdBy, schedule.createdByEmail, schedule.searchScope, schedule.country)
-        : await classifyContextTopicsByHeader(articles, actualContextTopics, ai, schedule.createdBy, schedule.createdByEmail, schedule.searchScope, schedule.country);
+        ? await classifyContextTopicsByFullBody(articles, actualContextTopics, ai, schedule.createdBy, schedule.createdByEmail, schedule.searchScope, schedule.country, topicGuidance)
+        : await classifyContextTopicsByHeader(articles, actualContextTopics, ai, schedule.createdBy, schedule.createdByEmail, schedule.searchScope, schedule.country, topicGuidance);
     }
     const topicKeywordMatches = { ...exactMatches, ...contextMatches };
     const relevantIndices = relevantIndicesFromMatches(topicKeywordMatches);
@@ -2445,6 +2490,86 @@ exports.checkTopicInUse = onCall(
       .filter(s => (s.topics || []).some(t => t.toLowerCase() === topic.toLowerCase()))
       .map(s => ({ country: s.country, createdByEmail: s.createdByEmail }));
     return { inUse: usedBy.length > 0, usedBy };
+  }
+);
+
+// Mirrors DEFAULT_TOPICS in public/app.js — kept as a separate copy here
+// (rather than passed in from the client) so migration doesn't depend on
+// trusting client input for what "default" means.
+const REGISTRY_DEFAULT_TOPICS = ['Gaza', 'Iran & Nuclear', 'Hezbollah', 'Israel', 'USA', 'Economy', 'Internal Politics', 'Security & Terrorism', 'Refugees', 'Normalization'];
+
+// One-time migration from the old per-flow topic storage (config/topics,
+// used only by the point-in-time picker, and each schedule's own free-typed
+// topics/contextTopics arrays) into one shared registry keyed by topic name.
+// Needs a privileged full scan of `schedules` (blocked by DB rules for plain
+// clients — see checkTopicInUse above for the same reasoning) to pick up any
+// topic name a schedule uses that was never added to config/topics.
+exports.getTopicRegistry = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const snap = await db.ref('config/topicRegistry').once('value');
+    const existing = snap.val();
+    if (existing && Object.keys(existing).length > 0) return { topics: existing };
+
+    const [legacySnap, schedulesSnap] = await Promise.all([
+      db.ref('config/topics').once('value'),
+      db.ref('schedules').once('value')
+    ]);
+    const legacy = legacySnap.val() || {};
+    const removedDefaults = new Set(legacy.removedDefaults || []);
+    const legacyContext = new Set((legacy.context || []).map(t => t.toLowerCase()));
+    const schedules = Object.values(schedulesSnap.val() || {});
+
+    const registry = {};
+    const ensureTopic = (name, mode, isDefault) => {
+      if (!name) return;
+      if (!registry[name]) registry[name] = { mode, isDefault };
+      else if (mode === 'classify' && registry[name].mode !== 'classify') registry[name].mode = 'classify';
+    };
+    REGISTRY_DEFAULT_TOPICS.filter(t => !removedDefaults.has(t))
+      .forEach(t => ensureTopic(t, legacyContext.has(t.toLowerCase()) ? 'classify' : 'exact', true));
+    (legacy.custom || [])
+      .forEach(t => ensureTopic(t, legacyContext.has(t.toLowerCase()) ? 'classify' : 'exact', false));
+    for (const s of schedules) {
+      const schedContext = new Set((s.contextTopics || []).map(t => t.toLowerCase()));
+      for (const t of (s.topics || [])) {
+        ensureTopic(t, schedContext.has(t.toLowerCase()) ? 'classify' : 'exact', false);
+      }
+    }
+
+    await db.ref('config/topicRegistry').set(registry);
+    return { topics: registry };
+  }
+);
+
+// Cheap, user-triggered, one-shot AI call — never automatic — suggesting a
+// starting include/exclude word list for a classify-mode topic. Deliberately
+// country/politician-agnostic (the registry is global, shared across every
+// country) so the suggestion stays useful regardless of which schedule ends
+// up using it.
+exports.suggestTopicWords = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { topic } = request.data || {};
+    if (!topic) throw new HttpsError('invalid-argument', 'topic required');
+    const ai = makeAI(request.data);
+    const prompt = `You're helping define what counts as the news theme "${topic}" for a classifier that reads one article at a time and must decide whether it genuinely belongs to this theme — this will be used across many different countries, so stay structural and generic, not tied to any specific country, politician, or current event.
+
+Suggest two short word/phrase lists:
+1. "include": 5-8 concrete signals that indicate an article genuinely belongs to this theme.
+2. "exclude": 5-8 signals of coverage that looks related but should NOT count — the commonly-confused adjacent topics that cause false positives.
+
+Return ONLY valid JSON, no markdown, no explanation: { "include": ["...", ...], "exclude": ["...", ...] }`;
+
+    const { text, usage } = await callAI(ai, prompt, 400);
+    if (usage) await persistCost(request.auth.uid, request.auth.token.email, ai, calcCostUsd(ai, usage.input_tokens || 0, usage.output_tokens || 0));
+    const parsed = extractJson(text, '{') || {};
+    return {
+      include: Array.isArray(parsed.include) ? parsed.include.filter(w => typeof w === 'string') : [],
+      exclude: Array.isArray(parsed.exclude) ? parsed.exclude.filter(w => typeof w === 'string') : []
+    };
   }
 );
 

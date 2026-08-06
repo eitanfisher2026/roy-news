@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.10';
+const VERSION = 'v3.11';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -131,6 +131,49 @@ function formatFeedStats(stats) {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const DEFAULT_TOPICS = ['Gaza', 'Iran & Nuclear', 'Hezbollah', 'Israel', 'USA', 'Economy', 'Internal Politics', 'Security & Terrorism', 'Refugees', 'Normalization'];
+
+// ─── Shared topic registry ──────────────────────────────────────────────────
+// One shared list of topics (config/topicRegistry, keyed by topic name) used
+// by both the point-in-time picker and every schedule — replaces the old
+// per-flow storage (config/topics for point-in-time, free-typed strings per
+// schedule). Each topic's mode (exact/classify) and, for classify topics,
+// its include/exclude word lists and compiled prompt now live in exactly one
+// place, managed from Settings → Topics.
+function useTopicRegistry() {
+  const [topicRegistry, setTopicRegistry] = useState({});
+  const [topicRegistryLoaded, setTopicRegistryLoaded] = useState(false);
+  useEffect(() => {
+    let mounted = true;
+    const ref = db.ref('config/topicRegistry');
+    const cb = ref.on('value', snap => {
+      const data = snap.val() || {};
+      if (!mounted) return;
+      setTopicRegistry(data);
+      setTopicRegistryLoaded(true);
+    });
+    // Kicks off the one-time migration if nothing's there yet — a no-op if
+    // it already ran (getTopicRegistry checks before writing). The .on
+    // listener above picks up the result once it's written.
+    ref.once('value').then(snap => {
+      const data = snap.val();
+      if (!data || Object.keys(data).length === 0) fns.httpsCallable('getTopicRegistry')({}).catch(() => {});
+    });
+    return () => { mounted = false; ref.off('value', cb); };
+  }, []);
+  return [topicRegistry, topicRegistryLoaded];
+}
+
+// Deterministic string templating — no AI call — turning a topic's current
+// include/exclude words into the static instruction text stored as
+// compiledPrompt. This is what "Update Prompts" bakes in; classify calls at
+// report-generation time just read the already-compiled string, they never
+// rebuild it from the raw word lists.
+function buildCompiledTopicPrompt(include, exclude) {
+  const parts = [];
+  if (include?.length) parts.push(`Count as this theme: ${include.join(', ')}.`);
+  if (exclude?.length) parts.push(`Do NOT count as this theme, even if superficially similar: ${exclude.join(', ')}.`);
+  return parts.length ? parts.join(' ') : null;
+}
 
 // Kept in sync with functions/index.js's DEFAULT_PROMPTS by hand — this copy
 // only backs the Settings prompt-editor UI (initial text + "reset" display),
@@ -1330,13 +1373,11 @@ function ConfigStep({ country, user, onGo, onBack }) {
     const s = loadLocal('selected', null);
     return s?.length ? new Set(s) : new Set(['Gaza', 'Israel']);
   });
-  // customTopics and removedDefaultTopics seed from localStorage, then get overwritten by Firebase
-  const [customTopics, setCustomTopics]         = useState(() => loadLocal('custom', []));
-  const [removedDefaultTopics, setRemovedDefaultTopics] = useState(() => new Set(loadLocal('removedDefaults', [])));
-  // Topics tagged "Context" are judged thematically by AI instead of by
-  // literal keyword — see Settings → Context Topic Analysis for how.
-  const [contextTopics, setContextTopics]       = useState(() => new Set(loadLocal('context', [])));
-  const [topicsLoaded, setTopicsLoaded]         = useState(false);
+  // The topic list itself (names, and each topic's exact/classify mode) now
+  // comes from the shared registry — see Settings → Topics to add topics or
+  // change a topic's mode/word lists. Which topics are checked for this run
+  // stays per-user (localStorage below).
+  const [topicRegistry, topicRegistryLoaded] = useTopicRegistry();
   const [summaryWords, setSummaryWords]         = useState(() => loadLocal('summaryWords', 100));
   const [maxArticles, setMaxArticles]           = useState(() => loadLocal('maxArticles', 25));
   const [mode, setMode]                         = useState(() => loadLocal('mode', 'pointintime'));
@@ -1353,41 +1394,24 @@ function ConfigStep({ country, user, onGo, onBack }) {
   const [showTopicHelp, setShowTopicHelp] = useState(false);
   const [showDateInfo, setShowDateInfo]   = useState(false);
 
-  // Topic list (custom topics, hidden defaults, context tags) is shared by
-  // everyone with access — one person adding "Anutin" means everyone sees it,
-  // instead of each user rebuilding their own list from scratch. Which topics
-  // are actually checked for this run stays per-user (see localStorage below).
-  useEffect(() => {
-    db.ref('config/topics').once('value').then(snap => {
-      const data = snap.val();
-      if (data) {
-        setCustomTopics(data.custom || []);
-        setRemovedDefaultTopics(new Set(data.removedDefaults || []));
-        setContextTopics(new Set(data.context || []));
-      }
-      setTopicsLoaded(true);
-    }).catch(() => setTopicsLoaded(true));
-  }, []);
-
-  // Sync topic list to Firebase whenever it changes (only after initial load)
-  useEffect(() => {
-    if (!topicsLoaded) return;
-    db.ref('config/topics').set({ custom: customTopics, removedDefaults: [...removedDefaultTopics], context: [...contextTopics] });
-  }, [customTopics, removedDefaultTopics, contextTopics, topicsLoaded, uid]);
-
   // Save session preferences to localStorage
   useEffect(() => {
     if (topicsKey) {
       localStorage.setItem(topicsKey, JSON.stringify({
         selected: [...selectedTopics], summaryWords, maxArticles, lookbackDays,
-        mode, periodType, periodDays, periodFrom, periodTo, periodReportWords, context: [...contextTopics]
+        mode, periodType, periodDays, periodFrom, periodTo, periodReportWords
       }));
     }
-  }, [selectedTopics, summaryWords, maxArticles, lookbackDays, mode, periodType, periodDays, periodFrom, periodTo, periodReportWords, contextTopics, topicsKey]);
+  }, [selectedTopics, summaryWords, maxArticles, lookbackDays, mode, periodType, periodDays, periodFrom, periodTo, periodReportWords, topicsKey]);
 
   function toggleTopic(t) { setSelectedTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; }); }
-  function toggleContextMode(t) { setContextTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; }); }
-  function addCustom() { const t = customInput.trim(); if (!t || customTopics.includes(t)) return; setCustomTopics(p => [...p, t]); setSelectedTopics(p => new Set([...p, t])); setCustomInput(''); }
+  function addCustom() {
+    const t = customInput.trim();
+    if (!t || topicRegistry[t]) return;
+    db.ref(`config/topicRegistry/${t}`).set({ mode: 'exact', isDefault: false });
+    setSelectedTopics(p => new Set([...p, t]));
+    setCustomInput('');
+  }
   async function removeTopic(t) {
     // Topics are shared globally now — someone else's scheduled report may
     // still depend on this exact topic name, so check before deleting out
@@ -1406,13 +1430,8 @@ function ConfigStep({ country, user, onGo, onBack }) {
     confirm({
       message: `Remove topic "${t}"?`,
       onConfirm: () => {
-        if (customTopics.includes(t)) {
-          setCustomTopics(p => p.filter(x => x !== t));
-        } else {
-          setRemovedDefaultTopics(prev => new Set([...prev, t]));
-        }
+        db.ref(`config/topicRegistry/${t}`).remove();
         setSelectedTopics(prev => { const n = new Set(prev); n.delete(t); return n; });
-        setContextTopics(prev => { const n = new Set(prev); n.delete(t); return n; });
       }
     });
   }
@@ -1427,7 +1446,7 @@ function ConfigStep({ country, user, onGo, onBack }) {
     return { startDate: periodFrom, endDate: periodTo };
   }
 
-  const allTopics = [...DEFAULT_TOPICS.filter(t => !removedDefaultTopics.has(t)), ...customTopics];
+  const allTopics = Object.keys(topicRegistry);
   const isPeriod = mode === 'period';
 
   // Drops any selected topic that no longer exists in the current global
@@ -1436,13 +1455,13 @@ function ConfigStep({ country, user, onGo, onBack }) {
   // localStorage rides along on every future submission forever, invisible
   // since no chip renders for it once it no longer matches allTopics.
   useEffect(() => {
-    if (!topicsLoaded) return;
+    if (!topicRegistryLoaded) return;
     const validSet = new Set(allTopics);
     setSelectedTopics(prev => {
       const cleaned = new Set([...prev].filter(t => validSet.has(t)));
       return cleaned.size === prev.size ? prev : cleaned;
     });
-  }, [topicsLoaded, customTopics, removedDefaultTopics]);
+  }, [topicRegistryLoaded, topicRegistry]);
 
   function WordsStepper({ label, sublabel, value, onChange, min = 30, max = 500, step = 25, unit = 'words' }) {
     const [showInfo, setShowInfo] = useState(false);
@@ -1486,13 +1505,13 @@ function ConfigStep({ country, user, onGo, onBack }) {
         {(() => {
           const renderChip = t => {
             const active = selectedTopics.has(t);
-            const isContext = contextTopics.has(t);
+            const isClassify = topicRegistry[t]?.mode === 'classify';
             return (
               <button key={t} onClick={() => toggleTopic(t)} style={{ padding: '6px 13px', borderRadius: 20, fontSize: 13, cursor: 'pointer', background: active ? '#1d4ed8' : C.card, color: active ? 'white' : C.muted, border: '1px solid ' + (active ? '#3b82f6' : C.border), transition: 'all 0.15s', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 {t}
-                <span onClick={e => { e.stopPropagation(); toggleContextMode(t); }} title={isContext ? 'Context topic — click for Exact keyword match' : 'Exact keyword match — click for Context (theme) matching'}
-                  style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3, padding: '1px 6px', borderRadius: 8, background: isContext ? '#7c3aed' : 'rgba(255,255,255,0.12)', color: isContext ? 'white' : (active ? 'rgba(255,255,255,0.8)' : C.faint) }}>
-                  {isContext ? '🧭 context' : 'exact'}
+                <span title={isClassify ? 'Classify (AI judges by theme) — change in Settings → Topics' : 'Exact keyword match — change in Settings → Topics'}
+                  style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3, padding: '1px 6px', borderRadius: 8, background: isClassify ? '#7c3aed' : 'rgba(255,255,255,0.12)', color: isClassify ? 'white' : (active ? 'rgba(255,255,255,0.8)' : C.faint) }}>
+                  {isClassify ? '🧭 classify' : 'exact'}
                 </span>
                 <span onClick={e => { e.stopPropagation(); removeTopic(t); }}
                   style={{ opacity: 0.6, fontSize: 15, lineHeight: 1, marginLeft: 2 }}>×</span>
@@ -1521,7 +1540,7 @@ function ConfigStep({ country, user, onGo, onBack }) {
             </>
           );
         })()}
-        <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>Tap a topic's "exact"/"context" tag to switch how it's matched — exact looks for the literal word, context judges by theme (costs a bit more).</div>
+        <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>Each topic's "exact"/"classify" tag shows how it's matched — exact looks for the literal word, classify judges by theme (costs a bit more). Change a topic's mode or add include/exclude words in Settings → Topics.</div>
 
         {/* Add custom topic */}
         <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
@@ -1609,7 +1628,7 @@ function ConfigStep({ country, user, onGo, onBack }) {
               unit={lookbackDays === 1 ? 'day' : 'days'}
             />
 
-            <button onClick={() => onGo({ mode: 'pointintime', topics: [...selectedTopics], contextTopics: [...selectedTopics].filter(t => contextTopics.has(t)), date, summaryWords, maxArticles, lookbackDays })}
+            <button onClick={() => onGo({ mode: 'pointintime', topics: [...selectedTopics], contextTopics: [...selectedTopics].filter(t => topicRegistry[t]?.mode === 'classify'), date, summaryWords, maxArticles, lookbackDays })}
               disabled={selectedTopics.size === 0}
               style={{ ...BTN('#2563eb'), width: '100%', padding: '12px', fontSize: 15, opacity: selectedTopics.size === 0 ? 0.4 : 1 }}>
               → Select Sources
@@ -2683,6 +2702,97 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
     setContextModeSaving(false);
   }
 
+  // Topics — the shared registry backing both the point-in-time picker and
+  // every schedule. useTopicRegistry live-subscribes, so this section never
+  // shows stale data even if another tab edits a topic while it's open.
+  const [topicRegistry, topicRegistryLoaded] = useTopicRegistry();
+  const [topicsOpen, setTopicsOpen] = useState(false);
+  const [newTopicName, setNewTopicName] = useState('');
+  const [newTopicMode, setNewTopicMode] = useState('exact');
+  const [expandedTopic, setExpandedTopic] = useState(null);
+  const [topicWordInput, setTopicWordInput] = useState({ include: '', exclude: '' });
+  const [topicBusy, setTopicBusy] = useState('');
+  const [topicMsg, setTopicMsg] = useState('');
+
+  async function addTopic() {
+    const name = newTopicName.trim();
+    if (!name || topicRegistry[name]) return;
+    await db.ref(`config/topicRegistry/${name}`).set({ mode: newTopicMode, isDefault: false });
+    setNewTopicName('');
+    setNewTopicMode('exact');
+  }
+
+  async function setTopicModeValue(name, mode) {
+    await db.ref(`config/topicRegistry/${name}`).update({ mode });
+  }
+
+  async function deleteTopic(name) {
+    let inUse;
+    try {
+      const resp = await fns.httpsCallable('checkTopicInUse')({ topic: name });
+      inUse = resp.data;
+    } catch (e) {
+      alert('Could not check if this topic is in use: ' + e.message);
+      return;
+    }
+    if (inUse?.inUse) {
+      const list = inUse.usedBy.map(u => `${u.country} (${u.createdByEmail})`).join(', ');
+      alert(`Can't remove "${name}" — it's still used by: ${list}. Remove it from ${inUse.usedBy.length > 1 ? 'those schedules' : 'that schedule'} first.`);
+      return;
+    }
+    confirm({
+      message: `Remove topic "${name}"?`,
+      onConfirm: async () => {
+        setTopicBusy(name);
+        await db.ref(`config/topicRegistry/${name}`).remove();
+        if (expandedTopic === name) setExpandedTopic(null);
+        setTopicBusy('');
+      }
+    });
+  }
+
+  // Include/exclude words write straight to the registry as they're edited
+  // (same immediate-write convention the rest of this shared list already
+  // uses) — "Update Prompts" is the deliberate, separate step that bakes
+  // whatever's currently saved here into the static compiledPrompt.
+  function addWord(name, kind) {
+    const w = topicWordInput[kind].trim();
+    if (!w) return;
+    const current = topicRegistry[name]?.[kind] || [];
+    if (!current.includes(w)) {
+      db.ref(`config/topicRegistry/${name}`).update({ [kind]: [...current, w], wordsUpdatedAt: new Date().toISOString() });
+    }
+    setTopicWordInput(prev => ({ ...prev, [kind]: '' }));
+  }
+  function removeWord(name, kind, w) {
+    const current = topicRegistry[name]?.[kind] || [];
+    db.ref(`config/topicRegistry/${name}`).update({ [kind]: current.filter(x => x !== w), wordsUpdatedAt: new Date().toISOString() });
+  }
+
+  async function suggestWords(name) {
+    setTopicBusy(name);
+    try {
+      const resp = await fns.httpsCallable('suggestTopicWords')({ topic: name });
+      const current = topicRegistry[name] || {};
+      const include = [...new Set([...(current.include || []), ...(resp.data.include || [])])];
+      const exclude = [...new Set([...(current.exclude || []), ...(resp.data.exclude || [])])];
+      await db.ref(`config/topicRegistry/${name}`).update({ include, exclude, wordsUpdatedAt: new Date().toISOString() });
+    } catch (e) {
+      alert('Could not get suggestions: ' + e.message);
+    }
+    setTopicBusy('');
+  }
+
+  async function compilePrompt(name) {
+    setTopicBusy(name);
+    const entry = topicRegistry[name] || {};
+    const compiledPrompt = buildCompiledTopicPrompt(entry.include, entry.exclude);
+    await db.ref(`config/topicRegistry/${name}`).update({ compiledPrompt, compiledAt: new Date().toISOString() });
+    setTopicBusy('');
+    setTopicMsg(`✓ Prompt updated for "${name}"`);
+    setTimeout(() => setTopicMsg(''), 2500);
+  }
+
   const [promptsOpen, setPromptsOpen] = useState(false);
   const [promptsLoading, setPromptsLoading] = useState(false);
   const [setupPrompt, setSetupPrompt] = useState('');
@@ -3229,7 +3339,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <span style={{ fontSize: 16 }}>🧭</span>
               <div style={{ textAlign: 'left' }}>
-                <div style={{ fontWeight: 700, fontSize: 13 }}>Context Topic Analysis</div>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>Classify Topic Analysis</div>
                 <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>How "Context" topics (themes, not keywords) get matched — applies app-wide</div>
               </div>
             </div>
@@ -3243,7 +3353,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
               ) : (
                 <>
                   <div style={{ fontSize: 12, color: C.faint, marginBottom: 12, lineHeight: 1.6 }}>
-                    A topic like "Israel" is a word a keyword check can find. A topic like "internal politics" is a theme — no keyword check will ever match it, since an article can be about that theme without containing those words. Topics marked "Context" are judged by the AI instead of by keyword, using whichever mode is selected below.
+                    A topic like "Israel" is a word a keyword check can find. A topic like "internal politics" is a theme — no keyword check will ever match it, since an article can be about that theme without containing those words. Topics marked "Classify" are judged by the AI instead of by keyword, using whichever mode is selected below.
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     <button onClick={() => saveContextMode('header')} disabled={!isAdmin || contextModeSaving}
@@ -3259,6 +3369,120 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
                   </div>
                   {!isAdmin && <div style={{ fontSize: 11, color: C.faint, marginTop: 10 }}>Only an admin can change this — you're seeing the current setting.</div>}
                   {contextModeSaving && <div style={{ display: 'flex', justifyContent: 'center', marginTop: 10 }}><Spinner size={14} /></div>}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Topics */}
+        <div style={{ marginBottom: 28 }}>
+          <button
+            onClick={() => setTopicsOpen(o => !o)}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: '12px 14px', background: topicsOpen ? C.card : '#0f1e35', border: '1px solid ' + (topicsOpen ? C.borderLight : C.border), borderRadius: 9, cursor: 'pointer', color: C.text }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 16 }}>🏷️</span>
+              <div style={{ textAlign: 'left' }}>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>Topics</div>
+                <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>Shared list used by every schedule and the point-in-time picker — mode, and include/exclude words for Classify topics</div>
+              </div>
+            </div>
+            <span style={{ color: C.faint, fontSize: 12 }}>{topicsOpen ? '▲ Hide' : '▼ Show'}</span>
+          </button>
+
+          {topicsOpen && (
+            <div style={{ marginTop: 12, padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border }}>
+              {!topicRegistryLoaded ? (
+                <div style={{ display: 'flex', justifyContent: 'center', padding: 20 }}><Spinner /></div>
+              ) : (
+                <>
+                  <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+                    <input className="input-field" placeholder="Add a topic…" value={newTopicName}
+                      onChange={e => setNewTopicName(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && addTopic()}
+                      style={{ flex: 1, fontSize: 13 }} />
+                    <select value={newTopicMode} onChange={e => setNewTopicMode(e.target.value)} className="input-field" style={{ fontSize: 13, width: 110 }}>
+                      <option value="exact">Exact</option>
+                      <option value="classify">Classify</option>
+                    </select>
+                    <button onClick={addTopic} disabled={!newTopicName.trim()} style={{ ...SMALL_BTN, opacity: !newTopicName.trim() ? 0.4 : 1 }}>+ Add</button>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {Object.keys(topicRegistry).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })).map(name => {
+                      const t = topicRegistry[name] || {};
+                      const isClassify = t.mode === 'classify';
+                      const isExpanded = expandedTopic === name;
+                      const stale = isClassify && t.wordsUpdatedAt && (!t.compiledAt || t.wordsUpdatedAt > t.compiledAt);
+                      return (
+                        <div key={name} style={{ border: '1px solid ' + C.border, borderRadius: 8, overflow: 'hidden' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: '#0f1e35', flexWrap: 'wrap' }}>
+                            <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: C.text, minWidth: 100 }}>
+                              {name}{t.isDefault && <span style={{ color: C.faint, fontWeight: 400 }}> (default)</span>}
+                            </div>
+                            <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid ' + C.border }}>
+                              {['exact', 'classify'].map(m => (
+                                <button key={m} onClick={() => setTopicModeValue(name, m)}
+                                  style={{ padding: '3px 9px', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', border: 'none', cursor: 'pointer', background: t.mode === m ? (m === 'classify' ? '#7c3aed' : '#1d4ed8') : 'transparent', color: t.mode === m ? 'white' : C.faint }}>
+                                  {m === 'classify' ? '🧭 classify' : 'exact'}
+                                </button>
+                              ))}
+                            </div>
+                            {isClassify && (
+                              <button onClick={() => setExpandedTopic(isExpanded ? null : name)} style={{ ...SMALL_BTN, fontSize: 11, padding: '4px 10px' }}>
+                                {isExpanded ? '▲ Hide words' : '▾ Words'}
+                              </button>
+                            )}
+                            <button onClick={() => deleteTopic(name)} disabled={topicBusy === name}
+                              style={{ ...SMALL_BTN, fontSize: 11, padding: '4px 8px', color: '#f87171', borderColor: '#7f1d1d' }}>🗑</button>
+                          </div>
+
+                          {isClassify && isExpanded && (
+                            <div style={{ padding: 12, borderTop: '1px solid ' + C.border }}>
+                              {['include', 'exclude'].map(kind => (
+                                <div key={kind} style={{ marginBottom: 10 }}>
+                                  <label style={{ display: 'block', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4, color: kind === 'include' ? '#4ade80' : '#f87171', marginBottom: 4 }}>
+                                    {kind === 'include' ? 'Include' : 'Exclude'}
+                                  </label>
+                                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 6 }}>
+                                    {(t[kind] || []).map(w => (
+                                      <span key={w} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, padding: '3px 8px', borderRadius: 12, background: C.bg, border: '1px solid ' + C.border, color: C.muted }}>
+                                        {w}
+                                        <span onClick={() => removeWord(name, kind, w)} style={{ cursor: 'pointer', opacity: 0.6 }}>×</span>
+                                      </span>
+                                    ))}
+                                    {(t[kind] || []).length === 0 && <span style={{ fontSize: 11, color: C.faint }}>None yet</span>}
+                                  </div>
+                                  <div style={{ display: 'flex', gap: 6 }}>
+                                    <input className="input-field" placeholder={kind === 'include' ? 'e.g. parliament, election' : 'e.g. foreign ministry'} value={topicWordInput[kind]}
+                                      onChange={e => setTopicWordInput(prev => ({ ...prev, [kind]: e.target.value }))}
+                                      onKeyDown={e => e.key === 'Enter' && addWord(name, kind)}
+                                      style={{ flex: 1, fontSize: 12 }} />
+                                    <button onClick={() => addWord(name, kind)} disabled={!topicWordInput[kind].trim()} style={{ ...SMALL_BTN, fontSize: 11, opacity: !topicWordInput[kind].trim() ? 0.4 : 1 }}>+ Add</button>
+                                  </div>
+                                </div>
+                              ))}
+
+                              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4, flexWrap: 'wrap' }}>
+                                <button onClick={() => suggestWords(name)} disabled={topicBusy === name} style={{ ...SMALL_BTN, fontSize: 12 }}>
+                                  {topicBusy === name ? <><Spinner size={10} />&nbsp;Working…</> : '✨ Suggest words'}
+                                </button>
+                                <button onClick={() => compilePrompt(name)} disabled={topicBusy === name} style={{ ...BTN('#2563eb'), fontSize: 12, padding: '6px 14px' }}>
+                                  Update Prompts
+                                </button>
+                                {t.compiledAt && (
+                                  <span style={{ fontSize: 10, color: C.faint }}>Last compiled {new Date(t.compiledAt).toLocaleString()}</span>
+                                )}
+                                {stale && <span style={{ fontSize: 10, color: '#fb923c' }}>⚠ words changed since last compile</span>}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {topicMsg && <div style={{ fontSize: 12, color: '#4ade80', marginTop: 10 }}>{topicMsg}</div>}
                 </>
               )}
             </div>
@@ -3440,18 +3664,27 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
 // collecting each source's feed, rather than checking it once at report time.
 const WEEKDAY_OPTIONS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
 
-// Renders each parsed topic as a small chip toggling Exact/Context matching
-// — shared by the create and edit forms in ScheduledReportsPanel below.
-function TopicModeChips({ topics, contextSet, onToggle }) {
-  if (topics.length === 0) return null;
+// Lets a schedule pick which shared registry topics apply to it. Mode
+// (exact/classify) is read-only here — it's now one setting per topic,
+// managed centrally in Settings → Topics, not overridable per schedule.
+// Shared by the create and edit forms in ScheduledReportsPanel below.
+function TopicPicker({ registry, selected, onToggle }) {
+  const names = Object.keys(registry).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  if (names.length === 0) {
+    return <div style={{ fontSize: 11, color: C.faint, marginBottom: 10 }}>No topics yet — add one in Settings → Topics.</div>;
+  }
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10, marginTop: -4 }}>
-      {topics.map(t => {
-        const isContext = contextSet.has(t);
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+      {names.map(t => {
+        const active = selected.has(t);
+        const isClassify = registry[t]?.mode === 'classify';
         return (
           <button key={t} onClick={() => onToggle(t)} type="button"
-            style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3, padding: '2px 8px', borderRadius: 10, border: 'none', cursor: 'pointer', background: isContext ? '#7c3aed' : 'rgba(255,255,255,0.1)', color: isContext ? 'white' : C.faint }}>
-            {t}: {isContext ? '🧭 context' : 'exact'}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, padding: '4px 10px', borderRadius: 14, cursor: 'pointer', background: active ? '#1d4ed8' : C.card, color: active ? 'white' : C.muted, border: '1px solid ' + (active ? '#3b82f6' : C.border) }}>
+            {t}
+            <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3, padding: '1px 5px', borderRadius: 8, background: isClassify ? '#7c3aed' : 'rgba(255,255,255,0.15)', color: isClassify ? 'white' : (active ? 'rgba(255,255,255,0.8)' : C.faint) }}>
+              {isClassify ? '🧭 classify' : 'exact'}
+            </span>
           </button>
         );
       })}
@@ -3780,10 +4013,10 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [loading, setLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
 
+  const [topicRegistry] = useTopicRegistry();
   const [newCountryKey, setNewCountryKey] = useState('');
   const [newSourceIds, setNewSourceIds] = useState(new Set());
-  const [newTopics, setNewTopics] = useState('');
-  const [newContextTopics, setNewContextTopics] = useState(new Set());
+  const [newSelectedTopics, setNewSelectedTopics] = useState(new Set());
   const [newSearchScope, setNewSearchScope] = useState('global');
   const [newWeeklyDay, setNewWeeklyDay] = useState('monday');
   const [newHourUtc, setNewHourUtc] = useState(6);
@@ -3830,8 +4063,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   // setup (find-by-name, AI "add more" with filters, remove) instead of a
   // plain dropdown limited to already-verified, not-yet-used sources.
   const [editingId, setEditingId] = useState(null);
-  const [editTopics, setEditTopics] = useState('');
-  const [editContextTopics, setEditContextTopics] = useState(new Set());
+  const [editSelectedTopics, setEditSelectedTopics] = useState(new Set());
   const [editSearchScope, setEditSearchScope] = useState('global');
   const [editWeeklyDay, setEditWeeklyDay] = useState('monday');
   const [editHourUtc, setEditHourUtc] = useState(6);
@@ -3871,8 +4103,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
 
   function startEdit(s) {
     setEditingId(s.id);
-    setEditTopics(s.topics.join(', '));
-    setEditContextTopics(new Set(s.contextTopics || []));
+    setEditSelectedTopics(new Set(s.topics || []));
     setEditSearchScope(s.searchScope === 'domestic' ? 'domestic' : 'global');
     setEditWeeklyDay(s.weeklyDay || 'monday');
     setEditHourUtc(s.hourUtc);
@@ -3888,16 +4119,12 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditingId(null);
   }
 
-  function editTopicsArray() {
-    return editTopics.split(',').map(t => t.trim()).filter(Boolean);
-  }
-
   async function saveEdit(schedule) {
-    const topics = editTopicsArray();
+    const topics = [...editSelectedTopics];
     if (topics.length === 0) { alert('At least one topic is required.'); return; }
     if (editSelected.size === 0) { alert('At least one source is required.'); return; }
     const fields = {
-      topics, contextTopics: topics.filter(t => editContextTopics.has(t)), searchScope: editSearchScope,
+      topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: editSearchScope,
       weeklyDay: editWeeklyDay, hourUtc: editHourUtc, weeklySummaryWords: editWeeklySummaryWords,
       sendDailyEmail: editSendDailyEmail, sendWeeklyEmail: editSendWeeklyEmail,
       emailRecipients: editEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean),
@@ -3937,18 +4164,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEstimate(null);
   }
 
-  function topicsArray() {
-    return newTopics.split(',').map(t => t.trim()).filter(Boolean);
-  }
-
   async function handleEstimate() {
-    const topics = topicsArray();
+    const topics = [...newSelectedTopics];
     if (newSourceIds.size === 0 || topics.length === 0) return;
     setEstimating(true);
     try {
       const aiSettings = await getAISettings(uid);
       const resp = await fns.httpsCallable('estimateScheduleCost')({
-        sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => newContextTopics.has(t)),
+        sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'),
         ...aiSettings
       });
       setEstimate(resp.data);
@@ -3959,21 +4182,21 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   }
 
   async function handleCreate() {
-    const topics = topicsArray();
+    const topics = [...newSelectedTopics];
     if (!selectedCountry || newSourceIds.size === 0 || topics.length === 0) return;
     setCreating(true);
     setCreateMsg('');
     try {
       await fns.httpsCallable('createSchedule')({
         country: selectedCountry.country, countryKey: selectedCountry.countryKey,
-        sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => newContextTopics.has(t)), searchScope: newSearchScope,
+        sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: newSearchScope,
         weeklyDay: newWeeklyDay, hourUtc: newHourUtc, weeklySummaryWords: newWeeklySummaryWords,
         sendDailyEmail: newSendDailyEmail, sendWeeklyEmail: newSendWeeklyEmail,
         emailRecipients: newEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean)
       });
       setCreateMsg('✓ Schedule created');
       setShowCreate(false);
-      setNewCountryKey(''); setNewSourceIds(new Set()); setNewTopics(''); setNewContextTopics(new Set()); setNewSearchScope('global'); setEstimate(null);
+      setNewCountryKey(''); setNewSourceIds(new Set()); setNewSelectedTopics(new Set()); setNewSearchScope('global'); setEstimate(null);
       setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipients(''); setNewWeeklySummaryWords(300);
       await loadSchedules();
     } catch (e) {
@@ -4244,11 +4467,10 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
 
                   {editingId === s.id ? (
                     <div style={{ marginTop: 10, padding: 12, background: '#0a1626', borderRadius: 7, border: '1px solid ' + C.border }}>
-                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Topics (comma-separated)</label>
-                      <input className="input-field" value={editTopics} onChange={e => setEditTopics(e.target.value)}
-                        placeholder="Israel, Gaza" style={{ fontSize: 13, marginBottom: 6, width: '100%' }} />
-                      <TopicModeChips topics={editTopicsArray()} contextSet={editContextTopics}
-                        onToggle={t => setEditContextTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; })} />
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Topics</label>
+                      <TopicPicker registry={topicRegistry} selected={editSelectedTopics}
+                        onToggle={t => setEditSelectedTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; })} />
+                      <div style={{ fontSize: 10, color: C.faint, marginTop: -6, marginBottom: 10 }}>Need a new topic, or want to change one's mode/word lists? Settings → Topics.</div>
                       <SearchScopeToggle value={editSearchScope} onChange={setEditSearchScope} />
 
                       <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
@@ -4441,11 +4663,10 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                     </>
                   )}
 
-                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Topics (comma-separated)</label>
-                  <input className="input-field" value={newTopics} onChange={e => { setNewTopics(e.target.value); setEstimate(null); }}
-                    placeholder="Israel, Gaza" style={{ fontSize: 13, marginBottom: 6, width: '100%' }} />
-                  <TopicModeChips topics={topicsArray()} contextSet={newContextTopics}
-                    onToggle={t => { setNewContextTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; }); setEstimate(null); }} />
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Topics</label>
+                  <TopicPicker registry={topicRegistry} selected={newSelectedTopics}
+                    onToggle={t => { setNewSelectedTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; }); setEstimate(null); }} />
+                  <div style={{ fontSize: 10, color: C.faint, marginTop: -6, marginBottom: 10 }}>Need a new topic, or want to change one's mode/word lists? Settings → Topics.</div>
                   <SearchScopeToggle value={newSearchScope} onChange={setNewSearchScope} />
 
                   <div style={{ fontSize: 11, color: C.faint, marginBottom: 10 }}>
@@ -4491,7 +4712,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   </div>
 
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
-                    <button onClick={handleEstimate} disabled={estimating || newSourceIds.size === 0 || topicsArray().length === 0} style={{ ...SMALL_BTN, fontSize: 12 }}>
+                    <button onClick={handleEstimate} disabled={estimating || newSourceIds.size === 0 || newSelectedTopics.size === 0} style={{ ...SMALL_BTN, fontSize: 12 }}>
                       {estimating ? <><Spinner size={10} />&nbsp;Estimating…</> : '💰 Estimate Cost'}
                     </button>
                     {estimate && !estimate.error && (
@@ -4505,8 +4726,8 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
 
                   <div style={{ display: 'flex', gap: 8 }}>
                     <button onClick={() => { setShowCreate(false); setCreateMsg(''); }} style={{ ...SMALL_BTN, fontSize: 13 }}>Cancel</button>
-                    <button onClick={handleCreate} disabled={creating || !selectedCountry || newSourceIds.size === 0 || topicsArray().length === 0}
-                      style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px', flex: 1, opacity: (creating || !selectedCountry || newSourceIds.size === 0 || topicsArray().length === 0) ? 0.5 : 1 }}>
+                    <button onClick={handleCreate} disabled={creating || !selectedCountry || newSourceIds.size === 0 || newSelectedTopics.size === 0}
+                      style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px', flex: 1, opacity: (creating || !selectedCountry || newSourceIds.size === 0 || newSelectedTopics.size === 0) ? 0.5 : 1 }}>
                       {creating ? <><Spinner size={10} />&nbsp;Creating…</> : 'Create Schedule'}
                     </button>
                   </div>

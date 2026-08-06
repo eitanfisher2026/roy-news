@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.11';
+const VERSION = 'v3.12';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -371,6 +371,36 @@ function ConfirmDialog({ title = 'Are you sure?', message, confirmLabel = 'Delet
         <div style={{ display: 'flex', gap: 8 }}>
           <button onClick={onCancel} style={{ ...SMALL_BTN, flex: 1 }}>{cancelLabel}</button>
           <button onClick={onConfirm} style={{ ...BTN(danger ? '#b91c1c' : '#2563eb'), flex: 1, fontSize: 13, padding: '9px 14px' }}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Checklist popup for a topic's AI-suggested include words — the user picks
+// which ones actually apply rather than having them merged in blind. Used
+// only by SettingsPage's Topics section.
+function SuggestIncludeModal({ topic, words, checked, onToggle, onConfirm, onCancel }) {
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+      onClick={onCancel}>
+      <div className="panel" style={{ maxWidth: 400, width: '100%', padding: 20 }} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: C.text, marginBottom: 4 }}>Suggested include words</div>
+        <div style={{ fontSize: 12, color: C.faint, marginBottom: 14 }}>for "{topic}" — uncheck any you don't want, then add the rest.</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18, maxHeight: 280, overflowY: 'auto' }}>
+          {words.map(w => (
+            <label key={w} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: C.text, cursor: 'pointer' }}>
+              <input type="checkbox" checked={checked.has(w)} onChange={() => onToggle(w)} />
+              {w}
+            </label>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={onCancel} style={{ ...SMALL_BTN, flex: 1 }}>Cancel</button>
+          <button onClick={onConfirm} disabled={checked.size === 0}
+            style={{ ...BTN('#2563eb'), flex: 1, fontSize: 13, padding: '9px 14px', opacity: checked.size === 0 ? 0.5 : 1 }}>
+            Add {checked.size} word{checked.size === 1 ? '' : 's'}
+          </button>
         </div>
       </div>
     </div>
@@ -2769,18 +2799,40 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
     db.ref(`config/topicRegistry/${name}`).update({ [kind]: current.filter(x => x !== w), wordsUpdatedAt: new Date().toISOString() });
   }
 
-  async function suggestWords(name) {
+  const [suggestModal, setSuggestModal] = useState(null); // { topic, words, checked }
+
+  async function openSuggestModal(name) {
     setTopicBusy(name);
     try {
       const resp = await fns.httpsCallable('suggestTopicWords')({ topic: name });
-      const current = topicRegistry[name] || {};
-      const include = [...new Set([...(current.include || []), ...(resp.data.include || [])])];
-      const exclude = [...new Set([...(current.exclude || []), ...(resp.data.exclude || [])])];
-      await db.ref(`config/topicRegistry/${name}`).update({ include, exclude, wordsUpdatedAt: new Date().toISOString() });
+      const current = topicRegistry[name]?.include || [];
+      const words = (resp.data.include || []).filter(w => !current.includes(w));
+      if (words.length === 0) {
+        alert('No new suggestions right now — try adding a few words yourself first, or try again shortly.');
+      } else {
+        setSuggestModal({ topic: name, words, checked: new Set(words) });
+      }
     } catch (e) {
       alert('Could not get suggestions: ' + e.message);
     }
     setTopicBusy('');
+  }
+
+  function toggleSuggestWord(w) {
+    setSuggestModal(prev => {
+      const checked = new Set(prev.checked);
+      checked.has(w) ? checked.delete(w) : checked.add(w);
+      return { ...prev, checked };
+    });
+  }
+
+  async function confirmSuggestModal() {
+    const { topic, checked } = suggestModal;
+    const current = topicRegistry[topic]?.include || [];
+    const toAdd = [...checked].filter(w => !current.includes(w));
+    setSuggestModal(null);
+    if (toAdd.length === 0) return;
+    await db.ref(`config/topicRegistry/${topic}`).update({ include: [...current, ...toAdd], wordsUpdatedAt: new Date().toISOString() });
   }
 
   async function compilePrompt(name) {
@@ -3465,8 +3517,8 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
                               ))}
 
                               <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4, flexWrap: 'wrap' }}>
-                                <button onClick={() => suggestWords(name)} disabled={topicBusy === name} style={{ ...SMALL_BTN, fontSize: 12 }}>
-                                  {topicBusy === name ? <><Spinner size={10} />&nbsp;Working…</> : '✨ Suggest words'}
+                                <button onClick={() => openSuggestModal(name)} disabled={topicBusy === name} style={{ ...SMALL_BTN, fontSize: 12 }}>
+                                  {topicBusy === name ? <><Spinner size={10} />&nbsp;Working…</> : '💡 Suggested include words'}
                                 </button>
                                 <button onClick={() => compilePrompt(name)} disabled={topicBusy === name} style={{ ...BTN('#2563eb'), fontSize: 12, padding: '6px 14px' }}>
                                   Update Prompts
@@ -3654,6 +3706,10 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
         </div>
       </div>
       {confirmDialog}
+      {suggestModal && (
+        <SuggestIncludeModal topic={suggestModal.topic} words={suggestModal.words} checked={suggestModal.checked}
+          onToggle={toggleSuggestWord} onConfirm={confirmSuggestModal} onCancel={() => setSuggestModal(null)} />
+      )}
     </div>
   );
 }

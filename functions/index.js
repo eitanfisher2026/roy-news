@@ -2543,8 +2543,12 @@ exports.getTopicRegistry = onCall(
   }
 );
 
-// Cheap, user-triggered, one-shot AI call — never automatic — suggesting a
-// starting include/exclude word list for a classify-mode topic. Deliberately
+// Cheap, user-triggered, one-shot AI call — never automatic — suggesting
+// candidate include words for a classify-mode topic, which the user picks
+// from via a checklist rather than having them merged in automatically.
+// Include-only: exclude words work best when they come from a specific
+// false-positive the user actually saw in a report, not a generic guess, so
+// there's no AI suggestion for those — manual entry only. Deliberately
 // country/politician-agnostic (the registry is global, shared across every
 // country) so the suggestion stays useful regardless of which schedule ends
 // up using it.
@@ -2557,18 +2561,15 @@ exports.suggestTopicWords = onCall(
     const ai = makeAI(request.data);
     const prompt = `You're helping define what counts as the news theme "${topic}" for a classifier that reads one article at a time and must decide whether it genuinely belongs to this theme — this will be used across many different countries, so stay structural and generic, not tied to any specific country, politician, or current event.
 
-Suggest two short word/phrase lists:
-1. "include": 5-8 concrete signals that indicate an article genuinely belongs to this theme.
-2. "exclude": 5-8 signals of coverage that looks related but should NOT count — the commonly-confused adjacent topics that cause false positives.
+Suggest 6-10 short words/phrases: concrete signals that indicate an article genuinely belongs to this theme.
 
-Return ONLY valid JSON, no markdown, no explanation: { "include": ["...", ...], "exclude": ["...", ...] }`;
+Return ONLY valid JSON, no markdown, no explanation: { "include": ["...", ...] }`;
 
-    const { text, usage } = await callAI(ai, prompt, 400);
+    const { text, usage } = await callAI(ai, prompt, 250);
     if (usage) await persistCost(request.auth.uid, request.auth.token.email, ai, calcCostUsd(ai, usage.input_tokens || 0, usage.output_tokens || 0));
     const parsed = extractJson(text, '{') || {};
     return {
-      include: Array.isArray(parsed.include) ? parsed.include.filter(w => typeof w === 'string') : [],
-      exclude: Array.isArray(parsed.exclude) ? parsed.exclude.filter(w => typeof w === 'string') : []
+      include: Array.isArray(parsed.include) ? parsed.include.filter(w => typeof w === 'string') : []
     };
   }
 );

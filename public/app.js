@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.17';
+const VERSION = 'v3.18';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1400,8 +1400,12 @@ function ConfigStep({ country, user, onGo, onBack }) {
   }
 
   const [selectedTopics, setSelectedTopics] = useState(() => {
+    // s?.length would treat a deliberately-emptied selection ([]) the same
+    // as "never saved anything" and silently reset to the Gaza/Israel
+    // default — checking for null specifically is what actually
+    // distinguishes "no saved preference yet" from "saved as empty".
     const s = loadLocal('selected', null);
-    return s?.length ? new Set(s) : new Set(['Gaza', 'Israel']);
+    return s !== null ? new Set(s) : new Set(['Gaza', 'Israel']);
   });
   // The topic list itself (names, and each topic's exact/classify mode) now
   // comes from the shared registry — see Settings → Topics to add topics or

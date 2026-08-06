@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.13';
+const VERSION = 'v3.14';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2744,6 +2744,19 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
   const [topicWordInput, setTopicWordInput] = useState({ include: '', exclude: '' });
   const [topicBusy, setTopicBusy] = useState('');
   const [topicMsg, setTopicMsg] = useState('');
+  // Which schedules use each topic — loaded once per Topics-tab open (one
+  // scan of all schedules), not per topic, so every row can show a usage
+  // badge up front instead of only finding out when you try to delete.
+  const [topicUsage, setTopicUsage] = useState({});
+  const [topicUsageLoaded, setTopicUsageLoaded] = useState(false);
+
+  async function loadTopicUsage() {
+    try {
+      const resp = await fns.httpsCallable('getAllTopicUsage')({});
+      setTopicUsage(resp.data.usage || {});
+    } catch {}
+    setTopicUsageLoaded(true);
+  }
 
   async function addTopic() {
     const name = newTopicName.trim();
@@ -3254,6 +3267,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
 
         {/* AI Provider */}
         {settingsTab === 'general' && (
+        <>
         <div style={{ marginBottom: 28 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 14, textTransform: 'uppercase', letterSpacing: 0.5 }}>AI Provider</div>
           <div style={{ fontSize: 12, color: C.faint, marginBottom: 14, lineHeight: 1.6 }}>
@@ -3398,10 +3412,12 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
             Android: use Chrome or Edge browser
           </div>
         </div>
+        </>
         )}
 
         {/* Context Topic Analysis */}
         {settingsTab === 'topics' && (
+        <>
         <div style={{ marginBottom: 28 }}>
           <button
             onClick={() => { setContextModeOpen(o => { if (!o) loadContextMode(); return !o; }); }}
@@ -3449,7 +3465,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
         {/* Topics */}
         <div style={{ marginBottom: 28 }}>
           <button
-            onClick={() => setTopicsOpen(o => !o)}
+            onClick={() => { setTopicsOpen(o => { if (!o && !topicUsageLoaded) loadTopicUsage(); return !o; }); }}
             style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: '12px 14px', background: topicsOpen ? C.card : '#0f1e35', border: '1px solid ' + (topicsOpen ? C.borderLight : C.border), borderRadius: 9, cursor: 'pointer', color: C.text }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -3479,6 +3495,9 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
                     </select>
                     <button onClick={addTopic} disabled={!newTopicName.trim()} style={{ ...SMALL_BTN, opacity: !newTopicName.trim() ? 0.4 : 1 }}>+ Add</button>
                   </div>
+                  <div style={{ fontSize: 10, color: C.faint, marginTop: -8, marginBottom: 12 }}>
+                    The badge on each topic counts scheduled reports using it — every topic here is always available in the point-in-time picker, so that side has nothing to count.
+                  </div>
 
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {Object.keys(topicRegistry).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })).map(name => {
@@ -3486,12 +3505,25 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
                       const isClassify = t.mode === 'classify';
                       const isExpanded = expandedTopic === name;
                       const stale = isClassify && t.wordsUpdatedAt && (!t.compiledAt || t.wordsUpdatedAt > t.compiledAt);
+                      const usedBy = topicUsage[name.toLowerCase()] || [];
                       return (
                         <div key={name} style={{ border: '1px solid ' + C.border, borderRadius: 8, overflow: 'hidden' }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: '#0f1e35', flexWrap: 'wrap' }}>
                             <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: C.text, minWidth: 100 }}>
                               {name}{t.isDefault && <span style={{ color: C.faint, fontWeight: 400 }}> (default)</span>}
                             </div>
+                            {topicUsageLoaded && (
+                              usedBy.length > 0 ? (
+                                <span title={usedBy.map(u => `${u.country} (${u.createdByEmail})`).join(', ')}
+                                  style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 8, background: 'rgba(74,222,128,0.15)', color: '#4ade80', border: '1px solid rgba(74,222,128,0.3)' }}>
+                                  ✓ {usedBy.length} schedule{usedBy.length === 1 ? '' : 's'}
+                                </span>
+                              ) : (
+                                <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 8, color: C.faint, border: '1px solid ' + C.border }}>
+                                  unused
+                                </span>
+                              )
+                            )}
                             <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid ' + C.border }}>
                               {['exact', 'classify'].map(m => (
                                 <button key={m} onClick={() => setTopicModeValue(name, m)}
@@ -3559,10 +3591,12 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
             </div>
           )}
         </div>
+        </>
         )}
 
         {/* Prompt Templates */}
         {settingsTab === 'general' && (
+        <>
         <div style={{ marginBottom: 28 }}>
           <button
             onClick={() => { setPromptsOpen(o => { if (!o) loadPrompts(); return !o; }); }}
@@ -3725,6 +3759,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
             })
           }
         </div>
+        </>
         )}
       </div>
       {confirmDialog}

@@ -2493,6 +2493,26 @@ exports.checkTopicInUse = onCall(
   }
 );
 
+// Same idea as checkTopicInUse but for every topic at once — one scan of
+// `schedules` instead of one call per topic, so the Topics settings list can
+// show a usage badge on every row without a round trip per row.
+exports.getAllTopicUsage = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const snap = await db.ref('schedules').once('value');
+    const schedules = Object.values(snap.val() || {});
+    const usage = {};
+    for (const s of schedules) {
+      for (const t of (s.topics || [])) {
+        const key = t.toLowerCase();
+        (usage[key] = usage[key] || []).push({ country: s.country, createdByEmail: s.createdByEmail });
+      }
+    }
+    return { usage };
+  }
+);
+
 // Mirrors DEFAULT_TOPICS in public/app.js — kept as a separate copy here
 // (rather than passed in from the client) so migration doesn't depend on
 // trusting client input for what "default" means.

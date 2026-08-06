@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.16';
+const VERSION = 'v3.17';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2829,7 +2829,8 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
   async function openSuggestModal(name) {
     setTopicBusy(name);
     try {
-      const resp = await fns.httpsCallable('suggestTopicWords')({ topic: name });
+      const aiSettings = await getAISettings(user?.uid);
+      const resp = await fns.httpsCallable('suggestTopicWords')({ topic: name, ...aiSettings });
       const current = topicRegistry[name]?.include || [];
       const words = (resp.data.include || []).filter(w => !hasWordCI(current, w));
       if (words.length === 0) {

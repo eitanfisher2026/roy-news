@@ -2201,6 +2201,44 @@ Weekly summary:`;
   return { text: (text || '').trim(), usage };
 }
 
+// On-demand only — a daily run never gets a summary automatically, unlike
+// weekly (see aggregateWeeklyFromDailyRuns below, unchanged). Deliberately a
+// separate function from generateWeeklySummary rather than a shared/
+// parameterized one, so touching this can never risk altering weekly's
+// prompt or behavior. Same extractive rules: summary text only ever drawn
+// from this run's own collected articles, nothing else.
+const DAILY_SUMMARY_WORDS = 120;
+async function generateDailySummary(schedule, run, ai) {
+  const lines = [];
+  for (const d of (run.days || [])) {
+    for (const s of (d.sources || [])) {
+      for (const a of (s.articles || [])) {
+        lines.push(`[${s.sourceName}] ${a.title} — ${a.text}`);
+      }
+    }
+  }
+  if (lines.length === 0) return null;
+
+  const prompt = `You are compiling a factual daily news digest for ${titleCase(schedule.country)} on ${run.dateLabel}, covering these topics: ${(schedule.topics || []).join(', ')}.
+
+Below is every article's headline and text collected today, across all sources.
+
+RULES — follow exactly:
+1. Use ONLY the information in the articles below. Do NOT add outside knowledge, historical background, speculation, or your own analysis — every sentence must be directly supported by the article text.
+2. Do not mention "the articles" or "sources" — write a plain factual account of what was reported.
+3. Plain prose only — no markdown, no headers, no bullet points.
+4. Write approximately ${DAILY_SUMMARY_WORDS} words.
+
+Articles:
+${lines.join('\n')}
+
+Daily summary:`;
+
+  const maxTokens = Math.min(2000, Math.round(DAILY_SUMMARY_WORDS * 2.2) + 300);
+  const { text, usage } = await callAI(ai, prompt, maxTokens);
+  return { text: (text || '').trim(), usage };
+}
+
 // Builds a weekly digest purely from already-generated daily reportRuns — no
 // archive re-scan, no re-matching. This is what makes "weekly" cheap (it used
 // to independently re-process 7 pooled days, which duplicated whatever the
@@ -2437,7 +2475,7 @@ exports.sendReportEmailNow = onCall(
   { timeoutSeconds: 60, memory: '256MiB', region: 'us-central1', secrets: [gmailAppPassword] },
   async (request) => {
     await requireAuthorized(request);
-    const { scheduleId, type } = request.data || {};
+    const { scheduleId, type, includeSummary } = request.data || {};
     if (!scheduleId || !['daily', 'weekly'].includes(type)) {
       throw new HttpsError('invalid-argument', 'scheduleId and type ("daily" or "weekly") required');
     }
@@ -2450,10 +2488,12 @@ exports.sendReportEmailNow = onCall(
     }
 
     const runsSnap = await db.ref(`reportRuns/${scheduleId}`).once('value');
-    const runs = Object.values(runsSnap.val() || {});
-    let run = runs
-      .filter(r => (r.runType || 'daily') === type && r.status === 'ok')
-      .sort((a, b) => (b.periodEnd || '').localeCompare(a.periodEnd || ''))[0];
+    const runEntries = Object.entries(runsSnap.val() || {});
+    const match = runEntries
+      .filter(([, r]) => (r.runType || 'daily') === type && r.status === 'ok')
+      .sort((a, b) => (b[1].periodEnd || '').localeCompare(a[1].periodEnd || ''))[0];
+    let runId = match ? match[0] : null;
+    let run = match ? match[1] : null;
 
     if (!run && type === 'weekly') {
       const periodEnd = yesterdayUTC();
@@ -2463,13 +2503,38 @@ exports.sendReportEmailNow = onCall(
       if (built.days.length === 0) {
         throw new HttpsError('failed-precondition', 'No daily report history yet to build a weekly digest from.');
       }
-      await db.ref(`reportRuns/${scheduleId}`).push(built);
+      const pushRef = await db.ref(`reportRuns/${scheduleId}`).push(built);
+      runId = pushRef.key;
       run = built;
     }
 
     if (!run) throw new HttpsError('failed-precondition', `No ${type} report exists yet for this schedule.`);
 
-    await sendReportEmail(schedule, run);
+    // The checkbox controls whether THIS email includes a summary,
+    // independent of whether the run happens to have one cached — weekly
+    // runs almost always do (generated automatically), daily ones usually
+    // don't (only if "Summarize" was used on this report before). Checked
+    // with none cached yet: generate one now and persist it to the run, same
+    // as the in-app "Summarize" button, so it's there next time too.
+    // Unchecked with one already cached: leave the stored run alone, just
+    // don't put it in this particular email.
+    let emailRun = run;
+    if (includeSummary) {
+      if (!run.summary && runId) {
+        const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
+        const ai = makeAI(aiSettingsSnap.val() || {});
+        const result = await generateDailySummary(schedule, run, ai);
+        if (result) {
+          if (result.usage) await persistCost(schedule.createdBy, schedule.createdByEmail, ai, calcCostUsd(ai, result.usage.input_tokens || 0, result.usage.output_tokens || 0));
+          await db.ref(`reportRuns/${scheduleId}/${runId}`).update({ summary: result.text });
+          emailRun = { ...run, summary: result.text };
+        }
+      }
+    } else if (run.summary) {
+      emailRun = { ...run, summary: null };
+    }
+
+    await sendReportEmail(schedule, emailRun);
     return { ok: true, dateLabel: run.dateLabel };
   }
 );
@@ -2778,6 +2843,36 @@ exports.getReportRun = onCall(
     const run = snap.val();
     if (!run) throw new HttpsError('not-found', 'Report run not found');
     return { run };
+  }
+);
+
+// On-demand summary for one daily report run — never runs automatically.
+// Caches the result on the run itself (same field weekly always populates at
+// generation time), so re-opening or re-sending the same report never pays
+// for a second AI call.
+exports.summarizeReportRun = onCall(
+  { timeoutSeconds: 60, memory: '256MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { scheduleId, runId } = request.data || {};
+    if (!scheduleId || !runId) throw new HttpsError('invalid-argument', 'scheduleId and runId required');
+    const scheduleSnap = await db.ref(`schedules/${scheduleId}`).once('value');
+    const schedule = scheduleSnap.val();
+    if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
+    requireScheduleAccess(schedule, request.auth.uid, 'write');
+
+    const runRef = db.ref(`reportRuns/${scheduleId}/${runId}`);
+    const runSnap = await runRef.once('value');
+    const run = runSnap.val();
+    if (!run) throw new HttpsError('not-found', 'Report run not found');
+    if (run.summary) return { summary: run.summary };
+
+    const ai = makeAI(request.data);
+    const result = await generateDailySummary(schedule, run, ai);
+    if (!result) return { summary: null };
+    if (result.usage) await persistCost(request.auth.uid, request.auth.token.email, ai, calcCostUsd(ai, result.usage.input_tokens || 0, result.usage.output_tokens || 0));
+    await runRef.update({ summary: result.text });
+    return { summary: result.text };
   }
 );
 

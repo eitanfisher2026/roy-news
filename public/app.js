@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.18';
+const VERSION = 'v3.19';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3904,7 +3904,7 @@ function buildRawShareText(country, dateLabel, run) {
 // The new per-day, no-AI-summary report — raw RSS text (translated where
 // needed), grouped by day → topic → source, matching daily's and weekly's
 // shared structure.
-function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClose }) {
+function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClose, user, scheduleId, runId, onSummaryGenerated }) {
   const [isHebrew, setIsHebrew] = useState(false);
   const [hebrewRun, setHebrewRun] = useState(null);
   const [translating, setTranslating] = useState(false);
@@ -3912,10 +3912,33 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
   const [shareCopied, setShareCopied] = useState(false);
   const [resultCopied, setResultCopied] = useState(false);
   const [showTranslateInfo, setShowTranslateInfo] = useState(false);
+  const [summarizing, setSummarizing] = useState(false);
 
   const displayRun = isHebrew && hebrewRun ? hebrewRun : run;
   const displayDays = displayRun.days || [];
   const isMultiDay = displayDays.length > 1;
+
+  // Weekly already gets a summary automatically at generation time (see
+  // aggregateWeeklyFromDailyRuns server-side) — this on-demand button only
+  // makes sense for daily, which never generates one on its own.
+  const canSummarize = (run.runType || 'daily') !== 'weekly' && !run.summary;
+
+  async function handleSummarize() {
+    setSummarizing(true);
+    try {
+      const aiSettings = await getAISettings(user?.uid);
+      const resp = await fns.httpsCallable('summarizeReportRun')({ scheduleId, runId, ...aiSettings });
+      if (resp.data.summary) {
+        setHebrewRun(null); // stale — was built before the summary existed
+        onSummaryGenerated?.(resp.data.summary);
+      } else {
+        alert('No articles in this report to summarize.');
+      }
+    } catch (e) {
+      alert('Could not generate summary: ' + e.message);
+    }
+    setSummarizing(false);
+  }
 
   async function handleTranslate() {
     if (isHebrew) { setIsHebrew(false); return; }
@@ -3978,6 +4001,11 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
       </div>
 
       <div className="no-print" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+        {canSummarize && (
+          <button onClick={handleSummarize} disabled={summarizing} style={SMALL_BTN}>
+            {summarizing ? <><Spinner size={12} />&nbsp;Summarizing…</> : '✨ Summarize'}
+          </button>
+        )}
         <button onClick={handleTranslate} disabled={translating}
           style={{ ...SMALL_BTN, background: isHebrew ? '#1e3a5f' : C.card, borderColor: isHebrew ? '#3b82f6' : C.border, fontWeight: isHebrew ? 700 : 400, minWidth: 130 }}>
           {translating
@@ -4177,6 +4205,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [viewingRunLoadingId, setViewingRunLoadingId] = useState(null); // runId currently being opened
   const [busyId, setBusyId] = useState(null);
   const [sendingNowId, setSendingNowId] = useState(null); // `${scheduleId}:${type}` currently sending
+  const [includeSummaryByScheduleId, setIncludeSummaryByScheduleId] = useState({}); // scheduleId -> bool
   const [sendNowMsg, setSendNowMsg] = useState({}); // scheduleId -> status message
 
   const [sourcesExpandedId, setSourcesExpandedId] = useState(null);
@@ -4364,7 +4393,8 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setSendingNowId(key);
     setSendNowMsg(prev => ({ ...prev, [schedule.id]: '' }));
     try {
-      const resp = await fns.httpsCallable('sendReportEmailNow')({ scheduleId: schedule.id, type });
+      const includeSummary = !!includeSummaryByScheduleId[schedule.id];
+      const resp = await fns.httpsCallable('sendReportEmailNow')({ scheduleId: schedule.id, type, includeSummary });
       setSendNowMsg(prev => ({ ...prev, [schedule.id]: `✓ Sent ${type} report (${formatDateLabelDMY(resp.data.dateLabel)}) to ${(schedule.emailRecipients || []).join(', ')}` }));
     } catch (e) {
       setSendNowMsg(prev => ({ ...prev, [schedule.id]: '⚠ ' + e.message }));
@@ -4719,7 +4749,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   )}
 
                   {s.access !== 'read' && (
-                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 6 }}>
                       <button onClick={() => handleSendNow(s, 'daily')} disabled={sendingNowId === `${s.id}:daily`}
                         title="Send whatever the latest daily report contains, right now — a way to test delivery"
                         style={{ ...SMALL_BTN, fontSize: 10, padding: '4px 8px' }}>
@@ -4730,6 +4760,12 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                         style={{ ...SMALL_BTN, fontSize: 10, padding: '4px 8px' }}>
                         {sendingNowId === `${s.id}:weekly` ? <><Spinner size={9} />&nbsp;Sending…</> : '📧 Send Now · Weekly'}
                       </button>
+                      <label title="Daily: generates a summary now if this report doesn't have one yet. Weekly already has one automatically — this just decides whether to include it in this email."
+                        style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.faint, cursor: 'pointer' }}>
+                        <input type="checkbox" checked={!!includeSummaryByScheduleId[s.id]}
+                          onChange={e => setIncludeSummaryByScheduleId(prev => ({ ...prev, [s.id]: e.target.checked }))} />
+                        Include summary
+                      </label>
                     </div>
                   )}
                   {sendNowMsg[s.id] && (
@@ -4886,6 +4922,17 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
             scheduleCountry={schedules.find(s => s.id === viewingRun.scheduleId)?.country || ''}
             dateLabel={viewingRun.run.dateLabel}
             run={viewingRun.run}
+            user={user}
+            scheduleId={viewingRun.scheduleId}
+            runId={viewingRun.runId}
+            onSummaryGenerated={summary => {
+              setViewingRun(prev => prev ? { ...prev, run: { ...prev.run, summary } } : prev);
+              setRunsByScheduleId(prev => {
+                const list = prev[viewingRun.scheduleId];
+                if (!list) return prev;
+                return { ...prev, [viewingRun.scheduleId]: list.map(r => r.runId === viewingRun.runId ? { ...r, summary } : r) };
+              });
+            }}
             onDelete={() => handleDeleteRun(viewingRun.scheduleId, viewingRun.runId, viewingRun.run.dateLabel)}
             onClose={() => setViewingRun(null)}
           />

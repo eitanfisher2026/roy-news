@@ -2207,7 +2207,6 @@ Weekly summary:`;
 // parameterized one, so touching this can never risk altering weekly's
 // prompt or behavior. Same extractive rules: summary text only ever drawn
 // from this run's own collected articles, nothing else.
-const DAILY_SUMMARY_WORDS = 120;
 async function generateDailySummary(schedule, run, ai) {
   const lines = [];
   for (const d of (run.days || [])) {
@@ -2219,6 +2218,7 @@ async function generateDailySummary(schedule, run, ai) {
   }
   if (lines.length === 0) return null;
 
+  const wordCount = clampDailySummaryWords(schedule.dailySummaryWords);
   const prompt = `You are compiling a factual daily news digest for ${titleCase(schedule.country)} on ${run.dateLabel}, covering these topics: ${(schedule.topics || []).join(', ')}.
 
 Below is every article's headline and text collected today, across all sources.
@@ -2227,14 +2227,14 @@ RULES — follow exactly:
 1. Use ONLY the information in the articles below. Do NOT add outside knowledge, historical background, speculation, or your own analysis — every sentence must be directly supported by the article text.
 2. Do not mention "the articles" or "sources" — write a plain factual account of what was reported.
 3. Plain prose only — no markdown, no headers, no bullet points.
-4. Write approximately ${DAILY_SUMMARY_WORDS} words.
+4. Write approximately ${wordCount} words.
 
 Articles:
 ${lines.join('\n')}
 
 Daily summary:`;
 
-  const maxTokens = Math.min(2000, Math.round(DAILY_SUMMARY_WORDS * 2.2) + 300);
+  const maxTokens = Math.min(2000, Math.round(wordCount * 2.2) + 300);
   const { text, usage } = await callAI(ai, prompt, maxTokens);
   return { text: (text || '').trim(), usage };
 }
@@ -2385,9 +2385,11 @@ function sanitizeEmailList(list) {
   return out;
 }
 
-function clampWeeklySummaryWords(v) {
-  return Math.min(Math.max(parseInt(v) || 300, 50), 1000);
+function clampSummaryWords(v, fallback) {
+  return Math.min(Math.max(parseInt(v) || fallback, 50), 1000);
 }
+function clampWeeklySummaryWords(v) { return clampSummaryWords(v, 400); }
+function clampDailySummaryWords(v) { return clampSummaryWords(v, 200); }
 
 exports.createSchedule = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
@@ -2402,12 +2404,13 @@ exports.createSchedule = onCall(
     if (!WEEKDAYS.includes(weeklyDay)) throw new HttpsError('invalid-argument', 'valid weeklyDay required');
     const hour = Math.min(Math.max(parseInt(hourUtc) || 0, 0), 23);
     const weeklySummaryWords = clampWeeklySummaryWords(request.data?.weeklySummaryWords);
+    const dailySummaryWords = clampDailySummaryWords(request.data?.dailySummaryWords);
     const searchScope = request.data?.searchScope === 'domestic' ? 'domestic' : 'global';
 
     const ref = db.ref('schedules').push();
     const schedule = {
       id: ref.key, country, countryKey, sourceIds, topics, contextTopics, searchScope,
-      weeklyDay, hourUtc: hour, weeklySummaryWords,
+      weeklyDay, hourUtc: hour, weeklySummaryWords, dailySummaryWords,
       sendDailyEmail: !!sendDailyEmail, sendWeeklyEmail: !!sendWeeklyEmail, emailRecipients,
       enabled: true,
       createdBy: request.auth.uid, createdByEmail: request.auth.token.email || null,
@@ -2433,8 +2436,9 @@ exports.updateSchedule = onCall(
     requireScheduleAccess(schedule, request.auth.uid, 'write');
     if (updates.emailRecipients !== undefined) updates.emailRecipients = sanitizeEmailList(updates.emailRecipients);
     if (updates.weeklySummaryWords !== undefined) updates.weeklySummaryWords = clampWeeklySummaryWords(updates.weeklySummaryWords);
+    if (updates.dailySummaryWords !== undefined) updates.dailySummaryWords = clampDailySummaryWords(updates.dailySummaryWords);
     if (updates.searchScope !== undefined) updates.searchScope = updates.searchScope === 'domestic' ? 'domestic' : 'global';
-    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'weeklySummaryWords', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope'];
+    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
     if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');

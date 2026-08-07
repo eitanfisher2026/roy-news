@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.19';
+const VERSION = 'v3.20';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -4187,7 +4187,8 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [newSearchScope, setNewSearchScope] = useState('global');
   const [newWeeklyDay, setNewWeeklyDay] = useState('monday');
   const [newHourUtc, setNewHourUtc] = useState(6);
-  const [newWeeklySummaryWords, setNewWeeklySummaryWords] = useState(300);
+  const [newWeeklySummaryWords, setNewWeeklySummaryWords] = useState(400);
+  const [newDailySummaryWords, setNewDailySummaryWords] = useState(200);
   const [newSendDailyEmail, setNewSendDailyEmail] = useState(false);
   const [newSendWeeklyEmail, setNewSendWeeklyEmail] = useState(false);
   const [newEmailRecipients, setNewEmailRecipients] = useState('');
@@ -4235,7 +4236,8 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [editSearchScope, setEditSearchScope] = useState('global');
   const [editWeeklyDay, setEditWeeklyDay] = useState('monday');
   const [editHourUtc, setEditHourUtc] = useState(6);
-  const [editWeeklySummaryWords, setEditWeeklySummaryWords] = useState(300);
+  const [editWeeklySummaryWords, setEditWeeklySummaryWords] = useState(400);
+  const [editDailySummaryWords, setEditDailySummaryWords] = useState(200);
   const [editSendDailyEmail, setEditSendDailyEmail] = useState(false);
   const [editSendWeeklyEmail, setEditSendWeeklyEmail] = useState(false);
   const [editEmailRecipients, setEditEmailRecipients] = useState('');
@@ -4275,7 +4277,8 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditSearchScope(s.searchScope === 'domestic' ? 'domestic' : 'global');
     setEditWeeklyDay(s.weeklyDay || 'monday');
     setEditHourUtc(s.hourUtc);
-    setEditWeeklySummaryWords(s.weeklySummaryWords || 300);
+    setEditWeeklySummaryWords(s.weeklySummaryWords || 400);
+    setEditDailySummaryWords(s.dailySummaryWords || 200);
     setEditSendDailyEmail(!!s.sendDailyEmail);
     setEditSendWeeklyEmail(!!s.sendWeeklyEmail);
     setEditEmailRecipients((s.emailRecipients || []).join(', '));
@@ -4293,7 +4296,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     if (editSelected.size === 0) { alert('At least one source is required.'); return; }
     const fields = {
       topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: editSearchScope,
-      weeklyDay: editWeeklyDay, hourUtc: editHourUtc, weeklySummaryWords: editWeeklySummaryWords,
+      weeklyDay: editWeeklyDay, hourUtc: editHourUtc, weeklySummaryWords: editWeeklySummaryWords, dailySummaryWords: editDailySummaryWords,
       sendDailyEmail: editSendDailyEmail, sendWeeklyEmail: editSendWeeklyEmail,
       emailRecipients: editEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean),
       sourceIds: [...editSelected]
@@ -4358,14 +4361,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       await fns.httpsCallable('createSchedule')({
         country: selectedCountry.country, countryKey: selectedCountry.countryKey,
         sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: newSearchScope,
-        weeklyDay: newWeeklyDay, hourUtc: newHourUtc, weeklySummaryWords: newWeeklySummaryWords,
+        weeklyDay: newWeeklyDay, hourUtc: newHourUtc, weeklySummaryWords: newWeeklySummaryWords, dailySummaryWords: newDailySummaryWords,
         sendDailyEmail: newSendDailyEmail, sendWeeklyEmail: newSendWeeklyEmail,
         emailRecipients: newEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean)
       });
       setCreateMsg('✓ Schedule created');
       setShowCreate(false);
       setNewCountryKey(''); setNewSourceIds(new Set()); setNewSelectedTopics(new Set()); setNewSearchScope('global'); setEstimate(null);
-      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipients(''); setNewWeeklySummaryWords(300);
+      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipients(''); setNewWeeklySummaryWords(400); setNewDailySummaryWords(200);
       await loadSchedules();
     } catch (e) {
       setCreateMsg('⚠ ' + e.message);
@@ -4642,23 +4645,29 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                       <div style={{ fontSize: 10, color: C.faint, marginTop: -6, marginBottom: 10 }}>Need a new topic, or want to change one's mode/word lists? Settings → Topics.</div>
                       <SearchScopeToggle value={editSearchScope} onChange={setEditSearchScope} />
 
-                      <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
-                        <div style={{ flex: 1 }}>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
+                        <div style={{ flex: 1, minWidth: 130 }}>
                           <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly digest day</label>
                           <select value={editWeeklyDay} onChange={e => setEditWeeklyDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%' }}>
                             {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
                           </select>
                         </div>
-                        <div style={{ flex: 1 }}>
+                        <div style={{ flex: 1, minWidth: 110 }}>
                           <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Run time (UTC)</label>
                           <select value={editHourUtc} onChange={e => setEditHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
                             {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
                           </select>
                         </div>
-                        <div style={{ flex: 1 }}>
+                        <div style={{ flex: 1, minWidth: 140 }}>
+                          <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily summary (words)</label>
+                          <input type="number" min="50" max="1000" value={editDailySummaryWords}
+                            onChange={e => setEditDailySummaryWords(parseInt(e.target.value) || 200)}
+                            className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 140 }}>
                           <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly summary (words)</label>
                           <input type="number" min="50" max="1000" value={editWeeklySummaryWords}
-                            onChange={e => setEditWeeklySummaryWords(parseInt(e.target.value) || 300)}
+                            onChange={e => setEditWeeklySummaryWords(parseInt(e.target.value) || 400)}
                             className="input-field" style={{ fontSize: 13, width: '100%' }} />
                         </div>
                       </div>
@@ -4848,23 +4857,29 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                     Every schedule archives and builds a daily report automatically. A weekly digest — the same days bundled together — also builds on the day below.
                   </div>
 
-                  <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
-                    <div style={{ flex: 1 }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
+                    <div style={{ flex: 1, minWidth: 130 }}>
                       <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly digest day</label>
                       <select value={newWeeklyDay} onChange={e => setNewWeeklyDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%' }}>
                         {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
                       </select>
                     </div>
-                    <div style={{ flex: 1 }}>
+                    <div style={{ flex: 1, minWidth: 110 }}>
                       <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Run time (UTC)</label>
                       <select value={newHourUtc} onChange={e => setNewHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
                         {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
                       </select>
                     </div>
-                    <div style={{ flex: 1 }}>
+                    <div style={{ flex: 1, minWidth: 140 }}>
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily summary (words)</label>
+                      <input type="number" min="50" max="1000" value={newDailySummaryWords}
+                        onChange={e => setNewDailySummaryWords(parseInt(e.target.value) || 200)}
+                        className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 140 }}>
                       <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly summary (words)</label>
                       <input type="number" min="50" max="1000" value={newWeeklySummaryWords}
-                        onChange={e => setNewWeeklySummaryWords(parseInt(e.target.value) || 300)}
+                        onChange={e => setNewWeeklySummaryWords(parseInt(e.target.value) || 400)}
                         className="input-field" style={{ fontSize: 13, width: '100%' }} />
                     </div>
                   </div>

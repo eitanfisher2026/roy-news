@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.21';
+const VERSION = 'v3.22';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3806,22 +3806,42 @@ function TopicPicker({ registry, selected, onToggle }) {
   if (names.length === 0) {
     return <div style={{ fontSize: 11, color: C.faint, marginBottom: 10 }}>No topics yet — add one in Settings → Topics.</div>;
   }
+  const isActive = t => [...selected].some(s => s.toLowerCase() === t.toLowerCase());
+  const renderChip = t => {
+    const active = isActive(t);
+    const isClassify = registry[t]?.mode === 'classify';
+    return (
+      <button key={t} onClick={() => onToggle(t)} type="button"
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, padding: '4px 10px', borderRadius: 14, cursor: 'pointer', background: active ? '#1d4ed8' : C.card, color: active ? 'white' : C.muted, border: '1px solid ' + (active ? '#3b82f6' : C.border) }}>
+        {t}
+        <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3, padding: '1px 5px', borderRadius: 8, background: isClassify ? '#7c3aed' : 'rgba(255,255,255,0.15)', color: isClassify ? 'white' : (active ? 'rgba(255,255,255,0.8)' : C.faint) }}>
+          {isClassify ? '🧭 classify' : 'exact'}
+        </span>
+      </button>
+    );
+  };
+  // Selected topics pulled into their own section up top, same pattern as
+  // the point-in-time picker — so they don't get lost among every other
+  // topic in the shared list.
+  const selectedList = names.filter(isActive);
+  const unselectedList = names.filter(t => !isActive(t));
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
-      {names.map(t => {
-        const active = [...selected].some(s => s.toLowerCase() === t.toLowerCase());
-        const isClassify = registry[t]?.mode === 'classify';
-        return (
-          <button key={t} onClick={() => onToggle(t)} type="button"
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, padding: '4px 10px', borderRadius: 14, cursor: 'pointer', background: active ? '#1d4ed8' : C.card, color: active ? 'white' : C.muted, border: '1px solid ' + (active ? '#3b82f6' : C.border) }}>
-            {t}
-            <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3, padding: '1px 5px', borderRadius: 8, background: isClassify ? '#7c3aed' : 'rgba(255,255,255,0.15)', color: isClassify ? 'white' : (active ? 'rgba(255,255,255,0.8)' : C.faint) }}>
-              {isClassify ? '🧭 classify' : 'exact'}
-            </span>
-          </button>
-        );
-      })}
-    </div>
+    <>
+      {selectedList.length > 0 && (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 10, color: '#60a5fa', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
+            Selected ({selectedList.length})
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{selectedList.map(renderChip)}</div>
+        </div>
+      )}
+      {selectedList.length > 0 && unselectedList.length > 0 && (
+        <div style={{ fontSize: 10, color: C.faint, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>
+          All topics
+        </div>
+      )}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>{unselectedList.map(renderChip)}</div>
+    </>
   );
 }
 
@@ -4572,12 +4592,16 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                         <div style={{ fontSize: 12, color: C.muted, marginTop: 3, lineHeight: 1.4 }}>{s.reportTitle}</div>
                       )}
                     </div>
-                    <div style={{ display: 'flex', gap: 4, flexShrink: 0, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 120 }}>
-                      {s.access !== 'read' && (
+                    <div style={{ display: 'flex', gap: 4, flexShrink: 0, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 200 }}>
+                      {s.access !== 'read' ? (
                         <button onClick={() => toggleEnabled(s)} disabled={busyId === s.id}
                           style={{ ...SMALL_BTN, color: s.enabled ? '#4ade80' : C.faint, borderColor: s.enabled ? '#14532d' : C.border, fontSize: 10, padding: '5px 8px' }}>
                           {s.enabled ? '● On' : '○ Off'}
                         </button>
+                      ) : (
+                        <span title="Read-only — can't change" style={{ fontSize: 10, padding: '5px 8px', borderRadius: 6, border: '1px solid ' + (s.enabled ? '#14532d' : C.border), color: s.enabled ? '#4ade80' : C.faint }}>
+                          {s.enabled ? '● On' : '○ Off'}
+                        </span>
                       )}
                       {s.access !== 'read' && (
                         <button onClick={() => editingId === s.id ? cancelEdit() : startEdit(s)} disabled={busyId === s.id}
@@ -4593,7 +4617,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                       )}
                       {s.access !== 'read' && (
                         <button onClick={() => handleDelete(s)} disabled={busyId === s.id}
-                          style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 18, padding: '0 2px', opacity: 0.7 }}>×</button>
+                          style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d', fontSize: 10, padding: '5px 8px' }}>
+                          🗑 Delete Report
+                        </button>
                       )}
                     </div>
                   </div>

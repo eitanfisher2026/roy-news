@@ -1077,10 +1077,15 @@ async function sendReportEmail(schedule, run) {
     // schedule that hasn't set one, so subjects still stay distinct enough
     // to avoid the Gmail-threading collision this used to guard against.
     const titlePart = (schedule.reportTitle || '').trim() || scheduleShortTopicLabel(schedule) || titleCase(schedule.country);
+    // Leading U+200E (left-to-right mark) — invisible, but stops Gmail's
+    // Hebrew-locale UI from bidi-reordering the "dd/Mon" date prefix when it
+    // renders the opened-message subject line (mobile/list views already
+    // rendered it fine; only that one RTL-paragraph area needed the hint).
+    const subject = `‎${formatEmailDateRange(run)} ${titlePart}`;
     await transporter.sendMail({
       from: `Roy News <${OWNER_EMAIL}>`,
       to: recipients.join(', '),
-      subject: `${formatEmailDateRange(run)} ${titlePart}`,
+      subject,
       text: buildRawReportText(schedule, run),
       html: buildReportHtml(schedule, run)
     });

@@ -902,6 +902,19 @@ function formatLongDateLabel(dayStr) {
   const d = new Date(dayStr + 'T00:00:00Z');
   return `${WEEKDAY_NAMES[d.getUTCDay()]}, ${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCDate()}`;
 }
+// dd/Mon, e.g. "08/Aug" — used in the email subject, kept short deliberately
+// so it doesn't eat into the inbox-list space the report title needs.
+function formatShortDate(dayStr) {
+  const d = new Date(dayStr + 'T00:00:00Z');
+  return `${String(d.getUTCDate()).padStart(2, '0')}/${MONTH_NAMES[d.getUTCMonth()].slice(0, 3)}`;
+}
+// Daily: one short date. Weekly: dd/Mon-dd/Mon range across the period.
+function formatEmailDateRange(run) {
+  if (run.runType === 'weekly' && run.periodStart && run.periodEnd) {
+    return `${formatShortDate(run.periodStart)}-${formatShortDate(run.periodEnd)}`;
+  }
+  return formatShortDate(run.periodEnd || run.dateLabel);
+}
 function titleCase(str) {
   return String(str || '').replace(/\b\w/g, c => c.toUpperCase());
 }
@@ -911,13 +924,17 @@ function titleCase(str) {
 // only earn their place when a report actually spans more than one day.
 // Topics are informative only — listed once up top, not used to group
 // articles — so the body groups directly by source, alphabetically.
+// Weekly shows the summary only, never the underlying day-by-day articles —
+// those still get collected internally (the summary is extracted from them),
+// just never surfaced on their own for a weekly report.
 function buildRawReportText(schedule, run) {
-  const days = run.days || [];
+  const days = run.runType === 'weekly' ? [] : (run.days || []);
   const isMultiDay = days.length > 1;
   const topics = run.topics || schedule.topics || [];
   let text = `${titleCase(schedule.country)}\n`;
   if (topics.length > 0) text += `Topics: ${topics.join(', ')}\n`;
   if (run.summary) text += `\nSummary\n${run.summary}\n`;
+  else if (run.runType === 'weekly') text += `\nNo coverage this period.\n`;
   text += '\n';
   for (const d of days) {
     if (isMultiDay) text += `Day: ${formatDayLabel(d.day)}\n`;
@@ -943,20 +960,27 @@ function escapeHtml(str) {
 // only — one line in the header — so the body groups directly by source,
 // alphabetically, instead of by topic.
 function buildReportHtml(schedule, run) {
-  const days = run.days || [];
-  const kind = run.runType === 'weekly' ? 'Weekly' : 'Daily';
+  const isWeekly = run.runType === 'weekly';
+  const days = isWeekly ? [] : (run.days || []);
+  const kind = isWeekly ? 'Weekly' : 'Daily';
   const isMultiDay = days.length > 1;
-  const dateHeader = isMultiDay
-    ? `${formatLongDateLabel(days[0].day)} – ${formatLongDateLabel(days[days.length - 1].day)}`
-    : (days[0] ? formatLongDateLabel(days[0].day) : '');
+  const dateHeader = isWeekly && run.periodStart && run.periodEnd
+    ? `${formatLongDateLabel(run.periodStart)} – ${formatLongDateLabel(run.periodEnd)}`
+    : isMultiDay
+      ? `${formatLongDateLabel(days[0].day)} – ${formatLongDateLabel(days[days.length - 1].day)}`
+      : (days[0] ? formatLongDateLabel(days[0].day) : (run.periodEnd ? formatLongDateLabel(run.periodEnd) : ''));
   const topics = run.topics || schedule.topics || [];
 
   const sans = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
-  const summaryHtml = run.summary ? `
+  // Weekly shows only the summary (no trailing rule when there's no article
+  // listing to separate it from) — daily keeps both, unchanged.
+  const summaryHtml = run.summary
+    ? `
           <p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 10px;font-family:${sans};">Summary</p>
-          <p style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0 0 22px;font-family:${sans};">${escapeHtml(run.summary)}</p>
-          <hr style="border:none;border-top:1px solid #e7e5e0;margin:0 0 22px;">` : '';
+          <p style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0 0 ${days.length > 0 ? '22px' : '0'};font-family:${sans};">${escapeHtml(run.summary)}</p>
+          ${days.length > 0 ? '<hr style="border:none;border-top:1px solid #e7e5e0;margin:0 0 22px;">' : ''}`
+    : (isWeekly ? `<p style="font-size:14.5px;color:#90949c;font-family:${sans};">No coverage this period.</p>` : '');
 
   let body = '';
   days.forEach((d, di) => {
@@ -1048,12 +1072,15 @@ async function sendReportEmail(schedule, run) {
       service: 'gmail',
       auth: { user: OWNER_EMAIL, pass: gmailAppPassword.value() }
     });
-    const kind = run.runType === 'weekly' ? 'Weekly' : 'Daily';
-    const topicLabel = scheduleShortTopicLabel(schedule);
+    // reportTitle is the user-set identity for this schedule's emails now —
+    // falls back to the old topic-based label (or just the country) for any
+    // schedule that hasn't set one, so subjects still stay distinct enough
+    // to avoid the Gmail-threading collision this used to guard against.
+    const titlePart = (schedule.reportTitle || '').trim() || scheduleShortTopicLabel(schedule) || titleCase(schedule.country);
     await transporter.sendMail({
       from: `Roy News <${OWNER_EMAIL}>`,
       to: recipients.join(', '),
-      subject: `Roy News — ${titleCase(schedule.country)}${topicLabel ? ': ' + topicLabel : ''} ${kind} Report (${run.dateLabel})`,
+      subject: `${formatEmailDateRange(run)} ${titlePart}`,
       text: buildRawReportText(schedule, run),
       html: buildReportHtml(schedule, run)
     });
@@ -2315,39 +2342,62 @@ exports.generateScheduledReports = onSchedule(
     const sharedSourceKeys = new Set([...sourceUsageCount.entries()].filter(([, count]) => count > 1).map(([key]) => key));
 
     for (const [scheduleId, schedule] of Object.entries(schedules)) {
-      if (!schedule.enabled || now.getUTCHours() !== schedule.hourUtc) continue;
+      if (!schedule.enabled) continue;
+      const periodEnd = yesterdayUTC();
+      // Falls back to the shared hourUtc for schedules saved before daily and
+      // weekly got independent times.
+      const dailyHour = schedule.dailyHourUtc ?? schedule.hourUtc;
 
       // ── Daily generation — always, regardless of whether daily email is
       // on. This is the base layer: it's what lets a broken feed show up
-      // in-app within a day instead of staying silent for a week. ──
-      const periodEnd = yesterdayUTC();
-      // Already produced today's daily report — guards against a double-fire
-      // within the same due hour, not a real recurrence.
-      const dailyAlreadyDone = schedule.lastRunStatus === 'ok' && schedule.lastPeriodEnd === periodEnd;
-      if (!dailyAlreadyDone) {
-        const runRef = db.ref(`reportRuns/${scheduleId}`).push();
-        try {
-          const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
-          const ai = makeAI(aiSettingsSnap.val() || {});
-          const { run, pendingDeletions } = await generateDailyReportRun(scheduleId, schedule, ai, contextMode, now, sharedSourceKeys);
-          await runRef.set(run);
-          await db.ref(`schedules/${scheduleId}`).update({ lastRunAt: now.toISOString(), lastRunStatus: 'ok', lastPeriodEnd: periodEnd });
-          if (Object.keys(pendingDeletions).length > 0) {
-            try { await db.ref().update(pendingDeletions); } catch {}
+      // in-app within a day instead of staying silent for a week. Runs at
+      // its own hour (dailyHourUtc), independent from weekly's (hourUtc). ──
+      if (now.getUTCHours() === dailyHour) {
+        // Already produced today's daily report — guards against a double-fire
+        // within the same due hour, not a real recurrence.
+        const dailyAlreadyDone = schedule.lastRunStatus === 'ok' && schedule.lastPeriodEnd === periodEnd;
+        if (!dailyAlreadyDone) {
+          const runRef = db.ref(`reportRuns/${scheduleId}`).push();
+          try {
+            const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
+            const ai = makeAI(aiSettingsSnap.val() || {});
+            const { run, pendingDeletions } = await generateDailyReportRun(scheduleId, schedule, ai, contextMode, now, sharedSourceKeys);
+            // Daily always gets a summary now, same as weekly already does —
+            // a failed summary must never fail the report itself, the
+            // per-source article listing is still useful without it.
+            try {
+              const result = await generateDailySummary(schedule, run, ai);
+              if (result) {
+                run.summary = result.text;
+                const summaryCostUsd = calcCostUsd(ai, result.usage?.input_tokens || 0, result.usage?.output_tokens || 0);
+                run.costUsd = (run.costUsd || 0) + summaryCostUsd;
+                run.inputTokens = (run.inputTokens || 0) + (result.usage?.input_tokens || 0);
+                run.outputTokens = (run.outputTokens || 0) + (result.usage?.output_tokens || 0);
+                await persistCost(schedule.createdBy, schedule.createdByEmail, ai, summaryCostUsd);
+              }
+            } catch (e) {
+              console.error('generateDailySummary failed', e.message);
+            }
+            await runRef.set(run);
+            await db.ref(`schedules/${scheduleId}`).update({ lastRunAt: now.toISOString(), lastRunStatus: 'ok', lastPeriodEnd: periodEnd });
+            if (Object.keys(pendingDeletions).length > 0) {
+              try { await db.ref().update(pendingDeletions); } catch {}
+            }
+            if (schedule.sendDailyEmail) await sendReportEmail(schedule, run);
+          } catch (e) {
+            // Deliberately does NOT set lastPeriodEnd on failure, so the next
+            // hourly tick retries this same period instead of silently
+            // skipping it.
+            await runRef.set({ scheduleId, generatedAt: now.toISOString(), periodStart: periodEnd, periodEnd, dateLabel: periodEnd, runType: 'daily', status: 'error', error: e.message });
+            await db.ref(`schedules/${scheduleId}`).update({ lastRunAt: now.toISOString(), lastRunStatus: 'error' });
           }
-          if (schedule.sendDailyEmail) await sendReportEmail(schedule, run);
-        } catch (e) {
-          // Deliberately does NOT set lastPeriodEnd on failure, so the next
-          // hourly tick retries this same period instead of silently
-          // skipping it.
-          await runRef.set({ scheduleId, generatedAt: now.toISOString(), periodStart: periodEnd, periodEnd, dateLabel: periodEnd, runType: 'daily', status: 'error', error: e.message });
-          await db.ref(`schedules/${scheduleId}`).update({ lastRunAt: now.toISOString(), lastRunStatus: 'error' });
         }
       }
 
-      // ── Weekly aggregation — only on the schedule's chosen weekday,
-      // built from the 7 daily runs above rather than re-scanning anything. ──
-      if (schedule.weeklyDay && WEEKDAYS[now.getUTCDay()] === schedule.weeklyDay) {
+      // ── Weekly aggregation — only on the schedule's chosen weekday, at its
+      // own hour (hourUtc), built from the 7 daily runs above rather than
+      // re-scanning anything. ──
+      if (now.getUTCHours() === schedule.hourUtc && schedule.weeklyDay && WEEKDAYS[now.getUTCDay()] === schedule.weeklyDay) {
         const weeklyAlreadyDone = schedule.lastWeeklyRunStatus === 'ok' && schedule.lastWeeklyPeriodEnd === periodEnd;
         if (!weeklyAlreadyDone) {
           const weeklyRunRef = db.ref(`reportRuns/${scheduleId}`).push();
@@ -2395,7 +2445,7 @@ exports.createSchedule = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
     await requireAuthorized(request);
-    const { country, countryKey, sourceIds, topics, weeklyDay, hourUtc, sendDailyEmail, sendWeeklyEmail } = request.data || {};
+    const { country, countryKey, sourceIds, topics, weeklyDay, hourUtc, dailyHourUtc, sendDailyEmail, sendWeeklyEmail } = request.data || {};
     const contextTopics = Array.isArray(request.data?.contextTopics) ? request.data.contextTopics : [];
     const emailRecipients = sanitizeEmailList(request.data?.emailRecipients);
     if (!country || !countryKey || !sourceIds?.length || !topics?.length) {
@@ -2403,14 +2453,17 @@ exports.createSchedule = onCall(
     }
     if (!WEEKDAYS.includes(weeklyDay)) throw new HttpsError('invalid-argument', 'valid weeklyDay required');
     const hour = Math.min(Math.max(parseInt(hourUtc) || 0, 0), 23);
+    const parsedDailyHour = parseInt(dailyHourUtc);
+    const dailyHour = Math.min(Math.max(Number.isFinite(parsedDailyHour) ? parsedDailyHour : hour, 0), 23);
     const weeklySummaryWords = clampWeeklySummaryWords(request.data?.weeklySummaryWords);
     const dailySummaryWords = clampDailySummaryWords(request.data?.dailySummaryWords);
     const searchScope = request.data?.searchScope === 'domestic' ? 'domestic' : 'global';
+    const reportTitle = String(request.data?.reportTitle || '').trim().slice(0, 60);
 
     const ref = db.ref('schedules').push();
     const schedule = {
-      id: ref.key, country, countryKey, sourceIds, topics, contextTopics, searchScope,
-      weeklyDay, hourUtc: hour, weeklySummaryWords, dailySummaryWords,
+      id: ref.key, country, countryKey, sourceIds, topics, contextTopics, searchScope, reportTitle,
+      weeklyDay, hourUtc: hour, dailyHourUtc: dailyHour, weeklySummaryWords, dailySummaryWords,
       sendDailyEmail: !!sendDailyEmail, sendWeeklyEmail: !!sendWeeklyEmail, emailRecipients,
       enabled: true,
       createdBy: request.auth.uid, createdByEmail: request.auth.token.email || null,
@@ -2437,8 +2490,11 @@ exports.updateSchedule = onCall(
     if (updates.emailRecipients !== undefined) updates.emailRecipients = sanitizeEmailList(updates.emailRecipients);
     if (updates.weeklySummaryWords !== undefined) updates.weeklySummaryWords = clampWeeklySummaryWords(updates.weeklySummaryWords);
     if (updates.dailySummaryWords !== undefined) updates.dailySummaryWords = clampDailySummaryWords(updates.dailySummaryWords);
+    if (updates.hourUtc !== undefined) updates.hourUtc = Math.min(Math.max(parseInt(updates.hourUtc) || 0, 0), 23);
+    if (updates.dailyHourUtc !== undefined) updates.dailyHourUtc = Math.min(Math.max(parseInt(updates.dailyHourUtc) || 0, 0), 23);
+    if (updates.reportTitle !== undefined) updates.reportTitle = String(updates.reportTitle || '').trim().slice(0, 60);
     if (updates.searchScope !== undefined) updates.searchScope = updates.searchScope === 'domestic' ? 'domestic' : 'global';
-    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope'];
+    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
     if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');
@@ -2479,7 +2535,7 @@ exports.sendReportEmailNow = onCall(
   { timeoutSeconds: 60, memory: '256MiB', region: 'us-central1', secrets: [gmailAppPassword] },
   async (request) => {
     await requireAuthorized(request);
-    const { scheduleId, type, includeSummary } = request.data || {};
+    const { scheduleId, type } = request.data || {};
     if (!scheduleId || !['daily', 'weekly'].includes(type)) {
       throw new HttpsError('invalid-argument', 'scheduleId and type ("daily" or "weekly") required');
     }
@@ -2514,31 +2570,22 @@ exports.sendReportEmailNow = onCall(
 
     if (!run) throw new HttpsError('failed-precondition', `No ${type} report exists yet for this schedule.`);
 
-    // The checkbox controls whether THIS email includes a summary,
-    // independent of whether the run happens to have one cached — weekly
-    // runs almost always do (generated automatically), daily ones usually
-    // don't (only if "Summarize" was used on this report before). Checked
-    // with none cached yet: generate one now and persist it to the run, same
-    // as the in-app "Summarize" button, so it's there next time too.
-    // Unchecked with one already cached: leave the stored run alone, just
-    // don't put it in this particular email.
-    let emailRun = run;
-    if (includeSummary) {
-      if (!run.summary && runId) {
-        const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
-        const ai = makeAI(aiSettingsSnap.val() || {});
-        const result = await generateDailySummary(schedule, run, ai);
-        if (result) {
-          if (result.usage) await persistCost(schedule.createdBy, schedule.createdByEmail, ai, calcCostUsd(ai, result.usage.input_tokens || 0, result.usage.output_tokens || 0));
-          await db.ref(`reportRuns/${scheduleId}/${runId}`).update({ summary: result.text });
-          emailRun = { ...run, summary: result.text };
-        }
+    // Daily and weekly reports always carry a summary now (generated
+    // automatically when the report itself is built) — this just backfills
+    // the rare case of an older report from before that existed, so Send
+    // Now never sends without one.
+    if (!run.summary && runId) {
+      const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
+      const ai = makeAI(aiSettingsSnap.val() || {});
+      const result = await generateDailySummary(schedule, run, ai);
+      if (result) {
+        if (result.usage) await persistCost(schedule.createdBy, schedule.createdByEmail, ai, calcCostUsd(ai, result.usage.input_tokens || 0, result.usage.output_tokens || 0));
+        await db.ref(`reportRuns/${scheduleId}/${runId}`).update({ summary: result.text });
+        run = { ...run, summary: result.text };
       }
-    } else if (run.summary) {
-      emailRun = { ...run, summary: null };
     }
 
-    await sendReportEmail(schedule, emailRun);
+    await sendReportEmail(schedule, run);
     return { ok: true, dateLabel: run.dateLabel };
   }
 );
@@ -2917,20 +2964,28 @@ exports.estimateScheduleCost = onCall(
     // The report itself no longer costs anything to write (raw RSS text, no
     // AI prose) — exact-topic matching is a substring check plus a one-time,
     // permanently-cached per-topic-per-language translation, so it's ~free.
-    // The only ongoing AI cost is context-topic classification, which runs
-    // once per day (daily generation is unconditional now). The weekly
-    // digest adds no marginal AI cost at all — it's built by aggregating
-    // already-generated daily runs, not by re-matching anything.
+    // Context-topic classification is the other ongoing AI cost, once per
+    // day. The weekly digest adds no marginal cost of its own — it's built
+    // by aggregating already-generated daily runs, not by re-matching
+    // anything (its own summary is a once-a-week cost, small enough next to
+    // the daily one below to not be worth modeling separately here).
+    const assumedArticlesPerDay = 10;
     let perRunInputTokens = 0, perRunOutputTokens = 0;
     if (hasContext) {
-      const assumedArticlesPerDay = 10;
       // 'fullBody' reads each full article (title + text) to classify —
       // pricier but a real judgment; 'header' reads only the headlines.
-      perRunInputTokens = (contextMode === 'fullBody'
+      perRunInputTokens += (contextMode === 'fullBody'
         ? Math.round(assumedArticlesPerDay * 120 * 1.3)
         : 150) * sourceIds.length;
-      perRunOutputTokens = 60 * sourceIds.length;
+      perRunOutputTokens += 60 * sourceIds.length;
     }
+
+    // Daily summary is unconditional now (generated automatically every
+    // day, not on-demand) — a real recurring cost regardless of topic mode,
+    // so it belongs in this estimate too.
+    const dailySummaryWords = clampDailySummaryWords(request.data?.dailySummaryWords);
+    perRunInputTokens += Math.round(assumedArticlesPerDay * sourceIds.length * 120 * 1.3);
+    perRunOutputTokens += Math.round(dailySummaryWords * 1.3);
 
     const perRunUsd = calcCostUsd(ai, perRunInputTokens, perRunOutputTokens);
 

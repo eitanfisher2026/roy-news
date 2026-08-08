@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.20';
+const VERSION = 'v3.21';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -111,12 +111,6 @@ function formatDateLabelDMY(dateLabel) {
     return `${formatDMY(a)} to ${formatDMY(b)}`;
   }
   return formatDMY(dateLabel);
-}
-function formatDMYTime(iso) {
-  if (!iso) return '';
-  const d = new Date(iso);
-  const pad = n => String(n).padStart(2, '0');
-  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 // A feed's item count alone doesn't say much — pairing it with the time
 // span those items cover shows whether "10 items" means "the last 3 hours"
@@ -3865,7 +3859,9 @@ function SearchScopeToggle({ value, onChange }) {
 function extractRawTexts(run) {
   const texts = [], paths = [];
   if (run.summary) { texts.push(run.summary); paths.push(['summary']); }
-  (run.days || []).forEach((d, di) => {
+  // Weekly only ever shows its summary — nothing else to translate.
+  const days = run.runType === 'weekly' ? [] : (run.days || []);
+  days.forEach((d, di) => {
     (d.sources || []).forEach((s, si) => {
       (s.articles || []).forEach((a, ai) => {
         if (a.title) { texts.push(a.title); paths.push(['days', di, 'sources', si, 'articles', ai, 'title']); }
@@ -3885,11 +3881,12 @@ function applyRawTranslations(run, paths, translations) {
   return copy;
 }
 function buildRawShareText(country, dateLabel, run) {
-  const days = run.days || [];
+  const days = run.runType === 'weekly' ? [] : (run.days || []);
   const isMultiDay = days.length > 1;
   let text = `📰 Roy News — ${country.name}\n${formatDateLabelDMY(dateLabel)}\n`;
   if (run.topics?.length) text += `Topics: ${run.topics.join(', ')}\n`;
   if (run.summary) text += `\nSummary\n${run.summary}\n`;
+  else if (run.runType === 'weekly') text += `\nNo coverage this period.\n`;
   days.forEach(d => {
     if (isMultiDay) text += `\n=== Day: ${formatDateLabelDMY(d.day)} ===\n`;
     (d.sources || []).forEach(s => {
@@ -3915,12 +3912,15 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
   const [summarizing, setSummarizing] = useState(false);
 
   const displayRun = isHebrew && hebrewRun ? hebrewRun : run;
-  const displayDays = displayRun.days || [];
+  // Weekly only ever shows its summary, never the day-by-day articles —
+  // those still get collected server-side (the summary is extracted from
+  // them), just never surfaced on their own for a weekly report.
+  const displayDays = displayRun.runType === 'weekly' ? [] : (displayRun.days || []);
   const isMultiDay = displayDays.length > 1;
 
-  // Weekly already gets a summary automatically at generation time (see
-  // aggregateWeeklyFromDailyRuns server-side) — this on-demand button only
-  // makes sense for daily, which never generates one on its own.
+  // Both daily and weekly now always get a summary automatically at
+  // generation time — this on-demand button only matters as a backfill for
+  // an older report from before that was true.
   const canSummarize = (run.runType || 'daily') !== 'weekly' && !run.summary;
 
   async function handleSummarize() {
@@ -4040,7 +4040,7 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
       )}
 
       {displayDays.length === 0 ? (
-        <div style={{ color: C.faint, fontSize: 13, padding: '10px 0' }}>No matches found for this period.</div>
+        !displayRun.summary && <div style={{ color: C.faint, fontSize: 13, padding: '10px 0' }}>No matches found for this period.</div>
       ) : displayDays.map((d, di) => (
         <div key={di} style={{ marginBottom: 20 }}>
           {isMultiDay && (
@@ -4183,10 +4183,12 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [topicRegistry] = useTopicRegistry();
   const [newCountryKey, setNewCountryKey] = useState('');
   const [newSourceIds, setNewSourceIds] = useState(new Set());
+  const [newReportTitle, setNewReportTitle] = useState('');
   const [newSelectedTopics, setNewSelectedTopics] = useState(new Set());
   const [newSearchScope, setNewSearchScope] = useState('global');
   const [newWeeklyDay, setNewWeeklyDay] = useState('monday');
   const [newHourUtc, setNewHourUtc] = useState(6);
+  const [newDailyHourUtc, setNewDailyHourUtc] = useState(6);
   const [newWeeklySummaryWords, setNewWeeklySummaryWords] = useState(400);
   const [newDailySummaryWords, setNewDailySummaryWords] = useState(200);
   const [newSendDailyEmail, setNewSendDailyEmail] = useState(false);
@@ -4206,7 +4208,6 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [viewingRunLoadingId, setViewingRunLoadingId] = useState(null); // runId currently being opened
   const [busyId, setBusyId] = useState(null);
   const [sendingNowId, setSendingNowId] = useState(null); // `${scheduleId}:${type}` currently sending
-  const [includeSummaryByScheduleId, setIncludeSummaryByScheduleId] = useState({}); // scheduleId -> bool
   const [sendNowMsg, setSendNowMsg] = useState({}); // scheduleId -> status message
 
   const [sourcesExpandedId, setSourcesExpandedId] = useState(null);
@@ -4232,10 +4233,12 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   // setup (find-by-name, AI "add more" with filters, remove) instead of a
   // plain dropdown limited to already-verified, not-yet-used sources.
   const [editingId, setEditingId] = useState(null);
+  const [editReportTitle, setEditReportTitle] = useState('');
   const [editSelectedTopics, setEditSelectedTopics] = useState(new Set());
   const [editSearchScope, setEditSearchScope] = useState('global');
   const [editWeeklyDay, setEditWeeklyDay] = useState('monday');
   const [editHourUtc, setEditHourUtc] = useState(6);
+  const [editDailyHourUtc, setEditDailyHourUtc] = useState(6);
   const [editWeeklySummaryWords, setEditWeeklySummaryWords] = useState(400);
   const [editDailySummaryWords, setEditDailySummaryWords] = useState(200);
   const [editSendDailyEmail, setEditSendDailyEmail] = useState(false);
@@ -4273,10 +4276,12 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
 
   function startEdit(s) {
     setEditingId(s.id);
+    setEditReportTitle(s.reportTitle || '');
     setEditSelectedTopics(new Set((s.topics || []).map(t => toCanonicalTopicName(t, topicRegistry))));
     setEditSearchScope(s.searchScope === 'domestic' ? 'domestic' : 'global');
     setEditWeeklyDay(s.weeklyDay || 'monday');
     setEditHourUtc(s.hourUtc);
+    setEditDailyHourUtc(s.dailyHourUtc ?? s.hourUtc);
     setEditWeeklySummaryWords(s.weeklySummaryWords || 400);
     setEditDailySummaryWords(s.dailySummaryWords || 200);
     setEditSendDailyEmail(!!s.sendDailyEmail);
@@ -4295,8 +4300,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     if (topics.length === 0) { alert('At least one topic is required.'); return; }
     if (editSelected.size === 0) { alert('At least one source is required.'); return; }
     const fields = {
+      reportTitle: editReportTitle.trim(),
       topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: editSearchScope,
-      weeklyDay: editWeeklyDay, hourUtc: editHourUtc, weeklySummaryWords: editWeeklySummaryWords, dailySummaryWords: editDailySummaryWords,
+      weeklyDay: editWeeklyDay, hourUtc: editHourUtc, dailyHourUtc: editDailyHourUtc, weeklySummaryWords: editWeeklySummaryWords, dailySummaryWords: editDailySummaryWords,
       sendDailyEmail: editSendDailyEmail, sendWeeklyEmail: editSendWeeklyEmail,
       emailRecipients: editEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean),
       sourceIds: [...editSelected]
@@ -4343,6 +4349,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       const aiSettings = await getAISettings(uid);
       const resp = await fns.httpsCallable('estimateScheduleCost')({
         sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'),
+        dailySummaryWords: newDailySummaryWords,
         ...aiSettings
       });
       setEstimate(resp.data);
@@ -4359,16 +4366,16 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setCreateMsg('');
     try {
       await fns.httpsCallable('createSchedule')({
-        country: selectedCountry.country, countryKey: selectedCountry.countryKey,
+        country: selectedCountry.country, countryKey: selectedCountry.countryKey, reportTitle: newReportTitle.trim(),
         sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: newSearchScope,
-        weeklyDay: newWeeklyDay, hourUtc: newHourUtc, weeklySummaryWords: newWeeklySummaryWords, dailySummaryWords: newDailySummaryWords,
+        weeklyDay: newWeeklyDay, hourUtc: newHourUtc, dailyHourUtc: newDailyHourUtc, weeklySummaryWords: newWeeklySummaryWords, dailySummaryWords: newDailySummaryWords,
         sendDailyEmail: newSendDailyEmail, sendWeeklyEmail: newSendWeeklyEmail,
         emailRecipients: newEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean)
       });
       setCreateMsg('✓ Schedule created');
       setShowCreate(false);
-      setNewCountryKey(''); setNewSourceIds(new Set()); setNewSelectedTopics(new Set()); setNewSearchScope('global'); setEstimate(null);
-      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipients(''); setNewWeeklySummaryWords(400); setNewDailySummaryWords(200);
+      setNewCountryKey(''); setNewSourceIds(new Set()); setNewSelectedTopics(new Set()); setNewSearchScope('global'); setEstimate(null); setNewReportTitle('');
+      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipients(''); setNewWeeklySummaryWords(400); setNewDailySummaryWords(200); setNewDailyHourUtc(6);
       await loadSchedules();
     } catch (e) {
       setCreateMsg('⚠ ' + e.message);
@@ -4396,8 +4403,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setSendingNowId(key);
     setSendNowMsg(prev => ({ ...prev, [schedule.id]: '' }));
     try {
-      const includeSummary = !!includeSummaryByScheduleId[schedule.id];
-      const resp = await fns.httpsCallable('sendReportEmailNow')({ scheduleId: schedule.id, type, includeSummary });
+      const resp = await fns.httpsCallable('sendReportEmailNow')({ scheduleId: schedule.id, type });
       setSendNowMsg(prev => ({ ...prev, [schedule.id]: `✓ Sent ${type} report (${formatDateLabelDMY(resp.data.dateLabel)}) to ${(schedule.emailRecipients || []).join(', ')}` }));
     } catch (e) {
       setSendNowMsg(prev => ({ ...prev, [schedule.id]: '⚠ ' + e.message }));
@@ -4517,17 +4523,6 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     });
   }
 
-  function scheduleTopicsLabel(s) {
-    const contextSet = new Set(s.contextTopics || []);
-    const label = s.topics.map(t => contextSet.has(t) ? `${t}🧭` : t).join(', ');
-    return s.searchScope === 'domestic' ? `${label} · 🏠 domestic` : label;
-  }
-
-  function scheduleSummary(s) {
-    const weeklyDayLabel = s.weeklyDay ? s.weeklyDay.slice(0, 3) : 'Mon';
-    return `Daily ${String(s.hourUtc).padStart(2, '0')}:00 UTC · Weekly digest ${weeklyDayLabel} · ${s.sourceIds.length} src`;
-  }
-
   return (
     <div style={{ marginBottom: 28 }}>
       <button
@@ -4573,11 +4568,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                           Owned by {s.createdByEmail}
                         </div>
                       )}
-                      <div style={{ fontSize: 12, color: C.text, fontWeight: 600, marginTop: 4, lineHeight: 1.4 }}>{scheduleTopicsLabel(s)}</div>
-                      <div style={{ fontSize: 11, color: C.faint, marginTop: 2, lineHeight: 1.5 }}>{scheduleSummary(s)}</div>
-                      <div style={{ fontSize: 11, color: s.lastRunStatus === 'error' ? '#f87171' : C.faint, marginTop: 1 }}>
-                        {s.lastRunAt ? `${s.lastRunStatus === 'ok' ? '✓' : '⚠'} ${formatDMYTime(s.lastRunAt)}` : 'Never run yet'}
-                      </div>
+                      {s.reportTitle && (
+                        <div style={{ fontSize: 12, color: C.muted, marginTop: 3, lineHeight: 1.4 }}>{s.reportTitle}</div>
+                      )}
                     </div>
                     <div style={{ display: 'flex', gap: 4, flexShrink: 0, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 120 }}>
                       {s.access !== 'read' && (
@@ -4637,125 +4630,46 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                     </div>
                   )}
 
-                  {editingId === s.id ? (
-                    <div style={{ marginTop: 10, padding: 12, background: '#0a1626', borderRadius: 7, border: '1px solid ' + C.border }}>
-                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Topics</label>
-                      <TopicPicker registry={topicRegistry} selected={editSelectedTopics}
-                        onToggle={t => setEditSelectedTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; })} />
-                      <div style={{ fontSize: 10, color: C.faint, marginTop: -6, marginBottom: 10 }}>Need a new topic, or want to change one's mode/word lists? Settings → Topics.</div>
-                      <SearchScopeToggle value={editSearchScope} onChange={setEditSearchScope} />
-
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
-                        <div style={{ flex: 1, minWidth: 130 }}>
-                          <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly digest day</label>
-                          <select value={editWeeklyDay} onChange={e => setEditWeeklyDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%' }}>
-                            {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
-                          </select>
-                        </div>
-                        <div style={{ flex: 1, minWidth: 110 }}>
-                          <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Run time (UTC)</label>
-                          <select value={editHourUtc} onChange={e => setEditHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
-                            {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
-                          </select>
-                        </div>
-                        <div style={{ flex: 1, minWidth: 140 }}>
-                          <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily summary (words)</label>
-                          <input type="number" min="50" max="1000" value={editDailySummaryWords}
-                            onChange={e => setEditDailySummaryWords(parseInt(e.target.value) || 200)}
-                            className="input-field" style={{ fontSize: 13, width: '100%' }} />
-                        </div>
-                        <div style={{ flex: 1, minWidth: 140 }}>
-                          <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly summary (words)</label>
-                          <input type="number" min="50" max="1000" value={editWeeklySummaryWords}
-                            onChange={e => setEditWeeklySummaryWords(parseInt(e.target.value) || 400)}
-                            className="input-field" style={{ fontSize: 13, width: '100%' }} />
-                        </div>
-                      </div>
-
-                      <div style={{ marginBottom: 14, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>
-                        <label style={{ fontSize: 12, color: C.text, fontWeight: 600, display: 'block', marginBottom: 8 }}>📧 Send by email</label>
-                        <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
-                          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
-                            <input type="checkbox" checked={editSendDailyEmail} onChange={e => setEditSendDailyEmail(e.target.checked)} /> Daily
-                          </label>
-                          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
-                            <input type="checkbox" checked={editSendWeeklyEmail} onChange={e => setEditSendWeeklyEmail(e.target.checked)} /> Weekly
-                          </label>
-                        </div>
-                        {(editSendDailyEmail || editSendWeeklyEmail) && (
-                          <textarea value={editEmailRecipients} onChange={e => setEditEmailRecipients(e.target.value)}
-                            placeholder="email1@example.com, email2@example.com"
-                            className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 50, resize: 'vertical' }} />
+                  <button onClick={() => {
+                    const next = sourcesExpandedId === s.id ? null : s.id;
+                    setSourcesExpandedId(next);
+                    if (next) loadCountrySourcesLive(s.countryKey);
+                  }} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <span>{sourcesExpandedId === s.id ? '▾' : '▸'}</span><span>Sources ({s.sourceIds.length})</span>
+                  </button>
+                  {sourcesExpandedId === s.id && (() => {
+                    if (metaLoading === s.countryKey) {
+                      return <div style={{ display: 'flex', justifyContent: 'center', padding: 10 }}><Spinner size={14} /></div>;
+                    }
+                    const allSources = sourcesForCountry(s.countryKey);
+                    const byId = new Map(allSources.map(src => [src.id, src]));
+                    const meta = archiveMeta[s.countryKey] || {};
+                    return (
+                      <div style={{ marginTop: 8 }}>
+                        {s.sourceIds.map(id => {
+                          const src = byId.get(id);
+                          const m = meta[id];
+                          return (
+                            <div key={id} style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: '6px 8px', background: C.bg, borderRadius: 6, marginBottom: 5, fontSize: 11 }}>
+                              <span style={{ color: C.text }}>{src ? src.name : `(removed source: ${id})`}</span>
+                              {src && (src.rssUrl
+                                ? <span style={{ color: '#4ade80' }}>✓ feed ok</span>
+                                : <span style={{ color: '#fb923c' }}>⚠ no feed</span>)}
+                              {!src && <span style={{ color: '#f87171' }}>⚠ no longer in source list</span>}
+                              {m ? (
+                                <span style={{ color: C.faint }}>{m.articleCount} item{m.articleCount !== 1 ? 's' : ''} · refreshed {new Date(m.lastPolledAt).toLocaleString()}</span>
+                              ) : src?.rssUrl ? (
+                                <span style={{ color: C.faint }}>not polled yet</span>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                        {s.access !== 'read' && (
+                          <button onClick={() => startEdit(s)} style={{ ...SMALL_BTN, fontSize: 11, marginTop: 4 }}>✎ Edit sources</button>
                         )}
                       </div>
-
-                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Sources ({editSelected.size} selected)</label>
-                      {metaLoading === s.countryKey ? (
-                        <div style={{ display: 'flex', justifyContent: 'center', padding: 16 }}><Spinner size={14} /></div>
-                      ) : (
-                        <SourceManager
-                          country={{ name: s.country, key: s.countryKey }}
-                          user={user}
-                          sources={sourcesForCountry(s.countryKey)}
-                          onSourcesChange={newSrcs => setLiveSources(prev => ({ ...prev, [s.countryKey]: newSrcs }))}
-                          selectable={true}
-                          selected={editSelected}
-                          onSelectionChange={setEditSelected}
-                        />
-                      )}
-
-                      <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-                        <button onClick={cancelEdit} disabled={savingEdit} style={{ ...SMALL_BTN, fontSize: 13 }}>Cancel</button>
-                        <button onClick={() => saveEdit(s)} disabled={savingEdit}
-                          style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px', flex: 1, opacity: savingEdit ? 0.5 : 1 }}>
-                          {savingEdit ? <><Spinner size={10} />&nbsp;Saving…</> : 'Save Changes'}
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <button onClick={() => {
-                        const next = sourcesExpandedId === s.id ? null : s.id;
-                        setSourcesExpandedId(next);
-                        if (next) loadCountrySourcesLive(s.countryKey);
-                      }} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
-                        <span>{sourcesExpandedId === s.id ? '▾' : '▸'}</span><span>Sources ({s.sourceIds.length})</span>
-                      </button>
-                      {sourcesExpandedId === s.id && (() => {
-                        if (metaLoading === s.countryKey) {
-                          return <div style={{ display: 'flex', justifyContent: 'center', padding: 10 }}><Spinner size={14} /></div>;
-                        }
-                        const allSources = sourcesForCountry(s.countryKey);
-                        const byId = new Map(allSources.map(src => [src.id, src]));
-                        const meta = archiveMeta[s.countryKey] || {};
-                        return (
-                          <div style={{ marginTop: 8 }}>
-                            {s.sourceIds.map(id => {
-                              const src = byId.get(id);
-                              const m = meta[id];
-                              return (
-                                <div key={id} style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', padding: '6px 8px', background: C.bg, borderRadius: 6, marginBottom: 5, fontSize: 11 }}>
-                                  <span style={{ color: C.text }}>{src ? src.name : `(removed source: ${id})`}</span>
-                                  {src && (src.rssUrl
-                                    ? <span style={{ color: '#4ade80' }}>✓ feed ok</span>
-                                    : <span style={{ color: '#fb923c' }}>⚠ no feed</span>)}
-                                  {!src && <span style={{ color: '#f87171' }}>⚠ no longer in source list</span>}
-                                  {m ? (
-                                    <span style={{ color: C.faint }}>{m.articleCount} item{m.articleCount !== 1 ? 's' : ''} · refreshed {new Date(m.lastPolledAt).toLocaleString()}</span>
-                                  ) : src?.rssUrl ? (
-                                    <span style={{ color: C.faint }}>not polled yet</span>
-                                  ) : null}
-                                </div>
-                              );
-                            })}
-                            {s.access !== 'read' && (
-                              <button onClick={() => startEdit(s)} style={{ ...SMALL_BTN, fontSize: 11, marginTop: 4 }}>✎ Edit sources</button>
-                            )}
-                          </div>
-                        );
-                      })()}
-                    </>
-                  )}
+                    );
+                  })()}
 
                   {s.access !== 'read' && (
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 6 }}>
@@ -4769,12 +4683,6 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                         style={{ ...SMALL_BTN, fontSize: 10, padding: '4px 8px' }}>
                         {sendingNowId === `${s.id}:weekly` ? <><Spinner size={9} />&nbsp;Sending…</> : '📧 Send Now · Weekly'}
                       </button>
-                      <label title="Daily: generates a summary now if this report doesn't have one yet. Weekly already has one automatically — this just decides whether to include it in this email."
-                        style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, color: C.faint, cursor: 'pointer' }}>
-                        <input type="checkbox" checked={!!includeSummaryByScheduleId[s.id]}
-                          onChange={e => setIncludeSummaryByScheduleId(prev => ({ ...prev, [s.id]: e.target.checked }))} />
-                        Include summary
-                      </label>
                     </div>
                   )}
                   {sendNowMsg[s.id] && (
@@ -4847,6 +4755,11 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                     </>
                   )}
 
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Report title</label>
+                  <input className="input-field" value={newReportTitle} onChange={e => setNewReportTitle(e.target.value)}
+                    placeholder="e.g. Israel & Gaza" maxLength={60} style={{ fontSize: 13, marginBottom: 4, width: '100%' }} />
+                  <div style={{ fontSize: 10, color: C.faint, marginBottom: 12 }}>Shown in the email subject, next to the date.</div>
+
                   <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Topics</label>
                   <TopicPicker registry={topicRegistry} selected={newSelectedTopics}
                     onToggle={t => { setNewSelectedTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; }); setEstimate(null); }} />
@@ -4865,8 +4778,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                       </select>
                     </div>
                     <div style={{ flex: 1, minWidth: 110 }}>
-                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Run time (UTC)</label>
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly report time (UTC)</label>
                       <select value={newHourUtc} onChange={e => setNewHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                        {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+                      </select>
+                    </div>
+                    <div style={{ flex: 1, minWidth: 110 }}>
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily report time (UTC)</label>
+                      <select value={newDailyHourUtc} onChange={e => setNewDailyHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
                         {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
                       </select>
                     </div>
@@ -4928,6 +4847,106 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
           )}
         </div>
       )}
+
+      {editingId && (() => {
+        const s = schedules.find(x => x.id === editingId);
+        if (!s) return null;
+        return (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+            onClick={cancelEdit}>
+            <div className="panel" style={{ maxWidth: 560, width: '100%', maxHeight: '85vh', overflowY: 'auto', padding: 20 }} onClick={e => e.stopPropagation()}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: C.text }}>Edit — {s.country}</div>
+                <button onClick={cancelEdit} style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 20 }}>×</button>
+              </div>
+
+              <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Report title</label>
+              <input className="input-field" value={editReportTitle} onChange={e => setEditReportTitle(e.target.value)}
+                placeholder="e.g. Israel & Gaza" maxLength={60} style={{ fontSize: 13, marginBottom: 4, width: '100%' }} />
+              <div style={{ fontSize: 10, color: C.faint, marginBottom: 14 }}>Shown in the email subject, next to the date.</div>
+
+              <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Topics</label>
+              <TopicPicker registry={topicRegistry} selected={editSelectedTopics}
+                onToggle={t => setEditSelectedTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; })} />
+              <div style={{ fontSize: 10, color: C.faint, marginTop: -6, marginBottom: 10 }}>Need a new topic, or want to change one's mode/word lists? Settings → Topics.</div>
+              <SearchScopeToggle value={editSearchScope} onChange={setEditSearchScope} />
+
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
+                <div style={{ flex: 1, minWidth: 130 }}>
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly digest day</label>
+                  <select value={editWeeklyDay} onChange={e => setEditWeeklyDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                    {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
+                  </select>
+                </div>
+                <div style={{ flex: 1, minWidth: 110 }}>
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly report time (UTC)</label>
+                  <select value={editHourUtc} onChange={e => setEditHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                    {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+                  </select>
+                </div>
+                <div style={{ flex: 1, minWidth: 110 }}>
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily report time (UTC)</label>
+                  <select value={editDailyHourUtc} onChange={e => setEditDailyHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                    {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+                  </select>
+                </div>
+                <div style={{ flex: 1, minWidth: 140 }}>
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily summary (words)</label>
+                  <input type="number" min="50" max="1000" value={editDailySummaryWords}
+                    onChange={e => setEditDailySummaryWords(parseInt(e.target.value) || 200)}
+                    className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                </div>
+                <div style={{ flex: 1, minWidth: 140 }}>
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly summary (words)</label>
+                  <input type="number" min="50" max="1000" value={editWeeklySummaryWords}
+                    onChange={e => setEditWeeklySummaryWords(parseInt(e.target.value) || 400)}
+                    className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 14, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>
+                <label style={{ fontSize: 12, color: C.text, fontWeight: 600, display: 'block', marginBottom: 8 }}>📧 Send by email</label>
+                <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={editSendDailyEmail} onChange={e => setEditSendDailyEmail(e.target.checked)} /> Daily
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={editSendWeeklyEmail} onChange={e => setEditSendWeeklyEmail(e.target.checked)} /> Weekly
+                  </label>
+                </div>
+                {(editSendDailyEmail || editSendWeeklyEmail) && (
+                  <textarea value={editEmailRecipients} onChange={e => setEditEmailRecipients(e.target.value)}
+                    placeholder="email1@example.com, email2@example.com"
+                    className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 50, resize: 'vertical' }} />
+                )}
+              </div>
+
+              <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Sources ({editSelected.size} selected)</label>
+              {metaLoading === s.countryKey ? (
+                <div style={{ display: 'flex', justifyContent: 'center', padding: 16 }}><Spinner size={14} /></div>
+              ) : (
+                <SourceManager
+                  country={{ name: s.country, key: s.countryKey }}
+                  user={user}
+                  sources={sourcesForCountry(s.countryKey)}
+                  onSourcesChange={newSrcs => setLiveSources(prev => ({ ...prev, [s.countryKey]: newSrcs }))}
+                  selectable={true}
+                  selected={editSelected}
+                  onSelectionChange={setEditSelected}
+                />
+              )}
+
+              <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                <button onClick={cancelEdit} disabled={savingEdit} style={{ ...SMALL_BTN, fontSize: 13 }}>Cancel</button>
+                <button onClick={() => saveEdit(s)} disabled={savingEdit}
+                  style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px', flex: 1, opacity: savingEdit ? 0.5 : 1 }}>
+                  {savingEdit ? <><Spinner size={10} />&nbsp;Saving…</> : 'Save Changes'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {viewingRun && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}

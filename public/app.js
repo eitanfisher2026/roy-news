@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.24';
+const VERSION = 'v3.25';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3801,6 +3801,49 @@ function toCanonicalTopicName(raw, registry) {
   return match || raw;
 }
 
+// Schedules store daily/weekly send times as a UTC hour (0-23) — the cron
+// job that fires them runs server-side with no concept of "whose local
+// time," so UTC has to stay the source of truth. These convert purely for
+// display/input, using "today" as the anchor date, so the picker shows and
+// accepts whatever hour is on the viewer's own device/timezone instead of
+// making them do the UTC math themselves.
+function utcHourToLocal(utcHour) {
+  const d = new Date();
+  d.setUTCHours(utcHour, 0, 0, 0);
+  return d.getHours();
+}
+function localHourToUtc(localHour) {
+  const d = new Date();
+  d.setHours(localHour, 0, 0, 0);
+  return d.getUTCHours();
+}
+function LocalTimeSelect({ utcHour, onChangeUtc }) {
+  return (
+    <select value={utcHourToLocal(utcHour)} onChange={e => onChangeUtc(localHourToUtc(parseInt(e.target.value)))}
+      className="input-field" style={{ fontSize: 13, width: '100%' }}>
+      {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+    </select>
+  );
+}
+// On-demand "what's that in UTC?" disclosure — a single ℹ️ toggle covering
+// both time fields rather than a permanently-visible second field, since the
+// picker itself already shows local time with no calculation needed.
+function UtcTimeInfo({ hourUtc, dailyHourUtc, open, onToggle }) {
+  return (
+    <div style={{ marginTop: -6, marginBottom: 10 }}>
+      <button type="button" onClick={onToggle}
+        style={{ background: 'none', border: 'none', color: open ? '#60a5fa' : C.faint, cursor: 'pointer', fontSize: 11, padding: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
+        <span>ℹ️</span><span>What's that in UTC?</span>
+      </button>
+      {open && (
+        <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>
+          Weekly: {String(hourUtc).padStart(2, '0')}:00 UTC · Daily: {String(dailyHourUtc).padStart(2, '0')}:00 UTC
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TopicPicker({ registry, selected, onToggle }) {
   const names = Object.keys(registry).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
   if (names.length === 0) {
@@ -4209,6 +4252,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [newWeeklyDay, setNewWeeklyDay] = useState('monday');
   const [newHourUtc, setNewHourUtc] = useState(6);
   const [newDailyHourUtc, setNewDailyHourUtc] = useState(6);
+  const [newTimeInfoOpen, setNewTimeInfoOpen] = useState(false);
   const [newWeeklySummaryWords, setNewWeeklySummaryWords] = useState(400);
   const [newDailySummaryWords, setNewDailySummaryWords] = useState(200);
   const [newSendDailyEmail, setNewSendDailyEmail] = useState(false);
@@ -4260,6 +4304,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [editWeeklyDay, setEditWeeklyDay] = useState('monday');
   const [editHourUtc, setEditHourUtc] = useState(6);
   const [editDailyHourUtc, setEditDailyHourUtc] = useState(6);
+  const [editTimeInfoOpen, setEditTimeInfoOpen] = useState(false);
   const [editWeeklySummaryWords, setEditWeeklySummaryWords] = useState(400);
   const [editDailySummaryWords, setEditDailySummaryWords] = useState(200);
   const [editSendDailyEmail, setEditSendDailyEmail] = useState(false);
@@ -4311,12 +4356,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditSelected(new Set(s.sourceIds));
     setShareEmail(''); setShareLevel('read'); setShareMsg('');
     setDeleteZoneOpen(false);
+    setEditTimeInfoOpen(false);
     loadCountrySourcesLive(s.countryKey);
   }
 
   function cancelEdit() {
     setEditingId(null);
     setDeleteZoneOpen(false);
+    setEditTimeInfoOpen(false);
   }
 
   async function saveEdit(schedule) {
@@ -4732,16 +4779,12 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                       </select>
                     </div>
                     <div style={{ flex: 1, minWidth: 110 }}>
-                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly report time (UTC)</label>
-                      <select value={newHourUtc} onChange={e => setNewHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
-                        {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
-                      </select>
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly report time</label>
+                      <LocalTimeSelect utcHour={newHourUtc} onChangeUtc={setNewHourUtc} />
                     </div>
                     <div style={{ flex: 1, minWidth: 110 }}>
-                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily report time (UTC)</label>
-                      <select value={newDailyHourUtc} onChange={e => setNewDailyHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
-                        {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
-                      </select>
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily report time</label>
+                      <LocalTimeSelect utcHour={newDailyHourUtc} onChangeUtc={setNewDailyHourUtc} />
                     </div>
                     <div style={{ flex: 1, minWidth: 140 }}>
                       <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily summary (words)</label>
@@ -4756,6 +4799,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                         className="input-field" style={{ fontSize: 13, width: '100%' }} />
                     </div>
                   </div>
+                  <UtcTimeInfo hourUtc={newHourUtc} dailyHourUtc={newDailyHourUtc} open={newTimeInfoOpen} onToggle={() => setNewTimeInfoOpen(o => !o)} />
 
                   <div style={{ marginBottom: 12, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>
                     <label style={{ fontSize: 12, color: C.text, fontWeight: 600, display: 'block', marginBottom: 8 }}>📧 Send by email</label>
@@ -4841,16 +4885,12 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   </select>
                 </div>
                 <div style={{ flex: 1, minWidth: 110 }}>
-                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly report time (UTC)</label>
-                  <select value={editHourUtc} onChange={e => setEditHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
-                    {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
-                  </select>
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly report time</label>
+                  <LocalTimeSelect utcHour={editHourUtc} onChangeUtc={setEditHourUtc} />
                 </div>
                 <div style={{ flex: 1, minWidth: 110 }}>
-                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily report time (UTC)</label>
-                  <select value={editDailyHourUtc} onChange={e => setEditDailyHourUtc(parseInt(e.target.value))} className="input-field" style={{ fontSize: 13, width: '100%' }}>
-                    {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
-                  </select>
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily report time</label>
+                  <LocalTimeSelect utcHour={editDailyHourUtc} onChangeUtc={setEditDailyHourUtc} />
                 </div>
                 <div style={{ flex: 1, minWidth: 140 }}>
                   <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily summary (words)</label>
@@ -4865,6 +4905,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                     className="input-field" style={{ fontSize: 13, width: '100%' }} />
                 </div>
               </div>
+              <UtcTimeInfo hourUtc={editHourUtc} dailyHourUtc={editDailyHourUtc} open={editTimeInfoOpen} onToggle={() => setEditTimeInfoOpen(o => !o)} />
 
               <div style={{ marginBottom: 14, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>
                 <label style={{ fontSize: 12, color: C.text, fontWeight: 600, display: 'block', marginBottom: 8 }}>📧 Send by email</label>

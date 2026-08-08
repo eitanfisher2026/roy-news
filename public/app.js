@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.23';
+const VERSION = 'v3.24';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -4254,6 +4254,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   // plain dropdown limited to already-verified, not-yet-used sources.
   const [editingId, setEditingId] = useState(null);
   const [editReportTitle, setEditReportTitle] = useState('');
+  const [deleteZoneOpen, setDeleteZoneOpen] = useState(false);
   const [editSelectedTopics, setEditSelectedTopics] = useState(new Set());
   const [editSearchScope, setEditSearchScope] = useState('global');
   const [editWeeklyDay, setEditWeeklyDay] = useState('monday');
@@ -4309,11 +4310,13 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditEmailRecipients((s.emailRecipients || []).join(', '));
     setEditSelected(new Set(s.sourceIds));
     setShareEmail(''); setShareLevel('read'); setShareMsg('');
+    setDeleteZoneOpen(false);
     loadCountrySourcesLive(s.countryKey);
   }
 
   function cancelEdit() {
     setEditingId(null);
+    setDeleteZoneOpen(false);
   }
 
   async function saveEdit(schedule) {
@@ -4913,6 +4916,16 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   {sendNowMsg[s.id] && (
                     <div style={{ fontSize: 11, color: sendNowMsg[s.id].startsWith('✓') ? '#4ade80' : '#f87171', marginTop: 6 }}>{sendNowMsg[s.id]}</div>
                   )}
+                  <button onClick={() => setDeleteZoneOpen(o => !o)}
+                    style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <span>{deleteZoneOpen ? '▾' : '▸'}</span><span>Danger zone</span>
+                  </button>
+                  {deleteZoneOpen && (
+                    <button onClick={() => handleDelete(s)} disabled={busyId === s.id}
+                      style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d', fontSize: 11, padding: '5px 10px', marginTop: 6 }}>
+                      🗑 Delete Report
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -4955,15 +4968,6 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   {savingEdit ? <><Spinner size={10} />&nbsp;Saving…</> : 'Save Changes'}
                 </button>
               </div>
-
-              {s.access !== 'read' && (
-                <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid ' + C.border }}>
-                  <button onClick={() => handleDelete(s)} disabled={busyId === s.id}
-                    style={{ ...SMALL_BTN, color: '#f87171', borderColor: '#7f1d1d', fontSize: 12, width: '100%' }}>
-                    🗑 Delete Report
-                  </button>
-                </div>
-              )}
             </div>
           </div>
         );

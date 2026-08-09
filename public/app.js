@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.25';
+const VERSION = 'v3.27';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -740,7 +740,26 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
     catch { return {}; }
   })();
 
-  const isBusy = refreshing || adding || finding || !!fixingSourceId || !!checkingStatsId || checkingAllStats;
+  const [deduping, setDeduping] = useState(false);
+  const isBusy = refreshing || adding || finding || !!fixingSourceId || !!checkingStatsId || checkingAllStats || deduping;
+
+  // One-click cleanup for duplicate entries already in the list (from before
+  // write-time dedup existed, or a race that slipped through anyway) — same
+  // merge logic (prefer whichever copy has a working feed) the backend now
+  // applies automatically on every add/fix.
+  async function handleDedupe() {
+    setDeduping(true);
+    try {
+      const result = await fns.httpsCallable('dedupeCountrySources')({ countryKey: country.key });
+      onSourcesChange(result.data.sources);
+      alert(result.data.mergedCount > 0
+        ? `Merged ${result.data.mergedCount} duplicate source${result.data.mergedCount !== 1 ? 's' : ''}.`
+        : 'No duplicates found.');
+    } catch (e) {
+      alert('Could not check for duplicates: ' + e.message);
+    }
+    setDeduping(false);
+  }
 
   async function handleFind() {
     const q = findQuery.trim();
@@ -760,6 +779,16 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
   function handleAddFound() {
     const src = findResult?.source;
     if (!src) return;
+    // "Find by name" re-runs a fresh AI lookup every time — nothing stops it
+    // from returning the same outlet you already have, so this has to check
+    // before adding rather than assume the result is new.
+    const dupe = sources.find(s => s.name.trim().toLowerCase() === src.name.trim().toLowerCase());
+    if (dupe) {
+      alert(`"${dupe.name}" is already in your list${dupe.rssUrl ? '' : ' (currently marked "No RSS" — try ⚙ Fix on it instead of adding it again)'}.`);
+      setFindResult(null);
+      setFindQuery('');
+      return;
+    }
     const newSources = [src, ...sources];
     onSourcesChange(newSources);
     setNewlyAddedIds(new Set([src.id]));
@@ -874,9 +903,23 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
     setCheckingAllStats(false);
   }
 
-  function handleRemoveSource(id) {
+  async function handleRemoveSource(id) {
+    const src = sources.find(s => s.id === id);
+    let inUse;
+    try {
+      const resp = await fns.httpsCallable('checkSourceInUse')({ countryKey: country.key, sourceId: id });
+      inUse = resp.data;
+    } catch (e) {
+      alert('Could not check if this source is in use: ' + e.message);
+      return;
+    }
+    if (inUse?.inUse) {
+      const list = inUse.usedBy.map(u => u.reportTitle || (u.topics || []).join(', ') || 'a schedule').join(', ');
+      alert(`Can't remove "${src?.name}" — it's used by: ${list}. Remove it from ${inUse.usedBy.length > 1 ? 'those schedules' : 'that schedule'} first.`);
+      return;
+    }
     confirm({
-      message: 'Remove this source permanently?',
+      message: `Remove "${src?.name}" permanently?`,
       onConfirm: () => {
         const newSources = sources.filter(s => s.id !== id);
         onSourcesChange(newSources);
@@ -910,6 +953,10 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
         <button onClick={() => setActivePanel(p => p === 'refresh' ? null : 'refresh')} disabled={isBusy}
           style={{ ...SMALL_BTN, padding: '9px 18px', fontSize: 14, fontWeight: 700, borderWidth: 2, borderColor: activePanel === 'refresh' ? '#3b82f6' : '#5b7ba8', color: activePanel === 'refresh' ? '#60a5fa' : C.text }}>
           ↻ Refresh All
+        </button>
+        <button onClick={handleDedupe} disabled={isBusy} title="Merge any sources that ended up added twice"
+          style={SMALL_BTN}>
+          {deduping ? <Spinner size={12} /> : '🧹 Merge Duplicates'}
         </button>
       </div>
 

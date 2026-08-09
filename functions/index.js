@@ -559,6 +559,75 @@ function dateRangeLabel(requestedDate, lookbackDays = 0) {
   return `${start} to ${requestedDate}`;
 }
 
+// ─── Source list integrity ─────────────────────────────────────────────────
+// A country's source list (countries/{countryKey}/setup/sources) is one
+// shared array across every user, and across point-in-time/period/scheduled
+// reports — same reasoning as the shared topic registry. Unlike topics
+// though, it was never fragmented across storage locations; the duplicate
+// entries that show up in practice come from write-time races and from
+// callers that add without checking the live list first (see addSources'
+// old read-then-set and SourceManager's handleAddFound, which had no dedup
+// check at all).
+function normalizeSourceName(name) {
+  return String(name || '').trim().toLowerCase();
+}
+
+// Merges entries that share a name (case-insensitive) — keeps whichever one
+// actually has a working feed, since that's the copy worth keeping when the
+// same outlet ended up added twice (a stale "Find by name" re-add, two users
+// adding around the same time, etc.). Fields the "winner" is missing (lean,
+// notes, feedStats) are backfilled from the other copy rather than lost.
+function dedupeSourcesList(sources) {
+  const byKey = new Map();
+  let mergedCount = 0;
+  for (const s of (sources || [])) {
+    const name = normalizeSourceName(s.name);
+    const key = name || `__noname_${s.id || byKey.size}`;
+    if (!byKey.has(key)) { byKey.set(key, s); continue; }
+    mergedCount++;
+    const existing = byKey.get(key);
+    const keepNew = !existing.rssUrl && s.rssUrl;
+    const primary = keepNew ? s : existing;
+    const secondary = keepNew ? existing : s;
+    byKey.set(key, { ...secondary, ...primary, feedStats: primary.feedStats || secondary.feedStats || null });
+  }
+  return { deduped: [...byKey.values()], mergedCount };
+}
+
+// Same idea as checkTopicInUse — warn before removing something a schedule
+// still depends on, rather than after silently shrinking its source list.
+exports.checkSourceInUse = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { countryKey, sourceId } = request.data || {};
+    if (!countryKey || !sourceId) throw new HttpsError('invalid-argument', 'countryKey and sourceId required');
+    const snap = await db.ref('schedules').once('value');
+    const schedules = Object.values(snap.val() || {});
+    const usedBy = schedules
+      .filter(s => s.countryKey === countryKey && (s.sourceIds || []).includes(sourceId))
+      .map(s => ({ reportTitle: s.reportTitle, topics: s.topics, createdByEmail: s.createdByEmail }));
+    return { inUse: usedBy.length > 0, usedBy };
+  }
+);
+
+// One-click cleanup for duplicates already sitting in a country's source
+// list (from before write-time dedup existed, or a race that slipped
+// through anyway) — same merge logic addSources now applies automatically,
+// just triggerable on demand from the Source Manager.
+exports.dedupeCountrySources = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { countryKey } = request.data || {};
+    if (!countryKey) throw new HttpsError('invalid-argument', 'countryKey required');
+    const snap = await db.ref(`countries/${countryKey}/setup/sources`).once('value');
+    const { deduped, mergedCount } = dedupeSourcesList(snap.val() || []);
+    if (mergedCount > 0) await db.ref(`countries/${countryKey}/setup/sources`).set(deduped);
+    return { sources: deduped, mergedCount };
+  }
+);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AGENT 1: Setup Country
 // ─────────────────────────────────────────────────────────────────────────────
@@ -665,9 +734,17 @@ exports.addSources = onCall(
 
     if (sources.length > 0 && countryKey) {
       try {
-        const snap = await db.ref(`countries/${countryKey}/setup/sources`).once('value');
-        const existingStored = snap.val() || [];
-        await db.ref(`countries/${countryKey}/setup/sources`).set([...existingStored, ...sources]);
+        // Transaction, not read-then-set: the earlier existingNames check
+        // above was against a client-supplied snapshot (stale under a
+        // concurrent add from another user, or just a page that hadn't
+        // refreshed) — this re-checks against whatever's actually live at
+        // write time, and folds in a general dedupe pass as a side effect.
+        await db.ref(`countries/${countryKey}/setup/sources`).transaction(current => {
+          const existingList = Array.isArray(current) ? current : [];
+          const existingKeys = new Set(existingList.map(s => normalizeSourceName(s.name)));
+          const toAdd = sources.filter(s => !existingKeys.has(normalizeSourceName(s.name)));
+          return dedupeSourcesList([...existingList, ...toAdd]).deduped;
+        });
       } catch {}
     }
 
@@ -1475,14 +1552,14 @@ If you are not confident a working URL exists, return: { "rssUrl": null }`;
       }
     } catch {}
 
-    // Always update Firebase — set new URL if found, null out old broken URL if not
+    // Always update Firebase — set new URL if found, null out old broken URL if
+    // not. Transaction (not read-then-set) so a concurrent fix/add from
+    // another user can't get silently overwritten.
     try {
-      const snap = await db.ref(`countries/${countryKey}/setup/sources`).once('value');
-      const sources = snap.val();
-      if (Array.isArray(sources)) {
-        const updated = sources.map(s => s.name === sourceName ? { ...s, rssUrl: rssUrl || null, feedStats: feedStats || null } : s);
-        await db.ref(`countries/${countryKey}/setup/sources`).set(updated);
-      }
+      await db.ref(`countries/${countryKey}/setup/sources`).transaction(current => {
+        if (!Array.isArray(current)) return current;
+        return current.map(s => s.name === sourceName ? { ...s, rssUrl: rssUrl || null, feedStats: feedStats || null } : s);
+      });
     } catch {}
 
     return { rssUrl, feedStats };
@@ -1891,8 +1968,12 @@ exports.updateSources = onCall(
     await requireAuthorized(request);
     const { countryKey, sources } = request.data || {};
     if (!countryKey || !Array.isArray(sources)) throw new HttpsError('invalid-argument', 'countryKey and sources required');
-    await db.ref(`countries/${countryKey}/setup/sources`).set(sources);
-    return { ok: true };
+    // The client sends a full replacement array (e.g. from "Find by name" ->
+    // Add, or a manual removal) — deduping it here is a safety net even for
+    // callers that don't check first, so a blind duplicate can't get saved.
+    const { deduped } = dedupeSourcesList(sources);
+    await db.ref(`countries/${countryKey}/setup/sources`).set(deduped);
+    return { ok: true, sources: deduped };
   }
 );
 

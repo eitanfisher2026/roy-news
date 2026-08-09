@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.28';
+const VERSION = 'v3.29';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -793,7 +793,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
     onSourcesChange(newSources);
     setNewlyAddedIds(new Set([src.id]));
     if (selectable && onSelectionChange) onSelectionChange(new Set([...(selected || []), src.id]));
-    fns.httpsCallable('updateSources')({ countryKey: country.key, sources: newSources }).catch(() => {});
+    fns.httpsCallable('addSourceEntry')({ countryKey: country.key, source: src }).catch(() => {});
     setFindResult(null);
     setFindQuery('');
   }
@@ -926,7 +926,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
         if (selectable && onSelectionChange) {
           const n = new Set(selected); n.delete(id); onSelectionChange(n);
         }
-        fns.httpsCallable('updateSources')({ countryKey: country.key, sources: newSources }).catch(() => {});
+        fns.httpsCallable('removeSourceEntry')({ countryKey: country.key, sourceId: id }).catch(() => {});
       }
     });
   }

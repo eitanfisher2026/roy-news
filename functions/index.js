@@ -1962,18 +1962,45 @@ exports.removeAuthorizedUser = onCall(
 // Shared-data writes — routed through here (instead of direct client writes) so
 // every mutation to global data passes through the same authorization check.
 // ─────────────────────────────────────────────────────────────────────────────
-exports.updateSources = onCall(
+// Adds one manually-found source (from "Find by name" -> Add) — transaction
+// against live data, not a full-array replace of whatever the client had
+// loaded. A full-array replace is exactly what let an out-of-band fix (or a
+// concurrent edit from another tab/user) get silently overwritten by a
+// stale client a few minutes later: the client doesn't know what it doesn't
+// know, so it can only safely say "add this one thing" or "remove that one
+// id" — never "here's everything," since "everything" it has might already
+// be stale by the time this call lands.
+exports.addSourceEntry = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
     await requireAuthorized(request);
-    const { countryKey, sources } = request.data || {};
-    if (!countryKey || !Array.isArray(sources)) throw new HttpsError('invalid-argument', 'countryKey and sources required');
-    // The client sends a full replacement array (e.g. from "Find by name" ->
-    // Add, or a manual removal) — deduping it here is a safety net even for
-    // callers that don't check first, so a blind duplicate can't get saved.
-    const { deduped } = dedupeSourcesList(sources);
-    await db.ref(`countries/${countryKey}/setup/sources`).set(deduped);
-    return { ok: true, sources: deduped };
+    const { countryKey, source } = request.data || {};
+    if (!countryKey || !source?.id || !source?.name) throw new HttpsError('invalid-argument', 'countryKey and source required');
+    let added = false;
+    await db.ref(`countries/${countryKey}/setup/sources`).transaction(current => {
+      const existingList = Array.isArray(current) ? current : [];
+      const key = normalizeSourceName(source.name);
+      if (existingList.some(s => normalizeSourceName(s.name) === key)) { added = false; return; }
+      added = true;
+      return dedupeSourcesList([source, ...existingList]).deduped;
+    });
+    return { added };
+  }
+);
+
+// Removes one source by id — same transaction reasoning as addSourceEntry
+// above, just for the remove direction.
+exports.removeSourceEntry = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { countryKey, sourceId } = request.data || {};
+    if (!countryKey || !sourceId) throw new HttpsError('invalid-argument', 'countryKey and sourceId required');
+    await db.ref(`countries/${countryKey}/setup/sources`).transaction(current => {
+      const existingList = Array.isArray(current) ? current : [];
+      return existingList.filter(s => s.id !== sourceId);
+    });
+    return { ok: true };
   }
 );
 

@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.27';
+const VERSION = 'v3.28';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -4364,6 +4364,28 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   // already open and load immediately instead of waiting for a toggle tap.
   useEffect(() => { if (defaultOpen) loadSchedules(); }, []);
 
+  // Live-subscribes (not once()) to the edited schedule's country sources
+  // for as long as the edit dialog is open — a change made anywhere else
+  // (Settings' country source manager, another tab, another user, or
+  // "Merge Duplicates" run in this very dialog) shows up immediately instead
+  // of needing the dialog closed and reopened to pick it up.
+  useEffect(() => {
+    if (!editingId) return;
+    const schedule = schedules.find(s => s.id === editingId);
+    if (!schedule) return;
+    const countryKey = schedule.countryKey;
+    setMetaLoading(countryKey);
+    const sourcesRef = db.ref(`countries/${countryKey}/setup/sources`);
+    const cb = sourcesRef.on('value', snap => {
+      setLiveSources(prev => ({ ...prev, [countryKey]: snap.val() || [] }));
+      setMetaLoading(null);
+    });
+    db.ref(`articleArchiveMeta/${countryKey}`).once('value').then(metaSnap => {
+      setArchiveMeta(prev => ({ ...prev, [countryKey]: metaSnap.val() || {} }));
+    }).catch(() => {});
+    return () => sourcesRef.off('value', cb);
+  }, [editingId]);
+
   const selectedCountry = countries.find(c => c.countryKey === newCountryKey) || null;
 
   function scheduleCountry(s) {
@@ -4404,7 +4426,6 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setShareEmail(''); setShareLevel('read'); setShareMsg('');
     setDeleteZoneOpen(false);
     setEditTimeInfoOpen(false);
-    loadCountrySourcesLive(s.countryKey);
   }
 
   function cancelEdit() {

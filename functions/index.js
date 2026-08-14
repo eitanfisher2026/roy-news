@@ -2627,7 +2627,13 @@ exports.generateScheduledReports = onSchedule(
             if (Object.keys(pendingDeletions).length > 0) {
               try { await db.ref().update(pendingDeletions); } catch {}
             }
-            if (schedule.sendDailyEmail) await sendReportEmail(schedule, run);
+            if (schedule.sendDailyEmail) {
+              await sendReportEmail(schedule, run);
+              // Marks this run as having a durable copy outside the
+              // database (the recipient's inbox) — sweepScheduleReportRuns
+              // only deletes old daily runs once this is true.
+              await runRef.update({ emailSent: true });
+            }
           } catch (e) {
             // Deliberately does NOT set lastPeriodEnd on failure, so the next
             // hourly tick retries this same period instead of silently
@@ -2775,6 +2781,135 @@ exports.deleteSchedule = onCall(
       db.ref(`reportRuns/${scheduleId}`).remove(),
     ]);
     return { ok: true };
+  }
+);
+
+// ─── Per-report cleanup (old daily report runs) ───────────────────────────────
+// Unlike the raw article archive, a daily report's full contents (article
+// listing + summary) exist nowhere else once it's old — UNLESS it was
+// actually emailed, in which case that email is a durable copy sitting in
+// the recipient's inbox. So a daily run is only ever deleted once it's both
+// past the retention window AND confirmed emailed — never based on age
+// alone. Weekly runs are never touched by this: they're the long-term
+// artifact (summary-only already), and for a schedule that doesn't email
+// its weekly digest, the stored run is the only copy that exists at all.
+const REPORT_CLEANUP_DEFAULTS = { enabled: true, retentionDays: 10 };
+const REPORT_CLEANUP_CRON_UTC_HOUR = 4; // offset from the archive job's 3am to spread load
+function clampReportRetentionDays(v) {
+  return Math.min(Math.max(parseInt(v) || REPORT_CLEANUP_DEFAULTS.retentionDays, 1), 90);
+}
+
+async function sweepScheduleReportRuns(scheduleId, schedule, retentionDays) {
+  const cutoff = addDaysUTC(isoDateUTC(new Date()), -retentionDays);
+  const snap = await db.ref(`reportRuns/${scheduleId}`).once('value');
+  const runs = snap.val() || {};
+  let beforeBytes = 0, afterBytes = 0, deletedCount = 0, keptCount = 0, keptUnemailedCount = 0;
+  const deletions = {};
+  for (const [runId, run] of Object.entries(runs)) {
+    if ((run.runType || 'daily') !== 'daily') continue; // weekly runs are never swept
+    const size = Buffer.byteLength(JSON.stringify(run));
+    beforeBytes += size;
+    if (run.periodEnd >= cutoff) { afterBytes += size; keptCount++; continue; }
+    // Runs written before the emailSent flag existed have no such field —
+    // for those (only), status:'ok' plus the schedule's current
+    // sendDailyEmail is used as a one-time bridge: if the send had failed,
+    // the original run would have been overwritten with an error status
+    // instead of 'ok', so 'ok' already implies the send succeeded whenever
+    // it was attempted. Every run generated from here on stamps emailSent
+    // explicitly, so this bridge stops mattering as old runs age out.
+    const emailConfirmed = run.emailSent === true ||
+      (run.emailSent === undefined && run.status === 'ok' && schedule.sendDailyEmail === true);
+    if (run.status === 'ok' && emailConfirmed) {
+      deletions[`reportRuns/${scheduleId}/${runId}`] = null;
+      deletedCount++;
+    } else {
+      afterBytes += size; keptCount++; keptUnemailedCount++;
+    }
+  }
+  if (Object.keys(deletions).length > 0) await db.ref().update(deletions);
+  return {
+    ranAt: new Date().toISOString(), retentionDays, cutoff,
+    beforeBytes, afterBytes, reclaimedBytes: beforeBytes - afterBytes,
+    deletedCount, keptCount, keptUnemailedCount
+  };
+}
+
+exports.getReportCleanupSettings = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { scheduleId } = request.data || {};
+    if (!scheduleId) throw new HttpsError('invalid-argument', 'scheduleId required');
+    const snap = await db.ref(`schedules/${scheduleId}`).once('value');
+    const schedule = snap.val();
+    if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
+    requireScheduleAccess(schedule, request.auth.uid, 'write');
+    const now = new Date();
+    const nextRunAt = new Date(now);
+    nextRunAt.setUTCHours(REPORT_CLEANUP_CRON_UTC_HOUR, 0, 0, 0);
+    if (nextRunAt <= now) nextRunAt.setUTCDate(nextRunAt.getUTCDate() + 1);
+    return {
+      enabled: schedule.cleanupEnabled !== undefined ? schedule.cleanupEnabled : REPORT_CLEANUP_DEFAULTS.enabled,
+      retentionDays: schedule.cleanupRetentionDays !== undefined ? schedule.cleanupRetentionDays : REPORT_CLEANUP_DEFAULTS.retentionDays,
+      lastRun: schedule.cleanupLastRun || null,
+      nextRunAt: nextRunAt.toISOString(),
+      cronUtcHour: REPORT_CLEANUP_CRON_UTC_HOUR
+    };
+  }
+);
+
+exports.updateReportCleanupSettings = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { scheduleId, enabled, retentionDays } = request.data || {};
+    if (!scheduleId) throw new HttpsError('invalid-argument', 'scheduleId required');
+    const snap = await db.ref(`schedules/${scheduleId}`).once('value');
+    const schedule = snap.val();
+    if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
+    requireScheduleAccess(schedule, request.auth.uid, 'write');
+    const patch = {};
+    if (enabled !== undefined) patch.cleanupEnabled = !!enabled;
+    if (retentionDays !== undefined) patch.cleanupRetentionDays = clampReportRetentionDays(retentionDays);
+    if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');
+    await db.ref(`schedules/${scheduleId}`).update(patch);
+    return { ok: true };
+  }
+);
+
+exports.runReportCleanupNow = onCall(
+  { timeoutSeconds: 60, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { scheduleId } = request.data || {};
+    if (!scheduleId) throw new HttpsError('invalid-argument', 'scheduleId required');
+    const snap = await db.ref(`schedules/${scheduleId}`).once('value');
+    const schedule = snap.val();
+    if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
+    requireScheduleAccess(schedule, request.auth.uid, 'write');
+    const retentionDays = clampReportRetentionDays(schedule.cleanupRetentionDays);
+    const result = await sweepScheduleReportRuns(scheduleId, schedule, retentionDays);
+    await db.ref(`schedules/${scheduleId}/cleanupLastRun`).set(result);
+    return result;
+  }
+);
+
+exports.pruneReportRuns = onSchedule(
+  { schedule: `0 ${REPORT_CLEANUP_CRON_UTC_HOUR} * * *`, region: 'us-central1', memory: '256MiB', timeoutSeconds: 300, timeZone: 'Etc/UTC' },
+  async () => {
+    const snap = await db.ref('schedules').once('value');
+    const schedules = snap.val() || {};
+    for (const [scheduleId, schedule] of Object.entries(schedules)) {
+      const enabled = schedule.cleanupEnabled !== undefined ? schedule.cleanupEnabled : REPORT_CLEANUP_DEFAULTS.enabled;
+      if (!enabled) continue;
+      const retentionDays = clampReportRetentionDays(schedule.cleanupRetentionDays);
+      try {
+        const result = await sweepScheduleReportRuns(scheduleId, schedule, retentionDays);
+        await db.ref(`schedules/${scheduleId}/cleanupLastRun`).set(result);
+      } catch (e) {
+        console.error(`pruneReportRuns failed for ${scheduleId}`, e.message);
+      }
+    }
   }
 );
 

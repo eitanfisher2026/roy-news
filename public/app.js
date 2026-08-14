@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.32';
+const VERSION = 'v3.33';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3072,13 +3072,6 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
     setArchiveCleanupRunning(false);
   }
 
-  function formatBytes(n) {
-    if (!n && n !== 0) return '—';
-    if (n < 1024) return n + ' B';
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    return (n / (1024 * 1024)).toFixed(2) + ' MB';
-  }
-
   async function loadPrompts() {
     setPromptsLoading(true);
     try {
@@ -3974,6 +3967,13 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
 // collecting each source's feed, rather than checking it once at report time.
 const WEEKDAY_OPTIONS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
 
+function formatBytes(n) {
+  if (!n && n !== 0) return '—';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
 // Lets a schedule pick which shared registry topics apply to it. Mode
 // (exact/classify) is read-only here — it's now one setting per topic,
 // managed centrally in Settings → Topics, not overridable per schedule.
@@ -4486,6 +4486,65 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [editingId, setEditingId] = useState(null);
   const [editReportTitle, setEditReportTitle] = useState('');
   const [deleteZoneOpen, setDeleteZoneOpen] = useState(false);
+  const [cleanupZoneOpen, setCleanupZoneOpen] = useState(false);
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupSettings, setCleanupSettings] = useState(null);
+  const [cleanupRetentionInput, setCleanupRetentionInput] = useState(10);
+  const [cleanupMsg, setCleanupMsg] = useState('');
+  const [cleanupRunning, setCleanupRunning] = useState(false);
+  const [cleanupSaving, setCleanupSaving] = useState(false);
+
+  async function loadCleanupSettings(scheduleId) {
+    setCleanupLoading(true);
+    setCleanupMsg('');
+    try {
+      const result = await fns.httpsCallable('getReportCleanupSettings')({ scheduleId });
+      setCleanupSettings(result.data);
+      setCleanupRetentionInput(result.data.retentionDays);
+    } catch (e) {
+      setCleanupMsg('⚠ Failed to load: ' + e.message);
+    }
+    setCleanupLoading(false);
+  }
+
+  async function toggleCleanupEnabled(scheduleId) {
+    if (!cleanupSettings) return;
+    const next = !cleanupSettings.enabled;
+    setCleanupSettings(prev => ({ ...prev, enabled: next }));
+    setCleanupSaving(true);
+    try {
+      await fns.httpsCallable('updateReportCleanupSettings')({ scheduleId, enabled: next });
+    } catch (e) {
+      setCleanupSettings(prev => ({ ...prev, enabled: !next }));
+      setCleanupMsg('⚠ Failed to update: ' + e.message);
+    }
+    setCleanupSaving(false);
+  }
+
+  async function saveCleanupRetention(scheduleId) {
+    setCleanupSaving(true);
+    setCleanupMsg('');
+    try {
+      await fns.httpsCallable('updateReportCleanupSettings')({ scheduleId, retentionDays: cleanupRetentionInput });
+      setCleanupSettings(prev => ({ ...prev, retentionDays: cleanupRetentionInput }));
+      setCleanupMsg('✓ Saved');
+    } catch (e) {
+      setCleanupMsg('⚠ Failed to save: ' + e.message);
+    }
+    setCleanupSaving(false);
+  }
+
+  async function runCleanupNow(scheduleId) {
+    setCleanupRunning(true);
+    setCleanupMsg('');
+    try {
+      const result = await fns.httpsCallable('runReportCleanupNow')({ scheduleId });
+      setCleanupSettings(prev => ({ ...prev, lastRun: result.data }));
+    } catch (e) {
+      setCleanupMsg('⚠ Cleanup failed: ' + e.message);
+    }
+    setCleanupRunning(false);
+  }
   const [editSelectedTopics, setEditSelectedTopics] = useState(new Set());
   const [editSearchScope, setEditSearchScope] = useState('global');
   const [editWeeklyDay, setEditWeeklyDay] = useState('monday');
@@ -4566,12 +4625,18 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setShareEmail(''); setShareLevel('read'); setShareMsg('');
     setDeleteZoneOpen(false);
     setEditTimeInfoOpen(false);
+    setCleanupZoneOpen(false);
+    setCleanupSettings(null);
+    setCleanupMsg('');
   }
 
   function cancelEdit() {
     setEditingId(null);
     setDeleteZoneOpen(false);
     setEditTimeInfoOpen(false);
+    setCleanupZoneOpen(false);
+    setCleanupSettings(null);
+    setCleanupMsg('');
   }
 
   async function saveEdit(schedule) {
@@ -5179,6 +5244,67 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   {sendNowMsg[s.id] && (
                     <div style={{ fontSize: 11, color: sendNowMsg[s.id].startsWith('✓') ? '#4ade80' : '#f87171', marginTop: 6 }}>{sendNowMsg[s.id]}</div>
                   )}
+
+                  <button onClick={() => { setCleanupZoneOpen(o => { if (!o) loadCleanupSettings(s.id); return !o; }); }}
+                    style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <span>{cleanupZoneOpen ? '▾' : '▸'}</span><span>🧹 Clean utility</span>
+                  </button>
+                  {cleanupZoneOpen && (
+                    <div style={{ marginTop: 8, padding: 12, background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>
+                      {cleanupLoading || !cleanupSettings ? (
+                        <div style={{ display: 'flex', justifyContent: 'center', padding: 14 }}><Spinner size={14} /></div>
+                      ) : (
+                        <>
+                          <div style={{ fontSize: 11, color: C.faint, marginBottom: 12, lineHeight: 1.6 }}>
+                            Deletes this report's own old daily entries once they're both past the window below and confirmed emailed — never based on age alone, so nothing is ever removed without a copy already sitting in your inbox. The weekly digest is never touched.
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, padding: '7px 9px', background: C.card, borderRadius: 6 }}>
+                            <div style={{ fontSize: 12, color: C.text, fontWeight: 600 }}>Automatic cleanup</div>
+                            <button onClick={() => toggleCleanupEnabled(s.id)} disabled={cleanupSaving}
+                              style={{ ...SMALL_BTN, color: cleanupSettings.enabled ? '#4ade80' : C.faint, borderColor: cleanupSettings.enabled ? '#14532d' : C.border, fontSize: 11, padding: '5px 10px' }}>
+                              {cleanupSettings.enabled ? '● On' : '○ Off'}
+                            </button>
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, marginBottom: 10 }}>
+                            <div style={{ flex: 1 }}>
+                              <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Keep daily reports for (days)</label>
+                              <input type="number" min="1" max="90" value={cleanupRetentionInput}
+                                onChange={e => setCleanupRetentionInput(parseInt(e.target.value) || 10)}
+                                className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                            </div>
+                            <button onClick={() => saveCleanupRetention(s.id)} disabled={cleanupSaving || cleanupRetentionInput === cleanupSettings.retentionDays}
+                              style={{ ...SMALL_BTN, fontSize: 12, padding: '7px 14px' }}>Save</button>
+                          </div>
+
+                          <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>
+                            Next automatic run: ~{String(utcHourToLocal(cleanupSettings.cronUtcHour)).padStart(2, '0')}:00 your time, daily{!cleanupSettings.enabled && ' (currently off)'}
+                          </div>
+
+                          {cleanupSettings.lastRun ? (
+                            <div style={{ fontSize: 11, color: C.muted, marginBottom: 10, lineHeight: 1.7 }}>
+                              Last run: {new Date(cleanupSettings.lastRun.ranAt).toLocaleString()}<br/>
+                              Storage: {formatBytes(cleanupSettings.lastRun.beforeBytes)} → {formatBytes(cleanupSettings.lastRun.afterBytes)} ({formatBytes(cleanupSettings.lastRun.reclaimedBytes)} reclaimed)<br/>
+                              Deleted {cleanupSettings.lastRun.deletedCount}, kept {cleanupSettings.lastRun.keptCount}
+                              {cleanupSettings.lastRun.keptUnemailedCount > 0 && ` (${cleanupSettings.lastRun.keptUnemailedCount} kept past the window — never emailed, so no other copy exists)`}
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: 11, color: C.faint, marginBottom: 10 }}>Never run yet</div>
+                          )}
+
+                          <button onClick={() => runCleanupNow(s.id)} disabled={cleanupRunning}
+                            style={{ ...SMALL_BTN, fontSize: 12, padding: '6px 12px' }}>
+                            {cleanupRunning ? <><Spinner size={9} />&nbsp;Running…</> : '🧹 Run Now'}
+                          </button>
+                          {cleanupMsg && (
+                            <div style={{ fontSize: 11, color: cleanupMsg.startsWith('✓') ? '#4ade80' : '#f87171', marginTop: 8 }}>{cleanupMsg}</div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+
                   <button onClick={() => setDeleteZoneOpen(o => !o)}
                     style={{ background: 'none', border: 'none', color: C.faint, cursor: 'pointer', fontSize: 11, padding: '8px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
                     <span>{deleteZoneOpen ? '▾' : '▸'}</span><span>Danger zone</span>

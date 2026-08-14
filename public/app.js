@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.31';
+const VERSION = 'v3.32';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3012,6 +3012,73 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
     return '$' + (n || 0).toFixed(4);
   }
 
+  const [archiveCleanupOpen, setArchiveCleanupOpen] = useState(false);
+  const [archiveCleanupLoading, setArchiveCleanupLoading] = useState(false);
+  const [archiveCleanup, setArchiveCleanup] = useState(null); // { enabled, retentionDays, lastRun, nextRunAt, cronUtcHour }
+  const [retentionDaysInput, setRetentionDaysInput] = useState(3);
+  const [archiveCleanupMsg, setArchiveCleanupMsg] = useState('');
+  const [archiveCleanupRunning, setArchiveCleanupRunning] = useState(false);
+  const [archiveCleanupSaving, setArchiveCleanupSaving] = useState(false);
+
+  async function loadArchiveCleanup() {
+    setArchiveCleanupLoading(true);
+    setArchiveCleanupMsg('');
+    try {
+      const result = await fns.httpsCallable('getArchiveCleanupSettings')();
+      setArchiveCleanup(result.data);
+      setRetentionDaysInput(result.data.retentionDays);
+    } catch (e) {
+      setArchiveCleanupMsg('⚠ Failed to load: ' + e.message);
+    }
+    setArchiveCleanupLoading(false);
+  }
+
+  async function toggleArchiveCleanupEnabled() {
+    if (!archiveCleanup) return;
+    const next = !archiveCleanup.enabled;
+    setArchiveCleanup(prev => ({ ...prev, enabled: next }));
+    setArchiveCleanupSaving(true);
+    try {
+      await fns.httpsCallable('updateArchiveCleanupSettings')({ enabled: next });
+    } catch (e) {
+      setArchiveCleanup(prev => ({ ...prev, enabled: !next }));
+      setArchiveCleanupMsg('⚠ Failed to update: ' + e.message);
+    }
+    setArchiveCleanupSaving(false);
+  }
+
+  async function saveRetentionDays() {
+    setArchiveCleanupSaving(true);
+    setArchiveCleanupMsg('');
+    try {
+      await fns.httpsCallable('updateArchiveCleanupSettings')({ retentionDays: retentionDaysInput });
+      setArchiveCleanup(prev => ({ ...prev, retentionDays: retentionDaysInput }));
+      setArchiveCleanupMsg('✓ Saved');
+    } catch (e) {
+      setArchiveCleanupMsg('⚠ Failed to save: ' + e.message);
+    }
+    setArchiveCleanupSaving(false);
+  }
+
+  async function runArchiveCleanupNow() {
+    setArchiveCleanupRunning(true);
+    setArchiveCleanupMsg('');
+    try {
+      const result = await fns.httpsCallable('runArchiveCleanupNow')();
+      setArchiveCleanup(prev => ({ ...prev, lastRun: result.data }));
+    } catch (e) {
+      setArchiveCleanupMsg('⚠ Cleanup failed: ' + e.message);
+    }
+    setArchiveCleanupRunning(false);
+  }
+
+  function formatBytes(n) {
+    if (!n && n !== 0) return '—';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+
   async function loadPrompts() {
     setPromptsLoading(true);
     try {
@@ -3280,6 +3347,79 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
               )}
               {costsMsg && (
                 <div style={{ fontSize: 12, color: '#f87171', marginTop: 10 }}>{costsMsg}</div>
+              )}
+            </div>
+          )}
+        </div>
+        )}
+
+        {settingsTab === 'general' && isAdmin && (
+        <div style={{ marginBottom: 28 }}>
+          <button
+            onClick={() => { setArchiveCleanupOpen(o => { if (!o) loadArchiveCleanup(); return !o; }); }}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: '12px 14px', background: archiveCleanupOpen ? C.card : '#0f1e35', border: '1px solid ' + (archiveCleanupOpen ? C.borderLight : C.border), borderRadius: 9, cursor: 'pointer', color: C.text }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 16 }}>🧹</span>
+              <div style={{ textAlign: 'left' }}>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>Utilities</div>
+                <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>Raw article archive cleanup — admin only</div>
+              </div>
+            </div>
+            <span style={{ color: C.faint, fontSize: 12 }}>{archiveCleanupOpen ? '▲ Hide' : '▼ Show'}</span>
+          </button>
+
+          {archiveCleanupOpen && (
+            <div style={{ marginTop: 12, padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border }}>
+              {archiveCleanupLoading || !archiveCleanup ? (
+                <div style={{ display: 'flex', justifyContent: 'center', padding: 20 }}><Spinner /></div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 12, color: C.faint, marginBottom: 14, lineHeight: 1.6 }}>
+                    Every source's raw collected articles are only ever used once, to build that source's next daily report — nothing else in the app reads them again afterward. This deletes them once they're old enough that they've served their purpose, across every country and source.
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, padding: '8px 10px', background: C.bg, borderRadius: 7 }}>
+                    <div style={{ fontSize: 12, color: C.text, fontWeight: 600 }}>Automatic cleanup</div>
+                    <button onClick={toggleArchiveCleanupEnabled} disabled={archiveCleanupSaving}
+                      style={{ ...SMALL_BTN, color: archiveCleanup.enabled ? '#4ade80' : C.faint, borderColor: archiveCleanup.enabled ? '#14532d' : C.border, fontSize: 11, padding: '5px 10px' }}>
+                      {archiveCleanup.enabled ? '● On' : '○ Off'}
+                    </button>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, marginBottom: 14 }}>
+                    <div style={{ flex: 1 }}>
+                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Keep raw articles for (days)</label>
+                      <input type="number" min="1" max="30" value={retentionDaysInput}
+                        onChange={e => setRetentionDaysInput(parseInt(e.target.value) || 3)}
+                        className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                    </div>
+                    <button onClick={saveRetentionDays} disabled={archiveCleanupSaving || retentionDaysInput === archiveCleanup.retentionDays}
+                      style={{ ...SMALL_BTN, fontSize: 12, padding: '7px 14px' }}>Save</button>
+                  </div>
+
+                  <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>
+                    Next automatic run: ~{String(utcHourToLocal(archiveCleanup.cronUtcHour)).padStart(2, '0')}:00 your time, daily{!archiveCleanup.enabled && ' (currently off)'}
+                  </div>
+
+                  {archiveCleanup.lastRun ? (
+                    <div style={{ fontSize: 12, color: C.muted, marginBottom: 14, lineHeight: 1.7 }}>
+                      Last run: {new Date(archiveCleanup.lastRun.ranAt).toLocaleString()}<br/>
+                      Storage: {formatBytes(archiveCleanup.lastRun.beforeBytes)} → {formatBytes(archiveCleanup.lastRun.afterBytes)} ({formatBytes(archiveCleanup.lastRun.reclaimedBytes)} reclaimed)<br/>
+                      Deleted {archiveCleanup.lastRun.deletedDayNodes} day{archiveCleanup.lastRun.deletedDayNodes === 1 ? '' : 's'} of archived articles, kept {archiveCleanup.lastRun.keptDayNodes}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: C.faint, marginBottom: 14 }}>Never run yet</div>
+                  )}
+
+                  <button onClick={runArchiveCleanupNow} disabled={archiveCleanupRunning}
+                    style={{ ...BTN('#2563eb'), fontSize: 13, padding: '7px 16px' }}>
+                    {archiveCleanupRunning ? <><Spinner size={10} />&nbsp;Running…</> : '🧹 Run Now'}
+                  </button>
+                  {archiveCleanupMsg && (
+                    <div style={{ fontSize: 12, color: archiveCleanupMsg.startsWith('✓') ? '#4ade80' : '#f87171', marginTop: 10 }}>{archiveCleanupMsg}</div>
+                  )}
+                </>
               )}
             </div>
           )}

@@ -628,6 +628,119 @@ exports.dedupeCountrySources = onCall(
   }
 );
 
+// ─── Raw article archive cleanup ──────────────────────────────────────────────
+// articleArchive/{countryKey}/{sourceId}/{day} exists purely to feed each
+// source's *next* daily report generation (generateDailyReportRun reads it,
+// then either prunes or — for a shared source — currently leaves it in place
+// indefinitely, see the comment there). Nothing else in the app ever reads
+// this data again: point-in-time reports re-fetch live RSS, and period
+// summaries work from the AI's own knowledge plus existing reports, neither
+// touches this archive. So once a day-node is a few days old, it's pure
+// dead weight regardless of whether it was ever "relevant" to any schedule
+// or shared between schedules — safe to delete outright, uniformly, with no
+// per-country or per-schedule distinction needed.
+const ARCHIVE_CLEANUP_DEFAULTS = { enabled: true, retentionDays: 3 };
+function clampRetentionDays(v) {
+  return Math.min(Math.max(parseInt(v) || ARCHIVE_CLEANUP_DEFAULTS.retentionDays, 1), 30);
+}
+
+async function sweepArticleArchive(retentionDays) {
+  const cutoff = addDaysUTC(isoDateUTC(new Date()), -retentionDays);
+  const snap = await db.ref('articleArchive').once('value');
+  const tree = snap.val() || {};
+  let beforeBytes = 0, afterBytes = 0, deletedDayNodes = 0, keptDayNodes = 0;
+  const deletions = {};
+  for (const [countryKey, sources] of Object.entries(tree)) {
+    for (const [sourceId, days] of Object.entries(sources || {})) {
+      for (const [day, articles] of Object.entries(days || {})) {
+        const size = Buffer.byteLength(JSON.stringify(articles));
+        beforeBytes += size;
+        if (day < cutoff) {
+          deletions[`articleArchive/${countryKey}/${sourceId}/${day}`] = null;
+          deletedDayNodes++;
+        } else {
+          afterBytes += size;
+          keptDayNodes++;
+        }
+      }
+    }
+  }
+  if (Object.keys(deletions).length > 0) await db.ref().update(deletions);
+  return {
+    ranAt: new Date().toISOString(), retentionDays, cutoff,
+    beforeBytes, afterBytes, reclaimedBytes: beforeBytes - afterBytes,
+    deletedDayNodes, keptDayNodes
+  };
+}
+
+// Fixed daily maintenance slot — not user-configurable (there's no reason to
+// tie it to any particular report's schedule), just needs to be predictable
+// enough to show "next run" in the UI.
+const ARCHIVE_CLEANUP_CRON_UTC_HOUR = 3;
+
+exports.getArchiveCleanupSettings = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    const snap = await db.ref('config/archiveCleanup').once('value');
+    const stored = snap.val() || {};
+    const now = new Date();
+    const nextRunAt = new Date(now);
+    nextRunAt.setUTCHours(ARCHIVE_CLEANUP_CRON_UTC_HOUR, 0, 0, 0);
+    if (nextRunAt <= now) nextRunAt.setUTCDate(nextRunAt.getUTCDate() + 1);
+    return {
+      enabled: stored.enabled !== undefined ? stored.enabled : ARCHIVE_CLEANUP_DEFAULTS.enabled,
+      retentionDays: stored.retentionDays !== undefined ? stored.retentionDays : ARCHIVE_CLEANUP_DEFAULTS.retentionDays,
+      lastRun: stored.lastRun || null,
+      nextRunAt: nextRunAt.toISOString(),
+      cronUtcHour: ARCHIVE_CLEANUP_CRON_UTC_HOUR
+    };
+  }
+);
+
+exports.updateArchiveCleanupSettings = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    const { enabled, retentionDays } = request.data || {};
+    const patch = {};
+    if (enabled !== undefined) patch.enabled = !!enabled;
+    if (retentionDays !== undefined) patch.retentionDays = clampRetentionDays(retentionDays);
+    if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');
+    await db.ref('config/archiveCleanup').update(patch);
+    return { ok: true };
+  }
+);
+
+// Manual trigger — runs the exact same sweep as the scheduled job, regardless
+// of the enabled toggle (an explicit click should always work), and records
+// the result to the same lastRun field so "when did this last run" is
+// accurate no matter which path triggered it.
+exports.runArchiveCleanupNow = onCall(
+  { timeoutSeconds: 300, memory: '256MiB', region: 'us-central1' },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    const settingsSnap = await db.ref('config/archiveCleanup').once('value');
+    const retentionDays = clampRetentionDays((settingsSnap.val() || {}).retentionDays);
+    const result = await sweepArticleArchive(retentionDays);
+    await db.ref('config/archiveCleanup/lastRun').set(result);
+    return result;
+  }
+);
+
+exports.pruneArticleArchive = onSchedule(
+  { schedule: `0 ${ARCHIVE_CLEANUP_CRON_UTC_HOUR} * * *`, region: 'us-central1', memory: '256MiB', timeoutSeconds: 300, timeZone: 'Etc/UTC' },
+  async () => {
+    const snap = await db.ref('config/archiveCleanup').once('value');
+    const settings = snap.val() || {};
+    const enabled = settings.enabled !== undefined ? settings.enabled : ARCHIVE_CLEANUP_DEFAULTS.enabled;
+    if (!enabled) return;
+    const retentionDays = clampRetentionDays(settings.retentionDays);
+    const result = await sweepArticleArchive(retentionDays);
+    await db.ref('config/archiveCleanup/lastRun').set(result);
+  }
+);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AGENT 1: Setup Country
 // ─────────────────────────────────────────────────────────────────────────────

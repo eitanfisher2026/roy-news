@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.29';
+const VERSION = 'v3.31';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -4414,7 +4414,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditReportTitle(s.reportTitle || '');
     setEditSelectedTopics(new Set((s.topics || []).map(t => toCanonicalTopicName(t, topicRegistry))));
     setEditSearchScope(s.searchScope === 'domestic' ? 'domestic' : 'global');
-    setEditWeeklyDay(s.weeklyDay || 'monday');
+    setEditWeeklyDay(s.weeklyDay || '');
     setEditHourUtc(s.hourUtc);
     setEditDailyHourUtc(s.dailyHourUtc ?? s.hourUtc);
     setEditWeeklySummaryWords(s.weeklySummaryWords || 400);
@@ -4842,14 +4842,17 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
                     <div style={{ flex: 1, minWidth: 130 }}>
                       <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly digest day</label>
-                      <select value={newWeeklyDay} onChange={e => setNewWeeklyDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                      <select value={newWeeklyDay} onChange={e => { setNewWeeklyDay(e.target.value); if (!e.target.value) setNewSendWeeklyEmail(false); }} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                        <option value="">None (daily only)</option>
                         {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
                       </select>
                     </div>
-                    <div style={{ flex: 1, minWidth: 110 }}>
-                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly report time</label>
-                      <LocalTimeSelect utcHour={newHourUtc} onChangeUtc={setNewHourUtc} />
-                    </div>
+                    {newWeeklyDay && (
+                      <div style={{ flex: 1, minWidth: 110 }}>
+                        <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly report time</label>
+                        <LocalTimeSelect utcHour={newHourUtc} onChangeUtc={setNewHourUtc} />
+                      </div>
+                    )}
                     <div style={{ flex: 1, minWidth: 110 }}>
                       <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily report time</label>
                       <LocalTimeSelect utcHour={newDailyHourUtc} onChangeUtc={setNewDailyHourUtc} />
@@ -4860,12 +4863,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                         onChange={e => setNewDailySummaryWords(parseInt(e.target.value) || 200)}
                         className="input-field" style={{ fontSize: 13, width: '100%' }} />
                     </div>
-                    <div style={{ flex: 1, minWidth: 140 }}>
-                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly summary (words)</label>
-                      <input type="number" min="50" max="1000" value={newWeeklySummaryWords}
-                        onChange={e => setNewWeeklySummaryWords(parseInt(e.target.value) || 400)}
-                        className="input-field" style={{ fontSize: 13, width: '100%' }} />
-                    </div>
+                    {newWeeklyDay && (
+                      <div style={{ flex: 1, minWidth: 140 }}>
+                        <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly summary (words)</label>
+                        <input type="number" min="50" max="1000" value={newWeeklySummaryWords}
+                          onChange={e => setNewWeeklySummaryWords(parseInt(e.target.value) || 400)}
+                          className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                      </div>
+                    )}
                   </div>
                   <UtcTimeInfo hourUtc={newHourUtc} dailyHourUtc={newDailyHourUtc} open={newTimeInfoOpen} onToggle={() => setNewTimeInfoOpen(o => !o)} />
 
@@ -4875,9 +4880,11 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                       <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
                         <input type="checkbox" checked={newSendDailyEmail} onChange={e => setNewSendDailyEmail(e.target.checked)} /> Daily
                       </label>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
-                        <input type="checkbox" checked={newSendWeeklyEmail} onChange={e => setNewSendWeeklyEmail(e.target.checked)} /> Weekly
-                      </label>
+                      {newWeeklyDay && (
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
+                          <input type="checkbox" checked={newSendWeeklyEmail} onChange={e => setNewSendWeeklyEmail(e.target.checked)} /> Weekly
+                        </label>
+                      )}
                     </div>
                     {(newSendDailyEmail || newSendWeeklyEmail) && (
                       <textarea value={newEmailRecipients} onChange={e => setNewEmailRecipients(e.target.value)}
@@ -4948,14 +4955,17 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
                 <div style={{ flex: 1, minWidth: 130 }}>
                   <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly digest day</label>
-                  <select value={editWeeklyDay} onChange={e => setEditWeeklyDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                  <select value={editWeeklyDay} onChange={e => { setEditWeeklyDay(e.target.value); if (!e.target.value) setEditSendWeeklyEmail(false); }} className="input-field" style={{ fontSize: 13, width: '100%' }}>
+                    <option value="">None (daily only)</option>
                     {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
                   </select>
                 </div>
-                <div style={{ flex: 1, minWidth: 110 }}>
-                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly report time</label>
-                  <LocalTimeSelect utcHour={editHourUtc} onChangeUtc={setEditHourUtc} />
-                </div>
+                {editWeeklyDay && (
+                  <div style={{ flex: 1, minWidth: 110 }}>
+                    <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly report time</label>
+                    <LocalTimeSelect utcHour={editHourUtc} onChangeUtc={setEditHourUtc} />
+                  </div>
+                )}
                 <div style={{ flex: 1, minWidth: 110 }}>
                   <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily report time</label>
                   <LocalTimeSelect utcHour={editDailyHourUtc} onChangeUtc={setEditDailyHourUtc} />
@@ -4966,12 +4976,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                     onChange={e => setEditDailySummaryWords(parseInt(e.target.value) || 200)}
                     className="input-field" style={{ fontSize: 13, width: '100%' }} />
                 </div>
-                <div style={{ flex: 1, minWidth: 140 }}>
-                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly summary (words)</label>
-                  <input type="number" min="50" max="1000" value={editWeeklySummaryWords}
-                    onChange={e => setEditWeeklySummaryWords(parseInt(e.target.value) || 400)}
-                    className="input-field" style={{ fontSize: 13, width: '100%' }} />
-                </div>
+                {editWeeklyDay && (
+                  <div style={{ flex: 1, minWidth: 140 }}>
+                    <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly summary (words)</label>
+                    <input type="number" min="50" max="1000" value={editWeeklySummaryWords}
+                      onChange={e => setEditWeeklySummaryWords(parseInt(e.target.value) || 400)}
+                      className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                  </div>
+                )}
               </div>
               <UtcTimeInfo hourUtc={editHourUtc} dailyHourUtc={editDailyHourUtc} open={editTimeInfoOpen} onToggle={() => setEditTimeInfoOpen(o => !o)} />
 
@@ -4981,9 +4993,11 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
                     <input type="checkbox" checked={editSendDailyEmail} onChange={e => setEditSendDailyEmail(e.target.checked)} /> Daily
                   </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={editSendWeeklyEmail} onChange={e => setEditSendWeeklyEmail(e.target.checked)} /> Weekly
-                  </label>
+                  {editWeeklyDay && (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={editSendWeeklyEmail} onChange={e => setEditSendWeeklyEmail(e.target.checked)} /> Weekly
+                    </label>
+                  )}
                 </div>
                 {(editSendDailyEmail || editSendWeeklyEmail) && (
                   <textarea value={editEmailRecipients} onChange={e => setEditEmailRecipients(e.target.value)}

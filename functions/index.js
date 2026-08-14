@@ -2469,7 +2469,25 @@ exports.generateScheduledReports = onSchedule(
         // Already produced today's daily report — guards against a double-fire
         // within the same due hour, not a real recurrence.
         const dailyAlreadyDone = schedule.lastRunStatus === 'ok' && schedule.lastPeriodEnd === periodEnd;
+        // Atomically claim this exact day before doing any work. Cloud
+        // Scheduler delivers "at least once," not "exactly once" — this
+        // function can genuinely be invoked twice within the same due hour
+        // a few seconds apart, and a plain read-then-write here let both
+        // invocations see "not done yet" and both generate + email a
+        // duplicate report (confirmed 2026-08-12: 3 of 4 daily schedules
+        // sent twice, with lastRunAt identical to the millisecond). The
+        // claim lives in its own field, separate from lastPeriodEnd/
+        // lastRunStatus, so a genuine failure still leaves those unset and
+        // gets retried by tomorrow's tick, exactly as before.
+        let dailyClaimed = false;
         if (!dailyAlreadyDone) {
+          await db.ref(`schedules/${scheduleId}/dailyClaimPeriod`).transaction(current => {
+            if (current === periodEnd) return; // another invocation already claimed this day
+            dailyClaimed = true;
+            return periodEnd;
+          });
+        }
+        if (!dailyAlreadyDone && dailyClaimed) {
           const runRef = db.ref(`reportRuns/${scheduleId}`).push();
           try {
             const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
@@ -2512,7 +2530,17 @@ exports.generateScheduledReports = onSchedule(
       // re-scanning anything. ──
       if (now.getUTCHours() === schedule.hourUtc && schedule.weeklyDay && WEEKDAYS[now.getUTCDay()] === schedule.weeklyDay) {
         const weeklyAlreadyDone = schedule.lastWeeklyRunStatus === 'ok' && schedule.lastWeeklyPeriodEnd === periodEnd;
+        // Same at-least-once double-fire risk as the daily block above —
+        // claim atomically before doing any work.
+        let weeklyClaimed = false;
         if (!weeklyAlreadyDone) {
+          await db.ref(`schedules/${scheduleId}/weeklyClaimPeriod`).transaction(current => {
+            if (current === periodEnd) return;
+            weeklyClaimed = true;
+            return periodEnd;
+          });
+        }
+        if (!weeklyAlreadyDone && weeklyClaimed) {
           const weeklyRunRef = db.ref(`reportRuns/${scheduleId}`).push();
           try {
             const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
@@ -2564,7 +2592,7 @@ exports.createSchedule = onCall(
     if (!country || !countryKey || !sourceIds?.length || !topics?.length) {
       throw new HttpsError('invalid-argument', 'country, countryKey, sourceIds, and topics required');
     }
-    if (!WEEKDAYS.includes(weeklyDay)) throw new HttpsError('invalid-argument', 'valid weeklyDay required');
+    if (weeklyDay && !WEEKDAYS.includes(weeklyDay)) throw new HttpsError('invalid-argument', 'weeklyDay must be a valid weekday or empty (weekly digest off)');
     const hour = Math.min(Math.max(parseInt(hourUtc) || 0, 0), 23);
     const parsedDailyHour = parseInt(dailyHourUtc);
     const dailyHour = Math.min(Math.max(Number.isFinite(parsedDailyHour) ? parsedDailyHour : hour, 0), 23);

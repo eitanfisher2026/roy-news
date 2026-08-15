@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.33';
+const VERSION = 'v3.34';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3951,6 +3951,10 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
         </div>
         </>
         )}
+
+        <div style={{ textAlign: 'center', fontSize: 11, color: C.faint, marginTop: 24, paddingTop: 16, borderTop: '1px solid ' + C.border }}>
+          © {new Date().getFullYear()} Roy News
+        </div>
       </div>
       {confirmDialog}
       {suggestModal && (
@@ -4445,6 +4449,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [newSendDailyEmail, setNewSendDailyEmail] = useState(false);
   const [newSendWeeklyEmail, setNewSendWeeklyEmail] = useState(false);
   const [newEmailRecipients, setNewEmailRecipients] = useState('');
+  const [newTranslateToHebrew, setNewTranslateToHebrew] = useState(true);
   const [estimate, setEstimate] = useState(null);
   const [estimating, setEstimating] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -4556,6 +4561,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [editSendDailyEmail, setEditSendDailyEmail] = useState(false);
   const [editSendWeeklyEmail, setEditSendWeeklyEmail] = useState(false);
   const [editEmailRecipients, setEditEmailRecipients] = useState('');
+  const [editTranslateToHebrew, setEditTranslateToHebrew] = useState(true);
   const [editSelected, setEditSelected] = useState(new Set());
   const [savingEdit, setSavingEdit] = useState(false);
 
@@ -4620,6 +4626,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditDailySummaryWords(s.dailySummaryWords || 200);
     setEditSendDailyEmail(!!s.sendDailyEmail);
     setEditSendWeeklyEmail(!!s.sendWeeklyEmail);
+    setEditTranslateToHebrew(s.translateToHebrew !== false);
     setEditEmailRecipients((s.emailRecipients || []).join(', '));
     setEditSelected(new Set(s.sourceIds));
     setShareEmail(''); setShareLevel('read'); setShareMsg('');
@@ -4647,7 +4654,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       reportTitle: editReportTitle.trim(),
       topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: editSearchScope,
       weeklyDay: editWeeklyDay, hourUtc: editHourUtc, dailyHourUtc: editDailyHourUtc, weeklySummaryWords: editWeeklySummaryWords, dailySummaryWords: editDailySummaryWords,
-      sendDailyEmail: editSendDailyEmail, sendWeeklyEmail: editSendWeeklyEmail,
+      sendDailyEmail: editSendDailyEmail, sendWeeklyEmail: editSendWeeklyEmail, translateToHebrew: editTranslateToHebrew,
       emailRecipients: editEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean),
       sourceIds: [...editSelected]
     };
@@ -4713,13 +4720,13 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
         country: selectedCountry.country, countryKey: selectedCountry.countryKey, reportTitle: newReportTitle.trim(),
         sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: newSearchScope,
         weeklyDay: newWeeklyDay, hourUtc: newHourUtc, dailyHourUtc: newDailyHourUtc, weeklySummaryWords: newWeeklySummaryWords, dailySummaryWords: newDailySummaryWords,
-        sendDailyEmail: newSendDailyEmail, sendWeeklyEmail: newSendWeeklyEmail,
+        sendDailyEmail: newSendDailyEmail, sendWeeklyEmail: newSendWeeklyEmail, translateToHebrew: newTranslateToHebrew,
         emailRecipients: newEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean)
       });
       setCreateMsg('✓ Schedule created');
       setShowCreate(false);
       setNewCountryKey(''); setNewSourceIds(new Set()); setNewSelectedTopics(new Set()); setNewSearchScope('global'); setEstimate(null); setNewReportTitle('');
-      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipients(''); setNewWeeklySummaryWords(400); setNewDailySummaryWords(200); setNewDailyHourUtc(6);
+      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipients(''); setNewTranslateToHebrew(true); setNewWeeklySummaryWords(400); setNewDailySummaryWords(200); setNewDailyHourUtc(6);
       await loadSchedules();
     } catch (e) {
       setCreateMsg('⚠ ' + e.message);
@@ -5092,9 +5099,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                       )}
                     </div>
                     {(newSendDailyEmail || newSendWeeklyEmail) && (
-                      <textarea value={newEmailRecipients} onChange={e => setNewEmailRecipients(e.target.value)}
-                        placeholder="email1@example.com, email2@example.com"
-                        className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 50, resize: 'vertical' }} />
+                      <>
+                        <textarea value={newEmailRecipients} onChange={e => setNewEmailRecipients(e.target.value)}
+                          placeholder="email1@example.com, email2@example.com"
+                          className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 50, resize: 'vertical' }} />
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginTop: 8 }}>
+                          <input type="checkbox" checked={newTranslateToHebrew} onChange={e => setNewTranslateToHebrew(e.target.checked)} /> 🇮🇱 Translate to Hebrew before sending
+                        </label>
+                      </>
                     )}
                   </div>
 
@@ -5205,9 +5217,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   )}
                 </div>
                 {(editSendDailyEmail || editSendWeeklyEmail) && (
-                  <textarea value={editEmailRecipients} onChange={e => setEditEmailRecipients(e.target.value)}
-                    placeholder="email1@example.com, email2@example.com"
-                    className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 50, resize: 'vertical' }} />
+                  <>
+                    <textarea value={editEmailRecipients} onChange={e => setEditEmailRecipients(e.target.value)}
+                      placeholder="email1@example.com, email2@example.com"
+                      className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 50, resize: 'vertical' }} />
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginTop: 8 }}>
+                      <input type="checkbox" checked={editTranslateToHebrew} onChange={e => setEditTranslateToHebrew(e.target.checked)} /> 🇮🇱 Translate to Hebrew before sending
+                    </label>
+                  </>
                 )}
               </div>
 

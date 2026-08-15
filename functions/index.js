@@ -1024,8 +1024,8 @@ function withTranslateSlot(fn) {
   });
 }
 
-async function translateToEnglishOnce(text) {
-  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=${encodeURIComponent(text)}`;
+async function translateTextOnce(text, targetLang) {
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`translate HTTP ${resp.status}`);
   const data = await resp.json();
@@ -1035,16 +1035,19 @@ async function translateToEnglishOnce(text) {
 
 // Retries transient failures (rate limit, blip) a couple of times before
 // falling back to the original text — that fallback should now be rare,
-// not the routine outcome it effectively was before.
-async function translateToEnglish(text) {
+// not the routine outcome it effectively was before. Shared by both the
+// source-language-to-English pass (translateToEnglish below) and the
+// optional English-to-Hebrew email pass (translateRunToHebrew) — same
+// endpoint, same concurrency-limited queue, just a different target.
+async function translateText(text, targetLang) {
   if (!text || !text.trim()) return text;
   return withTranslateSlot(async () => {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        return await translateToEnglishOnce(text);
+        return await translateTextOnce(text, targetLang);
       } catch (e) {
         if (attempt === 3) {
-          console.error('translateToEnglish: giving up after 3 attempts, text left untranslated:', e.message);
+          console.error(`translateText(${targetLang}): giving up after 3 attempts, text left untranslated:`, e.message);
           return text;
         }
         await sleep(300 * attempt);
@@ -1052,6 +1055,10 @@ async function translateToEnglish(text) {
     }
     return text;
   });
+}
+
+async function translateToEnglish(text) {
+  return translateText(text, 'en');
 }
 
 // A source's own RSS text needs no translation call at all if it only
@@ -1149,7 +1156,12 @@ function escapeHtml(str) {
 // sources, and never at all for a single-day report). Topics are informative
 // only — one line in the header — so the body groups directly by source,
 // alphabetically, instead of by topic.
-function buildReportHtml(schedule, run) {
+// rtl only affects the translated content paragraphs (summary, article
+// title/text) — the English chrome (labels, source names, date header)
+// stays left-aligned regardless, since it's never translated.
+function buildReportHtml(schedule, run, rtl = false) {
+  const contentDir = rtl ? ' dir="rtl"' : '';
+  const contentAlign = rtl ? 'text-align:right;' : '';
   const isWeekly = run.runType === 'weekly';
   const days = isWeekly ? [] : (run.days || []);
   const kind = isWeekly ? 'Weekly' : 'Daily';
@@ -1168,7 +1180,7 @@ function buildReportHtml(schedule, run) {
   const summaryHtml = run.summary
     ? `
           <p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 10px;font-family:${sans};">Summary</p>
-          <p style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0 0 ${days.length > 0 ? '22px' : '0'};font-family:${sans};">${escapeHtml(run.summary)}</p>
+          <p${contentDir} style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0 0 ${days.length > 0 ? '22px' : '0'};font-family:${sans};${contentAlign}">${escapeHtml(run.summary)}</p>
           ${days.length > 0 ? '<hr style="border:none;border-top:1px solid #e7e5e0;margin:0 0 22px;">' : ''}`
     : (isWeekly ? `<p style="font-size:14.5px;color:#90949c;font-family:${sans};">No coverage this period.</p>` : '');
 
@@ -1186,8 +1198,8 @@ function buildReportHtml(schedule, run) {
           ? `<a href="${escapeHtml(a.link)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(a.title)} ↗</a>`
           : escapeHtml(a.title);
         body += `<div style="margin-top:${ai === 0 ? '0' : '14px'};">`;
-        body += `<p style="font-size:15.5px;font-weight:600;color:#1c1e21;margin:0 0 4px;line-height:1.35;font-family:${sans};">${titleHtml}</p>`;
-        body += `<p style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0;font-family:${sans};">${escapeHtml(a.text)}</p>`;
+        body += `<p${contentDir} style="font-size:15.5px;font-weight:600;color:#1c1e21;margin:0 0 4px;line-height:1.35;font-family:${sans};${contentAlign}">${titleHtml}</p>`;
+        body += `<p${contentDir} style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0;font-family:${sans};${contentAlign}">${escapeHtml(a.text)}</p>`;
         body += `</div>`;
       });
       body += `</div>`;
@@ -1254,6 +1266,29 @@ function scheduleShortTopicLabel(schedule) {
   return label;
 }
 
+// Produces a Hebrew copy of a run for the outgoing email only — the stored
+// run (reportRuns, in-app history) always stays in English. Only the
+// substantive content is translated (summary, article title/text); links
+// and structural labels are untouched. Since the whole recipient list gets
+// one shared email (a single sendMail call below), this only ever runs
+// once per report regardless of how many recipients are on it.
+async function translateRunToHebrew(run) {
+  const translatedRun = { ...run };
+  if (run.summary) translatedRun.summary = await translateText(run.summary, 'iw');
+  translatedRun.days = await Promise.all((run.days || []).map(async d => ({
+    ...d,
+    sources: await Promise.all((d.sources || []).map(async s => ({
+      ...s,
+      articles: await Promise.all((s.articles || []).map(async a => ({
+        ...a,
+        title: await translateText(a.title, 'iw'),
+        text: await translateText(a.text, 'iw')
+      })))
+    })))
+  })));
+  return translatedRun;
+}
+
 async function sendReportEmail(schedule, run) {
   const recipients = (schedule.emailRecipients || []).filter(Boolean);
   if (recipients.length === 0) return;
@@ -1272,12 +1307,16 @@ async function sendReportEmail(schedule, run) {
     // renders the opened-message subject line (mobile/list views already
     // rendered it fine; only that one RTL-paragraph area needed the hint).
     const subject = `‎${formatEmailDateRange(run)} ${titlePart}`;
+    // Undefined (schedules saved before this setting existed) defaults to
+    // on, per how it was introduced — only an explicit false opts out.
+    const translateHebrew = schedule.translateToHebrew !== false;
+    const emailRun = translateHebrew ? await translateRunToHebrew(run) : run;
     await transporter.sendMail({
       from: `Roy News <${OWNER_EMAIL}>`,
       to: recipients.join(', '),
       subject,
-      text: buildRawReportText(schedule, run),
-      html: buildReportHtml(schedule, run)
+      text: buildRawReportText(schedule, emailRun),
+      html: buildReportHtml(schedule, emailRun, translateHebrew)
     });
   } catch (e) {
     // A failed email must never fail the report run itself — the run is
@@ -2725,6 +2764,7 @@ exports.createSchedule = onCall(
       id: ref.key, country, countryKey, sourceIds, topics, contextTopics, searchScope, reportTitle,
       weeklyDay, hourUtc: hour, dailyHourUtc: dailyHour, weeklySummaryWords, dailySummaryWords,
       sendDailyEmail: !!sendDailyEmail, sendWeeklyEmail: !!sendWeeklyEmail, emailRecipients,
+      translateToHebrew: request.data?.translateToHebrew !== false,
       enabled: true,
       createdBy: request.auth.uid, createdByEmail: request.auth.token.email || null,
       createdAt: new Date().toISOString(),
@@ -2754,7 +2794,8 @@ exports.updateSchedule = onCall(
     if (updates.dailyHourUtc !== undefined) updates.dailyHourUtc = Math.min(Math.max(parseInt(updates.dailyHourUtc) || 0, 0), 23);
     if (updates.reportTitle !== undefined) updates.reportTitle = String(updates.reportTitle || '').trim().slice(0, 60);
     if (updates.searchScope !== undefined) updates.searchScope = updates.searchScope === 'domestic' ? 'domestic' : 'global';
-    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope'];
+    if (updates.translateToHebrew !== undefined) updates.translateToHebrew = !!updates.translateToHebrew;
+    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope', 'translateToHebrew'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
     if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');

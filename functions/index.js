@@ -1289,39 +1289,66 @@ async function translateRunToHebrew(run) {
   return translatedRun;
 }
 
+// Each recipient picks English or Hebrew individually — some want the
+// original, some want it translated, on the same send. Accepts legacy
+// plain-string recipients too (pre-dates the per-recipient language field),
+// which default to English, same as before this existed.
+function normalizeRecipients(emailRecipients) {
+  return (emailRecipients || [])
+    .map(r => typeof r === 'string' ? { email: r, hebrew: false } : r)
+    .filter(r => r && r.email);
+}
+
 async function sendReportEmail(schedule, run) {
-  const recipients = (schedule.emailRecipients || []).filter(Boolean);
+  const recipients = normalizeRecipients(schedule.emailRecipients);
   if (recipients.length === 0) return;
-  try {
-    const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: OWNER_EMAIL, pass: gmailAppPassword.value() }
-    });
-    // reportTitle is the user-set identity for this schedule's emails now —
-    // falls back to the old topic-based label (or just the country) for any
-    // schedule that hasn't set one, so subjects still stay distinct enough
-    // to avoid the Gmail-threading collision this used to guard against.
-    const titlePart = (schedule.reportTitle || '').trim() || scheduleShortTopicLabel(schedule) || titleCase(schedule.country);
-    // Leading U+200E (left-to-right mark) — invisible, but stops Gmail's
-    // Hebrew-locale UI from bidi-reordering the "dd/Mon" date prefix when it
-    // renders the opened-message subject line (mobile/list views already
-    // rendered it fine; only that one RTL-paragraph area needed the hint).
-    const subject = `‎${formatEmailDateRange(run)} ${titlePart}`;
-    // Undefined (schedules saved before this setting existed) defaults to
-    // on, per how it was introduced — only an explicit false opts out.
-    const translateHebrew = schedule.translateToHebrew !== false;
-    const emailRun = translateHebrew ? await translateRunToHebrew(run) : run;
-    await transporter.sendMail({
-      from: `Roy News <${OWNER_EMAIL}>`,
-      to: recipients.join(', '),
-      subject,
-      text: buildRawReportText(schedule, emailRun),
-      html: buildReportHtml(schedule, emailRun, translateHebrew)
-    });
-  } catch (e) {
-    // A failed email must never fail the report run itself — the run is
-    // already durably recorded and viewable in-app regardless.
-    console.error('sendReportEmail failed', e.message);
+  const enRecipients = recipients.filter(r => !r.hebrew).map(r => r.email);
+  const heRecipients = recipients.filter(r => r.hebrew).map(r => r.email);
+
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: OWNER_EMAIL, pass: gmailAppPassword.value() }
+  });
+  // reportTitle is the user-set identity for this schedule's emails now —
+  // falls back to the old topic-based label (or just the country) for any
+  // schedule that hasn't set one, so subjects still stay distinct enough to
+  // avoid the Gmail-threading collision this used to guard against.
+  const titlePart = (schedule.reportTitle || '').trim() || scheduleShortTopicLabel(schedule) || titleCase(schedule.country);
+  // Leading U+200E (left-to-right mark) — invisible, but stops Gmail's
+  // Hebrew-locale UI from bidi-reordering the "dd/Mon" date prefix when it
+  // renders the opened-message subject line (mobile/list views already
+  // rendered it fine; only that one RTL-paragraph area needed the hint).
+  const subject = `‎${formatEmailDateRange(run)} ${titlePart}`;
+
+  // Two separate sends (when both language groups exist) rather than one
+  // email with mixed content — different recipients need genuinely
+  // different bodies. Hebrew is only ever translated once here, reused for
+  // every Hebrew recipient, regardless of how many are on the list. Each
+  // send fails independently so one language's delivery issue never blocks
+  // the other's — same "never fail the report run itself" guarantee as
+  // before, just per-branch now instead of wrapping the whole function.
+  if (enRecipients.length > 0) {
+    try {
+      await transporter.sendMail({
+        from: `Roy News <${OWNER_EMAIL}>`, to: enRecipients.join(', '), subject,
+        text: buildRawReportText(schedule, run),
+        html: buildReportHtml(schedule, run)
+      });
+    } catch (e) {
+      console.error('sendReportEmail (English) failed', e.message);
+    }
+  }
+  if (heRecipients.length > 0) {
+    try {
+      const hebrewRun = await translateRunToHebrew(run);
+      await transporter.sendMail({
+        from: `Roy News <${OWNER_EMAIL}>`, to: heRecipients.join(', '), subject,
+        text: buildRawReportText(schedule, hebrewRun),
+        html: buildReportHtml(schedule, hebrewRun, true)
+      });
+    } catch (e) {
+      console.error('sendReportEmail (Hebrew) failed', e.message);
+    }
   }
 }
 
@@ -1413,9 +1440,12 @@ Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], 
       result[t] = Array.isArray(v) ? v.filter(n => Number.isInteger(n) && n >= 1 && n <= articles.length) : [];
     }
     return result;
-  } catch {
+  } catch (e) {
     // A failed classification call should fail closed (no matches, no main
-    // analysis call either), not fail open into a full-body-priced pass.
+    // analysis call either), not fail open into a full-body-priced pass —
+    // still logged now, though, so a real failure (billing, invalid key,
+    // outage) leaves a trace instead of looking identical to a quiet day.
+    console.error('classifyContextTopicsByHeader failed:', e.message);
     return empty;
   }
 }
@@ -1454,8 +1484,18 @@ Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], 
       result[t] = Array.isArray(v) ? v.filter(n => Number.isInteger(n) && n >= 1 && n <= articles.length) : [];
     }
     return result;
-  } catch {
-    return empty;
+  } catch (e) {
+    // Unlike classifyContextTopicsByHeader below, this IS the final decision
+    // for the scheduled-report pipeline — there's no follow-up pass to "fail
+    // open" into here, so swallowing the error used to just produce a
+    // wrong, silent "nothing today" result with zero trace of what broke
+    // (e.g. an AI billing/quota failure came back looking identical to a
+    // genuinely quiet news day). Propagating lets the caller's existing
+    // per-schedule error handling in generateScheduledReports do its job:
+    // log it, mark the run as failed, and retry tomorrow instead of
+    // silently emailing an empty report as if it were accurate.
+    console.error('classifyContextTopicsByFullBody failed:', e.message);
+    throw e;
   }
 }
 
@@ -2721,15 +2761,20 @@ exports.generateScheduledReports = onSchedule(
 // Recipients are arbitrary email addresses, not tied to authorizedUids —
 // anyone with a valid-looking address can be added, format-checked only.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Each recipient carries its own language now — some want the report in
+// English, some in Hebrew, from the same send. Accepts either {email,
+// hebrew} objects (current shape) or plain strings (schedules saved before
+// this existed, which default to English/untranslated — same as before).
 function sanitizeEmailList(list) {
   if (!Array.isArray(list)) return [];
   const seen = new Set();
   const out = [];
   for (const raw of list) {
-    const email = String(raw || '').trim().toLowerCase();
+    const isObj = raw && typeof raw === 'object';
+    const email = String(isObj ? raw.email : raw || '').trim().toLowerCase();
     if (!email || !EMAIL_RE.test(email) || seen.has(email)) continue;
     seen.add(email);
-    out.push(email);
+    out.push({ email, hebrew: isObj ? !!raw.hebrew : false });
   }
   return out;
 }
@@ -2764,7 +2809,6 @@ exports.createSchedule = onCall(
       id: ref.key, country, countryKey, sourceIds, topics, contextTopics, searchScope, reportTitle,
       weeklyDay, hourUtc: hour, dailyHourUtc: dailyHour, weeklySummaryWords, dailySummaryWords,
       sendDailyEmail: !!sendDailyEmail, sendWeeklyEmail: !!sendWeeklyEmail, emailRecipients,
-      translateToHebrew: request.data?.translateToHebrew !== false,
       enabled: true,
       createdBy: request.auth.uid, createdByEmail: request.auth.token.email || null,
       createdAt: new Date().toISOString(),
@@ -2794,8 +2838,7 @@ exports.updateSchedule = onCall(
     if (updates.dailyHourUtc !== undefined) updates.dailyHourUtc = Math.min(Math.max(parseInt(updates.dailyHourUtc) || 0, 0), 23);
     if (updates.reportTitle !== undefined) updates.reportTitle = String(updates.reportTitle || '').trim().slice(0, 60);
     if (updates.searchScope !== undefined) updates.searchScope = updates.searchScope === 'domestic' ? 'domestic' : 'global';
-    if (updates.translateToHebrew !== undefined) updates.translateToHebrew = !!updates.translateToHebrew;
-    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope', 'translateToHebrew'];
+    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
     if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');

@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.34';
+const VERSION = 'v3.36';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1358,6 +1358,10 @@ function CountryStep({ onCountryConfirmed, onError, user, onOpenSchedule, hasUnr
             </div>
           </div>
         )}
+      </div>
+
+      <div style={{ textAlign: 'center', fontSize: 11, color: C.faint, marginTop: 20 }}>
+        © {new Date().getFullYear()} Roy News
       </div>
     </div>
   );
@@ -3971,6 +3975,17 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
 // collecting each source's feed, rather than checking it once at report time.
 const WEEKDAY_OPTIONS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
 
+// Mirrors functions/index.js normalizeRecipients — legacy plain-string
+// recipients (saved before per-recipient language existed) default to
+// English, same as before.
+function splitRecipientsForEdit(emailRecipients) {
+  const recipients = (emailRecipients || []).map(r => typeof r === 'string' ? { email: r, hebrew: false } : r);
+  return {
+    en: recipients.filter(r => !r.hebrew).map(r => r.email).join(', '),
+    he: recipients.filter(r => r.hebrew).map(r => r.email).join(', ')
+  };
+}
+
 function formatBytes(n) {
   if (!n && n !== 0) return '—';
   if (n < 1024) return n + ' B';
@@ -4448,8 +4463,8 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [newDailySummaryWords, setNewDailySummaryWords] = useState(200);
   const [newSendDailyEmail, setNewSendDailyEmail] = useState(false);
   const [newSendWeeklyEmail, setNewSendWeeklyEmail] = useState(false);
-  const [newEmailRecipients, setNewEmailRecipients] = useState('');
-  const [newTranslateToHebrew, setNewTranslateToHebrew] = useState(true);
+  const [newEmailRecipientsEn, setNewEmailRecipientsEn] = useState('');
+  const [newEmailRecipientsHe, setNewEmailRecipientsHe] = useState('');
   const [estimate, setEstimate] = useState(null);
   const [estimating, setEstimating] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -4560,8 +4575,8 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [editDailySummaryWords, setEditDailySummaryWords] = useState(200);
   const [editSendDailyEmail, setEditSendDailyEmail] = useState(false);
   const [editSendWeeklyEmail, setEditSendWeeklyEmail] = useState(false);
-  const [editEmailRecipients, setEditEmailRecipients] = useState('');
-  const [editTranslateToHebrew, setEditTranslateToHebrew] = useState(true);
+  const [editEmailRecipientsEn, setEditEmailRecipientsEn] = useState('');
+  const [editEmailRecipientsHe, setEditEmailRecipientsHe] = useState('');
   const [editSelected, setEditSelected] = useState(new Set());
   const [savingEdit, setSavingEdit] = useState(false);
 
@@ -4626,8 +4641,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditDailySummaryWords(s.dailySummaryWords || 200);
     setEditSendDailyEmail(!!s.sendDailyEmail);
     setEditSendWeeklyEmail(!!s.sendWeeklyEmail);
-    setEditTranslateToHebrew(s.translateToHebrew !== false);
-    setEditEmailRecipients((s.emailRecipients || []).join(', '));
+    const splitRecipients = splitRecipientsForEdit(s.emailRecipients);
+    setEditEmailRecipientsEn(splitRecipients.en);
+    setEditEmailRecipientsHe(splitRecipients.he);
     setEditSelected(new Set(s.sourceIds));
     setShareEmail(''); setShareLevel('read'); setShareMsg('');
     setDeleteZoneOpen(false);
@@ -4654,8 +4670,11 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       reportTitle: editReportTitle.trim(),
       topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: editSearchScope,
       weeklyDay: editWeeklyDay, hourUtc: editHourUtc, dailyHourUtc: editDailyHourUtc, weeklySummaryWords: editWeeklySummaryWords, dailySummaryWords: editDailySummaryWords,
-      sendDailyEmail: editSendDailyEmail, sendWeeklyEmail: editSendWeeklyEmail, translateToHebrew: editTranslateToHebrew,
-      emailRecipients: editEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean),
+      sendDailyEmail: editSendDailyEmail, sendWeeklyEmail: editSendWeeklyEmail,
+      emailRecipients: [
+        ...editEmailRecipientsEn.split(/[,\n]/).map(e => e.trim()).filter(Boolean).map(email => ({ email, hebrew: false })),
+        ...editEmailRecipientsHe.split(/[,\n]/).map(e => e.trim()).filter(Boolean).map(email => ({ email, hebrew: true }))
+      ],
       sourceIds: [...editSelected]
     };
     setSavingEdit(true);
@@ -4720,13 +4739,16 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
         country: selectedCountry.country, countryKey: selectedCountry.countryKey, reportTitle: newReportTitle.trim(),
         sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: newSearchScope,
         weeklyDay: newWeeklyDay, hourUtc: newHourUtc, dailyHourUtc: newDailyHourUtc, weeklySummaryWords: newWeeklySummaryWords, dailySummaryWords: newDailySummaryWords,
-        sendDailyEmail: newSendDailyEmail, sendWeeklyEmail: newSendWeeklyEmail, translateToHebrew: newTranslateToHebrew,
-        emailRecipients: newEmailRecipients.split(/[,\n]/).map(e => e.trim()).filter(Boolean)
+        sendDailyEmail: newSendDailyEmail, sendWeeklyEmail: newSendWeeklyEmail,
+        emailRecipients: [
+          ...newEmailRecipientsEn.split(/[,\n]/).map(e => e.trim()).filter(Boolean).map(email => ({ email, hebrew: false })),
+          ...newEmailRecipientsHe.split(/[,\n]/).map(e => e.trim()).filter(Boolean).map(email => ({ email, hebrew: true }))
+        ]
       });
       setCreateMsg('✓ Schedule created');
       setShowCreate(false);
       setNewCountryKey(''); setNewSourceIds(new Set()); setNewSelectedTopics(new Set()); setNewSearchScope('global'); setEstimate(null); setNewReportTitle('');
-      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipients(''); setNewTranslateToHebrew(true); setNewWeeklySummaryWords(400); setNewDailySummaryWords(200); setNewDailyHourUtc(6);
+      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipientsEn(''); setNewEmailRecipientsHe(''); setNewWeeklySummaryWords(400); setNewDailySummaryWords(200); setNewDailyHourUtc(6);
       await loadSchedules();
     } catch (e) {
       setCreateMsg('⚠ ' + e.message);
@@ -5100,12 +5122,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                     </div>
                     {(newSendDailyEmail || newSendWeeklyEmail) && (
                       <>
-                        <textarea value={newEmailRecipients} onChange={e => setNewEmailRecipients(e.target.value)}
+                        <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 3 }}>Recipients (English)</label>
+                        <textarea value={newEmailRecipientsEn} onChange={e => setNewEmailRecipientsEn(e.target.value)}
                           placeholder="email1@example.com, email2@example.com"
-                          className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 50, resize: 'vertical' }} />
-                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginTop: 8 }}>
-                          <input type="checkbox" checked={newTranslateToHebrew} onChange={e => setNewTranslateToHebrew(e.target.checked)} /> 🇮🇱 Translate to Hebrew before sending
-                        </label>
+                          className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 44, resize: 'vertical', marginBottom: 8 }} />
+                        <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 3 }}>Recipients (Hebrew 🇮🇱 — translated before sending)</label>
+                        <textarea value={newEmailRecipientsHe} onChange={e => setNewEmailRecipientsHe(e.target.value)}
+                          placeholder="email1@example.com, email2@example.com"
+                          className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 44, resize: 'vertical' }} />
                       </>
                     )}
                   </div>
@@ -5218,12 +5242,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                 </div>
                 {(editSendDailyEmail || editSendWeeklyEmail) && (
                   <>
-                    <textarea value={editEmailRecipients} onChange={e => setEditEmailRecipients(e.target.value)}
+                    <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 3 }}>Recipients (English)</label>
+                    <textarea value={editEmailRecipientsEn} onChange={e => setEditEmailRecipientsEn(e.target.value)}
                       placeholder="email1@example.com, email2@example.com"
-                      className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 50, resize: 'vertical' }} />
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginTop: 8 }}>
-                      <input type="checkbox" checked={editTranslateToHebrew} onChange={e => setEditTranslateToHebrew(e.target.checked)} /> 🇮🇱 Translate to Hebrew before sending
-                    </label>
+                      className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 44, resize: 'vertical', marginBottom: 8 }} />
+                    <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 3 }}>Recipients (Hebrew 🇮🇱 — translated before sending)</label>
+                    <textarea value={editEmailRecipientsHe} onChange={e => setEditEmailRecipientsHe(e.target.value)}
+                      placeholder="email1@example.com, email2@example.com"
+                      className="input-field" style={{ fontSize: 12, width: '100%', minHeight: 44, resize: 'vertical' }} />
                   </>
                 )}
               </div>

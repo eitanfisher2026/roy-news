@@ -1352,6 +1352,48 @@ async function sendReportEmail(schedule, run) {
   }
 }
 
+// callAI throws an HttpsError with a specific `code` for anything that looks
+// like a billing/quota/API-key problem (see callAI's catch block) — that's
+// the narrow set worth waking someone up for, as opposed to a one-off
+// network blip or an AI response that failed to parse.
+function isAiBillingOrKeyError(e) {
+  return !!e && (e.code === 'resource-exhausted' || e.code === 'permission-denied');
+}
+
+// One email per user per day, no matter how many of their schedules hit the
+// same underlying problem — this is the failure mode that silently produced
+// a run of empty reports before classifyContextTopicsByFullBody was fixed
+// to stop swallowing it, so it's worth alerting on directly rather than
+// only relying on someone noticing an empty report days later.
+const AI_ALERT_THROTTLE_MS = 24 * 60 * 60 * 1000;
+
+async function maybeSendAiFailureAlert(schedule, error) {
+  if (!isAiBillingOrKeyError(error)) return;
+  const uid = schedule.createdBy;
+  const to = schedule.createdByEmail;
+  if (!uid || !to) return;
+  try {
+    const alertRef = db.ref(`users/${uid}/lastAiErrorAlertAt`);
+    const last = (await alertRef.once('value')).val();
+    if (last && (Date.now() - new Date(last).getTime()) < AI_ALERT_THROTTLE_MS) return;
+    await alertRef.set(new Date().toISOString());
+
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user: OWNER_EMAIL, pass: gmailAppPassword.value() }
+    });
+    const reportName = (schedule.reportTitle || '').trim() || titleCase(schedule.country);
+    await transporter.sendMail({
+      from: `Roy News <${OWNER_EMAIL}>`,
+      to,
+      subject: '⚠ Roy News — AI provider error, reports may be empty',
+      text: `Your "${reportName}" report just failed to generate because of an AI provider error:\n\n${error.message}\n\nThis usually means the AI account under Settings → AI Provider is out of credits, hit a quota limit, or has an invalid/expired API key — until it's fixed, affected reports will keep coming back empty instead of failing loudly.\n\nOpen Roy News → Settings → AI Provider to check your key and billing.\n\n(You'll only get one of these emails per day even if several of your reports are affected.)`
+    });
+  } catch (e2) {
+    console.error('maybeSendAiFailureAlert failed', e2.message);
+  }
+}
+
 function notCoveredAnalysis(topics, dateLabel) {
   return {
     topicAnalyses: topics.map(t => ({
@@ -2604,6 +2646,7 @@ async function aggregateWeeklyFromDailyRuns(scheduleId, schedule, weeklyPeriodEn
     // A failed summary must never fail the whole weekly digest — the
     // per-source article listing is still useful on its own without it.
     console.error('generateWeeklySummary failed', e.message);
+    await maybeSendAiFailureAlert(schedule, e);
   }
 
   return {
@@ -2700,6 +2743,7 @@ exports.generateScheduledReports = onSchedule(
               }
             } catch (e) {
               console.error('generateDailySummary failed', e.message);
+              await maybeSendAiFailureAlert(schedule, e);
             }
             await runRef.set(run);
             await db.ref(`schedules/${scheduleId}`).update({ lastRunAt: now.toISOString(), lastRunStatus: 'ok', lastPeriodEnd: periodEnd });
@@ -2719,6 +2763,7 @@ exports.generateScheduledReports = onSchedule(
             // skipping it.
             await runRef.set({ scheduleId, generatedAt: now.toISOString(), periodStart: periodEnd, periodEnd, dateLabel: periodEnd, runType: 'daily', status: 'error', error: e.message });
             await db.ref(`schedules/${scheduleId}`).update({ lastRunAt: now.toISOString(), lastRunStatus: 'error' });
+            await maybeSendAiFailureAlert(schedule, e);
           }
         }
       }
@@ -2750,6 +2795,7 @@ exports.generateScheduledReports = onSchedule(
           } catch (e) {
             await weeklyRunRef.set({ scheduleId, generatedAt: now.toISOString(), periodStart: addDaysUTC(periodEnd, -6), periodEnd, dateLabel: periodEnd, runType: 'weekly', status: 'error', error: e.message });
             await db.ref(`schedules/${scheduleId}`).update({ lastWeeklyRunAt: now.toISOString(), lastWeeklyRunStatus: 'error' });
+            await maybeSendAiFailureAlert(schedule, e);
           }
         }
       }

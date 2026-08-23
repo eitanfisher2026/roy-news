@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.40';
+const VERSION = 'v3.41';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -4327,6 +4327,9 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
                         style={{ color: '#60a5fa', fontSize: 12, fontWeight: 600, lineHeight: 1.4, textDecoration: 'none', display: 'block', marginBottom: 3 }}>{a.title} ↗</a>
                     : <div style={{ fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 3 }}>{a.title}</div>
                   }
+                  {a.translationFailed && (
+                    <div style={{ fontSize: 11, color: '#f59e0b', marginBottom: 3 }}>⚠ Could not translate this article right now — shown in its original language.</div>
+                  )}
                   <div style={{ fontSize: 12, color: '#cbd5e1', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{a.text}</div>
                 </div>
               ))}

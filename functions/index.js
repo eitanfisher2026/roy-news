@@ -1090,6 +1090,7 @@ function buildRawReportText(schedule, run) {
       text += `  Source: ${s.sourceName}\n`;
       for (const a of s.articles) {
         text += `   ${a.title}\n   ${a.text}\n`;
+        if (a.translationFailed) text += `   ⚠ Could not translate this article right now — shown in its original language.\n`;
         if (a.link) text += `   ${a.link}\n`;
       }
     }
@@ -1150,6 +1151,9 @@ function buildReportHtml(schedule, run, rtl = false) {
           : escapeHtml(a.title);
         body += `<div style="margin-top:${ai === 0 ? '0' : '14px'};">`;
         body += `<p${contentDir} style="font-size:15.5px;font-weight:600;color:#1c1e21;margin:0 0 4px;line-height:1.35;font-family:${sans};${contentAlign}">${titleHtml}</p>`;
+        if (a.translationFailed) {
+          body += `<p style="font-size:12px;color:#b45309;margin:0 0 4px;font-family:${sans};">⚠ Could not translate this article right now — shown in its original language.</p>`;
+        }
         body += `<p${contentDir} style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0;font-family:${sans};${contentAlign}">${escapeHtml(a.text)}</p>`;
         body += `</div>`;
       });
@@ -2495,7 +2499,6 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
     const isEnglish = sourceIsEnglishOnly(source);
     const translatedArticles = articles.map(a => ({ title: a.title, text: a.text, link: a.link }));
     const toTranslate = isEnglish ? [] : relevantIndices;
-    const untranslatable = new Set();
     if (toTranslate.length > 0) {
       const batch = toTranslate.flatMap(i => [articles[i - 1].title, articles[i - 1].text]);
       try {
@@ -2505,16 +2508,13 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
           translatedArticles[i - 1] = { title: translations[idx * 2], text: translations[idx * 2 + 1], link: articles[i - 1].link };
         });
       } catch (e) {
-        // For a report that's supposed to be all-English, articles stuck in
-        // their source language are worse than fewer articles — drop the
-        // whole batch rather than show any of it untranslated.
-        console.error(`translateBatch failed for source ${source.id}, dropping ${toTranslate.length} article(s) from report:`, e.message);
-        toTranslate.forEach(i => untranslatable.add(i));
-      }
-    }
-    if (untranslatable.size > 0) {
-      for (const topic of Object.keys(topicKeywordMatches)) {
-        topicKeywordMatches[topic] = topicKeywordMatches[topic].filter(idx => !untranslatable.has(idx));
+        // A report with an untranslated article, clearly flagged, beats an
+        // article silently dropped (or worse, a whole report that looks
+        // empty) — the original text (already seeded above) is left as-is,
+        // translationFailed just drives the "couldn't translate" note the
+        // email/report renderers show next to it.
+        console.error(`translateBatch failed for source ${source.id}, showing ${toTranslate.length} article(s) untranslated:`, e.message);
+        toTranslate.forEach(i => { translatedArticles[i - 1] = { ...translatedArticles[i - 1], translationFailed: true }; });
       }
     }
 

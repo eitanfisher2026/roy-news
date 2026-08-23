@@ -1008,7 +1008,7 @@ function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 // all-English. Capping concurrency here makes hitting the limit far less
 // likely in the first place.
 let translateInFlight = 0;
-const TRANSLATE_MAX_CONCURRENT = 6;
+const TRANSLATE_MAX_CONCURRENT = 4;
 const translateQueue = [];
 function runTranslateQueue() {
   while (translateInFlight < TRANSLATE_MAX_CONCURRENT && translateQueue.length > 0) {
@@ -1033,27 +1033,32 @@ async function translateTextOnce(text, targetLang) {
   return data[0].map(s => s?.[0] || '').join('');
 }
 
-// Retries transient failures (rate limit, blip) a couple of times before
-// falling back to the original text — that fallback should now be rare,
-// not the routine outcome it effectively was before. Shared by both the
-// source-language-to-English pass (translateToEnglish below) and the
-// optional English-to-Hebrew email pass (translateRunToHebrew) — same
-// endpoint, same concurrency-limited queue, just a different target.
-async function translateText(text, targetLang) {
+// Retries transient failures (rate limit, blip) with backoff long enough to
+// actually ride out a burst of 429s from this free/unofficial endpoint —
+// confirmed 2026-08-23: a cluster of "giving up after 3 attempts" fallbacks
+// (300-900ms of total backoff, nowhere near enough) is exactly what let
+// Thai/Khmer article text leak untranslated into English-only reports.
+// `strict` throws on total failure instead of silently returning the
+// original text — used only where "the wrong language" is worse than "this
+// one article is missing" (see the per-article call in
+// generateDailyReportRun); every other caller keeps the old graceful
+// fallback, since for those a stale/untranslated value is the acceptably
+// degraded outcome, not a correctness bug.
+async function translateText(text, targetLang, { strict = false, maxAttempts = 6 } = {}) {
   if (!text || !text.trim()) return text;
   return withTranslateSlot(async () => {
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         return await translateTextOnce(text, targetLang);
       } catch (e) {
-        if (attempt === 3) {
-          console.error(`translateText(${targetLang}): giving up after 3 attempts, text left untranslated:`, e.message);
+        if (attempt === maxAttempts) {
+          if (strict) throw e;
+          console.error(`translateText(${targetLang}): giving up after ${maxAttempts} attempts, text left untranslated:`, e.message);
           return text;
         }
-        await sleep(300 * attempt);
+        await sleep(Math.min(600 * 2 ** (attempt - 1), 6000) + Math.floor(Math.random() * 300));
       }
     }
-    return text;
   });
 }
 
@@ -2518,12 +2523,31 @@ async function generateDailyReportRun(scheduleId, schedule, ai, contextMode, now
     // call, just applied to translation now instead.
     const isEnglish = sourceIsEnglishOnly(source);
     const translatedArticles = articles.map(a => ({ title: a.title, text: a.text, link: a.link }));
+    // Strict here (unlike every other translateText call) — for a report
+    // that's supposed to be all-English, an article stuck in its source
+    // language is worse than one fewer article, so a translation that's
+    // still failing after strict's long backoff gets dropped from this
+    // report entirely rather than shown untranslated.
+    const untranslatable = new Set();
     await Promise.all(relevantIndices.map(async (i) => {
       if (isEnglish) return;
       const a = articles[i - 1];
-      const [title, text] = await Promise.all([translateToEnglish(a.title), translateToEnglish(a.text)]);
-      translatedArticles[i - 1] = { title, text, link: a.link };
+      try {
+        const [title, text] = await Promise.all([
+          translateText(a.title, 'en', { strict: true }),
+          translateText(a.text, 'en', { strict: true })
+        ]);
+        translatedArticles[i - 1] = { title, text, link: a.link };
+      } catch (e) {
+        console.error(`translation failed for "${a.title?.slice(0, 60)}", dropping from report:`, e.message);
+        untranslatable.add(i);
+      }
     }));
+    if (untranslatable.size > 0) {
+      for (const topic of Object.keys(topicKeywordMatches)) {
+        topicKeywordMatches[topic] = topicKeywordMatches[topic].filter(idx => !untranslatable.has(idx));
+      }
+    }
 
     perSourceMatchData.push({ source, topicKeywordMatches, translatedArticles });
   }));
@@ -2751,11 +2775,27 @@ exports.generateScheduledReports = onSchedule(
               try { await db.ref().update(pendingDeletions); } catch {}
             }
             if (schedule.sendDailyEmail) {
-              await sendReportEmail(schedule, run);
-              // Marks this run as having a durable copy outside the
-              // database (the recipient's inbox) — sweepScheduleReportRuns
-              // only deletes old daily runs once this is true.
-              await runRef.update({ emailSent: true });
+              // A second, independent atomic claim, checked as late as
+              // possible (right before the actual send) — belt-and-
+              // suspenders on top of dailyClaimPeriod above. Confirmed
+              // 2026-08-23: two full daily runs still got generated and
+              // emailed for the same schedule/period ~2 minutes apart
+              // despite that earlier claim, so the email itself — the
+              // part a recipient actually notices twice — gets its own
+              // gate rather than trusting the generation-time claim alone.
+              let emailClaimed = false;
+              await db.ref(`schedules/${scheduleId}/dailyEmailedPeriod`).transaction(current => {
+                if (current === periodEnd) return;
+                emailClaimed = true;
+                return periodEnd;
+              });
+              if (emailClaimed) {
+                await sendReportEmail(schedule, run);
+                // Marks this run as having a durable copy outside the
+                // database (the recipient's inbox) — sweepScheduleReportRuns
+                // only deletes old daily runs once this is true.
+                await runRef.update({ emailSent: true });
+              }
             }
           } catch (e) {
             // Deliberately does NOT set lastPeriodEnd on failure, so the next
@@ -2791,7 +2831,16 @@ exports.generateScheduledReports = onSchedule(
             const weeklyRun = await aggregateWeeklyFromDailyRuns(scheduleId, schedule, periodEnd, now, ai);
             await weeklyRunRef.set(weeklyRun);
             await db.ref(`schedules/${scheduleId}`).update({ lastWeeklyRunAt: now.toISOString(), lastWeeklyRunStatus: 'ok', lastWeeklyPeriodEnd: periodEnd });
-            if (schedule.sendWeeklyEmail) await sendReportEmail(schedule, weeklyRun);
+            if (schedule.sendWeeklyEmail) {
+              // Same belt-and-suspenders send-time claim as the daily block.
+              let weeklyEmailClaimed = false;
+              await db.ref(`schedules/${scheduleId}/weeklyEmailedPeriod`).transaction(current => {
+                if (current === periodEnd) return;
+                weeklyEmailClaimed = true;
+                return periodEnd;
+              });
+              if (weeklyEmailClaimed) await sendReportEmail(schedule, weeklyRun);
+            }
           } catch (e) {
             await weeklyRunRef.set({ scheduleId, generatedAt: now.toISOString(), periodStart: addDaysUTC(periodEnd, -6), periodEnd, dateLabel: periodEnd, runType: 'weekly', status: 'error', error: e.message });
             await db.ref(`schedules/${scheduleId}`).update({ lastWeeklyRunAt: now.toISOString(), lastWeeklyRunStatus: 'error' });

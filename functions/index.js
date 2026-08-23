@@ -992,79 +992,12 @@ function splitTopicsByMode(topics, contextTopics) {
 }
 
 // ─── Raw (no-AI-summary) scheduled reports ────────────────────────────────────
-// Same free public endpoint app.js's translateViaGoogle hits client-side —
-// server-side fetch has no CORS restriction, so this just calls it directly.
-// sl=auto (not a fixed source language) since a source's RSS text may already
-// be partly English (e.g. proper nouns) mixed with its native language.
-function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
-
-// This free/unofficial endpoint silently rate-limits under bursty concurrent
-// load — a schedule with several non-English sources, each with many matched
-// articles, used to fire 50-100+ simultaneous translate calls at once (two
-// per article, every source in parallel, every relevant article in
-// parallel). A rate-limited call used to fail straight through to the
-// original, UNTRANSLATED text with no retry and no signal — exactly what
-// produced Thai/Khmer/etc. text leaking into reports that are supposed to be
-// all-English. Capping concurrency here makes hitting the limit far less
-// likely in the first place.
-let translateInFlight = 0;
-const TRANSLATE_MAX_CONCURRENT = 4;
-const translateQueue = [];
-function runTranslateQueue() {
-  while (translateInFlight < TRANSLATE_MAX_CONCURRENT && translateQueue.length > 0) {
-    const job = translateQueue.shift();
-    translateInFlight++;
-    job().finally(() => { translateInFlight--; runTranslateQueue(); });
-  }
-}
-function withTranslateSlot(fn) {
-  return new Promise(resolve => {
-    translateQueue.push(() => fn().then(resolve, resolve));
-    runTranslateQueue();
-  });
-}
-
-async function translateTextOnce(text, targetLang) {
-  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`translate HTTP ${resp.status}`);
-  const data = await resp.json();
-  if (!Array.isArray(data?.[0])) throw new Error('translate: unexpected response shape');
-  return data[0].map(s => s?.[0] || '').join('');
-}
-
-// Retries transient failures (rate limit, blip) with backoff long enough to
-// actually ride out a burst of 429s from this free/unofficial endpoint —
-// confirmed 2026-08-23: a cluster of "giving up after 3 attempts" fallbacks
-// (300-900ms of total backoff, nowhere near enough) is exactly what let
-// Thai/Khmer article text leak untranslated into English-only reports.
-// `strict` throws on total failure instead of silently returning the
-// original text — used only where "the wrong language" is worse than "this
-// one article is missing" (see the per-article call in
-// generateDailyReportRun); every other caller keeps the old graceful
-// fallback, since for those a stale/untranslated value is the acceptably
-// degraded outcome, not a correctness bug.
-async function translateText(text, targetLang, { strict = false, maxAttempts = 6 } = {}) {
-  if (!text || !text.trim()) return text;
-  return withTranslateSlot(async () => {
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        return await translateTextOnce(text, targetLang);
-      } catch (e) {
-        if (attempt === maxAttempts) {
-          if (strict) throw e;
-          console.error(`translateText(${targetLang}): giving up after ${maxAttempts} attempts, text left untranslated:`, e.message);
-          return text;
-        }
-        await sleep(Math.min(600 * 2 ** (attempt - 1), 6000) + Math.floor(Math.random() * 300));
-      }
-    }
-  });
-}
-
-async function translateToEnglish(text) {
-  return translateText(text, 'en');
-}
+// Article and Hebrew-email translation both go through the AI provider
+// already paid for (translateBatch, forced to its cheapest model — see
+// makeAI's forTranslation flag) rather than a free/unofficial endpoint.
+// That free endpoint used to be the translator here, but it rate-limits
+// under bursty load with no warning, which is exactly what let Thai/Khmer
+// article text leak untranslated into English-only reports on 2026-08-23.
 
 // A source's own RSS text needs no translation call at all if it only
 // publishes in English — zero cost, zero latency for the common case.
@@ -1276,21 +1209,35 @@ function scheduleShortTopicLabel(schedule) {
 // substantive content is translated (summary, article title/text); links
 // and structural labels are untouched. Since the whole recipient list gets
 // one shared email (a single sendMail call below), this only ever runs
-// once per report regardless of how many recipients are on it.
-async function translateRunToHebrew(run) {
+// once per report regardless of how many recipients are on it. Everything
+// goes through one batched AI call (billed on the same provider already
+// paid for, translateAi forcing its cheapest model) rather than one
+// free-endpoint call per field.
+async function translateRunToHebrew(run, translateAi, uid, email) {
+  const batch = [];
+  if (run.summary) batch.push(run.summary);
+  for (const d of (run.days || [])) {
+    for (const s of (d.sources || [])) {
+      for (const a of (s.articles || [])) {
+        batch.push(a.title, a.text);
+      }
+    }
+  }
+  if (batch.length === 0) return { ...run };
+
+  const { translations, usage } = await translateBatch(translateAi, batch, 'Hebrew');
+  if (usage) await persistCost(uid, email, translateAi, calcCostUsd(translateAi, usage.input_tokens || 0, usage.output_tokens || 0));
+
+  let cursor = 0;
   const translatedRun = { ...run };
-  if (run.summary) translatedRun.summary = await translateText(run.summary, 'iw');
-  translatedRun.days = await Promise.all((run.days || []).map(async d => ({
+  if (run.summary) translatedRun.summary = translations[cursor++];
+  translatedRun.days = (run.days || []).map(d => ({
     ...d,
-    sources: await Promise.all((d.sources || []).map(async s => ({
+    sources: (d.sources || []).map(s => ({
       ...s,
-      articles: await Promise.all((s.articles || []).map(async a => ({
-        ...a,
-        title: await translateText(a.title, 'iw'),
-        text: await translateText(a.text, 'iw')
-      })))
-    })))
-  })));
+      articles: (s.articles || []).map(a => ({ ...a, title: translations[cursor++], text: translations[cursor++] }))
+    }))
+  }));
   return translatedRun;
 }
 
@@ -1345,7 +1292,9 @@ async function sendReportEmail(schedule, run) {
   }
   if (heRecipients.length > 0) {
     try {
-      const hebrewRun = await translateRunToHebrew(run);
+      const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
+      const translateAi = makeAI(aiSettingsSnap.val() || {}, true);
+      const hebrewRun = await translateRunToHebrew(run, translateAi, schedule.createdBy, schedule.createdByEmail);
       await transporter.sendMail({
         from: `Roy News <${OWNER_EMAIL}>`, to: heRecipients.join(', '), subject,
         text: buildRawReportText(schedule, hebrewRun),
@@ -1751,8 +1700,8 @@ exports.fetchNews = onCall(
 // ─────────────────────────────────────────────────────────────────────────────
 // AGENT 3: Translate Results
 // ─────────────────────────────────────────────────────────────────────────────
-async function translateBatch(ai, batch) {
-  const prompt = `Translate each English text in this JSON array to Hebrew.
+async function translateBatch(ai, batch, targetLangName) {
+  const prompt = `Translate each text in this JSON array to ${targetLangName}. Text already in ${targetLangName} should be returned unchanged.
 Return ONLY a valid JSON array with exactly ${batch.length} elements in the same order.
 Each element must be a properly JSON-escaped string. Preserve empty strings as "".
 Do not add markdown, code blocks, or any explanation. Start with [ and end with ].
@@ -1760,7 +1709,11 @@ Do not add markdown, code blocks, or any explanation. Start with [ and end with 
 ${JSON.stringify(batch)}`;
 
   const { text, usage } = await callAI(ai, prompt, 8000);
-  return { translations: extractJson(text, '['), usage };
+  const translations = extractJson(text, '[');
+  if (!Array.isArray(translations) || translations.length !== batch.length) {
+    throw new Error(`translateBatch: expected ${batch.length} translations, got ${Array.isArray(translations) ? translations.length : typeof translations}`);
+  }
+  return { translations, usage };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1850,7 +1803,7 @@ exports.translateResults = onCall(
     for (let i = 0; i < texts.length; i += BATCH_SIZE) {
       const batch = texts.slice(i, i + BATCH_SIZE);
       try {
-        const { translations, usage } = await translateBatch(ai, batch);
+        const { translations, usage } = await translateBatch(ai, batch, 'Hebrew');
         allTranslations.push(...translations);
         totalInputTokens  += usage?.input_tokens  || 0;
         totalOutputTokens += usage?.output_tokens || 0;
@@ -2466,7 +2419,7 @@ async function loadTopicGuidance(topicNames) {
 // it), and weekly is built by aggregating 7 of these already-stored runs
 // (see aggregateWeeklyFromDailyRuns) rather than re-running this over a week
 // pooled together.
-async function generateDailyReportRun(scheduleId, schedule, ai, contextMode, now, sharedSourceKeys) {
+async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, contextMode, now, sharedSourceKeys) {
   const periodEnd = yesterdayUTC();
 
   let sources = (await db.ref(`countries/${schedule.countryKey}/setup/sources`).once('value')).val() || [];
@@ -2520,29 +2473,32 @@ async function generateDailyReportRun(scheduleId, schedule, ai, contextMode, now
 
     // Only the matched articles get translated — same "only pay for what's
     // relevant" principle the old AI-summary path applied to its analysis
-    // call, just applied to translation now instead.
+    // call, just applied to translation now instead. One batched AI call
+    // per source (title+text for every relevant article together) rather
+    // than one free-endpoint call per field — cheaper in requests, immune
+    // to that endpoint's rate-limiting, and billed on the AI provider
+    // already paid for (translateAi forces its cheapest model regardless
+    // of what's picked for classification).
     const isEnglish = sourceIsEnglishOnly(source);
     const translatedArticles = articles.map(a => ({ title: a.title, text: a.text, link: a.link }));
-    // Strict here (unlike every other translateText call) — for a report
-    // that's supposed to be all-English, an article stuck in its source
-    // language is worse than one fewer article, so a translation that's
-    // still failing after strict's long backoff gets dropped from this
-    // report entirely rather than shown untranslated.
+    const toTranslate = isEnglish ? [] : relevantIndices;
     const untranslatable = new Set();
-    await Promise.all(relevantIndices.map(async (i) => {
-      if (isEnglish) return;
-      const a = articles[i - 1];
+    if (toTranslate.length > 0) {
+      const batch = toTranslate.flatMap(i => [articles[i - 1].title, articles[i - 1].text]);
       try {
-        const [title, text] = await Promise.all([
-          translateText(a.title, 'en', { strict: true }),
-          translateText(a.text, 'en', { strict: true })
-        ]);
-        translatedArticles[i - 1] = { title, text, link: a.link };
+        const { translations, usage } = await translateBatch(translateAi, batch, 'English');
+        if (usage) await persistCost(schedule.createdBy, schedule.createdByEmail, translateAi, calcCostUsd(translateAi, usage.input_tokens || 0, usage.output_tokens || 0));
+        toTranslate.forEach((i, idx) => {
+          translatedArticles[i - 1] = { title: translations[idx * 2], text: translations[idx * 2 + 1], link: articles[i - 1].link };
+        });
       } catch (e) {
-        console.error(`translation failed for "${a.title?.slice(0, 60)}", dropping from report:`, e.message);
-        untranslatable.add(i);
+        // For a report that's supposed to be all-English, articles stuck in
+        // their source language are worse than fewer articles — drop the
+        // whole batch rather than show any of it untranslated.
+        console.error(`translateBatch failed for source ${source.id}, dropping ${toTranslate.length} article(s) from report:`, e.message);
+        toTranslate.forEach(i => untranslatable.add(i));
       }
-    }));
+    }
     if (untranslatable.size > 0) {
       for (const topic of Object.keys(topicKeywordMatches)) {
         topicKeywordMatches[topic] = topicKeywordMatches[topic].filter(idx => !untranslatable.has(idx));
@@ -2751,7 +2707,8 @@ exports.generateScheduledReports = onSchedule(
           try {
             const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
             const ai = makeAI(aiSettingsSnap.val() || {});
-            const { run, pendingDeletions } = await generateDailyReportRun(scheduleId, schedule, ai, contextMode, now, sharedSourceKeys);
+            const translateAi = makeAI(aiSettingsSnap.val() || {}, true);
+            const { run, pendingDeletions } = await generateDailyReportRun(scheduleId, schedule, ai, translateAi, contextMode, now, sharedSourceKeys);
             // Daily always gets a summary now, same as weekly already does —
             // a failed summary must never fail the report itself, the
             // per-source article listing is still useful without it.
@@ -3518,7 +3475,7 @@ exports.estimateScheduleCost = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
     await requireAuthorized(request);
-    const { sourceIds, topics, contextTopics } = request.data || {};
+    const { sourceIds, topics, contextTopics, countryKey } = request.data || {};
     if (!sourceIds?.length || !topics?.length) throw new HttpsError('invalid-argument', 'sourceIds and topics required');
 
     const ai = makeAI(request.data);
@@ -3529,10 +3486,10 @@ exports.estimateScheduleCost = onCall(
     // this pipeline, so the estimate here shouldn't offer it as one either.
     const contextMode = hasContext ? 'fullBody' : null;
 
-    // The report itself no longer costs anything to write (raw RSS text, no
-    // AI prose) — exact-topic matching is a substring check plus a one-time,
-    // permanently-cached per-topic-per-language translation, so it's ~free.
-    // Context-topic classification is the other ongoing AI cost, once per
+    // Exact-topic matching is a substring check plus a one-time,
+    // permanently-cached per-topic-per-language translation, so it's
+    // ~free. Context-topic classification and article translation (below,
+    // for non-English sources) are the ongoing AI costs, both once per
     // day. The weekly digest adds no marginal cost of its own — it's built
     // by aggregating already-generated daily runs, not by re-matching
     // anything (its own summary is a once-a-week cost, small enough next to
@@ -3555,7 +3512,27 @@ exports.estimateScheduleCost = onCall(
     perRunInputTokens += Math.round(assumedArticlesPerDay * sourceIds.length * 120 * 1.3);
     perRunOutputTokens += Math.round(dailySummaryWords * 1.3);
 
-    const perRunUsd = calcCostUsd(ai, perRunInputTokens, perRunOutputTokens);
+    // Translating non-English sources' matched articles is now a real AI
+    // cost (billed on the cheapest model regardless of the classification
+    // model chosen — see makeAI's forTranslation flag) rather than free, so
+    // it belongs in the estimate. Same per-article token basis as the
+    // summary estimate above, only applied to non-English sources.
+    let translateUsd = 0;
+    if (countryKey) {
+      try {
+        const sourcesSnap = await db.ref(`countries/${countryKey}/setup/sources`).once('value');
+        const selected = (sourcesSnap.val() || []).filter(s => sourceIds.includes(s.id));
+        const nonEnglishCount = selected.filter(s => !sourceIsEnglishOnly(s)).length;
+        if (nonEnglishCount > 0) {
+          const translateAi = makeAI(request.data, true);
+          const perArticleTokens = Math.round(120 * 1.3);
+          const translateTokens = assumedArticlesPerDay * nonEnglishCount * perArticleTokens;
+          translateUsd = calcCostUsd(translateAi, translateTokens, translateTokens);
+        }
+      } catch {}
+    }
+
+    const perRunUsd = calcCostUsd(ai, perRunInputTokens, perRunOutputTokens) + translateUsd;
 
     return {
       perRunUsd, monthlyUsd: perRunUsd * 30,

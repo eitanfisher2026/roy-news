@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.38';
+const VERSION = 'v3.39';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -4719,7 +4719,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       const aiSettings = await getAISettings(uid);
       const resp = await fns.httpsCallable('estimateScheduleCost')({
         sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'),
-        dailySummaryWords: newDailySummaryWords,
+        dailySummaryWords: newDailySummaryWords, countryKey: selectedCountry?.countryKey,
         ...aiSettings
       });
       setEstimate(resp.data);

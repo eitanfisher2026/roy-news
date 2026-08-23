@@ -137,8 +137,21 @@ function makeAI(data, forTranslation = false) {
   const { provider, geminiApiKey, geminiModel, openaiApiKey, openaiModel, anthropicApiKey, anthropicModel } = data || {};
 
   if (provider === 'gemini' && geminiApiKey) {
-    const DEPRECATED = { 'gemini-2.0-flash': 'gemini-2.5-flash', 'gemini-2.0-flash-lite': 'gemini-2.5-flash' };
-    const rawModel = forTranslation ? 'gemini-2.5-flash' : (geminiModel || 'gemini-2.5-flash');
+    // Google retires Gemini model names over time — this redirects any
+    // stored/default name that's stopped working to a currently-live one,
+    // so a stale setting doesn't start silently failing every call it
+    // makes. Confirmed 2026-08-23 (via a direct test call, not just
+    // trusting the deprecation notice): gemini-2.5-flash — this map's own
+    // prior redirect target — and gemini-2.5-flash-lite are BOTH now dead
+    // too (404 "no longer available to new users"); gemini-3.1-flash-lite
+    // and gemini-3-flash-preview are confirmed live.
+    const DEPRECATED = {
+      'gemini-2.0-flash': 'gemini-3-flash-preview',
+      'gemini-2.0-flash-lite': 'gemini-3.1-flash-lite',
+      'gemini-2.5-flash': 'gemini-3-flash-preview',
+      'gemini-2.5-flash-lite': 'gemini-3.1-flash-lite',
+    };
+    const rawModel = forTranslation ? 'gemini-3.1-flash-lite' : (geminiModel || 'gemini-3-flash-preview');
     const model = DEPRECATED[rawModel] || rawModel;
     return { type: 'gemini', client: new GoogleGenerativeAI(geminiApiKey), model };
   }

@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.41';
+const VERSION = 'v3.42';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2860,12 +2860,15 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
   // uses) — "Update Prompts" is the deliberate, separate step that bakes
   // whatever's currently saved here into the static compiledPrompt.
   function addWord(name, kind) {
-    const w = topicWordInput[kind].trim();
-    if (!w) return;
-    const current = topicRegistry[name]?.[kind] || [];
-    if (!hasWordCI(current, w)) {
-      db.ref(`config/topicRegistry/${name}`).update({ [kind]: [...current, w], wordsUpdatedAt: new Date().toISOString() });
+    // Splits on commas so pasting a whole list (e.g. from a suggestion)
+    // adds each phrase as its own word instead of one long blob entry.
+    const words = topicWordInput[kind].split(',').map(w => w.trim()).filter(Boolean);
+    if (words.length === 0) return;
+    let current = topicRegistry[name]?.[kind] || [];
+    for (const w of words) {
+      if (!hasWordCI(current, w)) current = [...current, w];
     }
+    db.ref(`config/topicRegistry/${name}`).update({ [kind]: current, wordsUpdatedAt: new Date().toISOString() });
     setTopicWordInput(prev => ({ ...prev, [kind]: '' }));
   }
   function removeWord(name, kind, w) {

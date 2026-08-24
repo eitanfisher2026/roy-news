@@ -3062,6 +3062,86 @@ exports.pruneReportRuns = onSchedule(
   }
 );
 
+// Manual "re-run today's daily report right now" — unlike sendReportEmailNow
+// (which only resends whatever's already stored), this actually re-runs
+// classification and translation against the same archived articles, using
+// whatever topic definitions/wording are live *right now*. Exists because
+// editing a topic's include/exclude words and clicking "Update Prompts" has
+// no effect on a day already generated — the next chance to see it working
+// would otherwise be tomorrow's automatic run. Replaces today's existing
+// daily run in place (same reportRuns entry) rather than adding a second
+// entry for the same day, so report history doesn't show a duplicate date.
+exports.regenerateDailyReportNow = onCall(
+  { timeoutSeconds: 300, memory: '512MiB', region: 'us-central1', secrets: [gmailAppPassword] },
+  async (request) => {
+    await requireAuthorized(request);
+    const { scheduleId } = request.data || {};
+    if (!scheduleId) throw new HttpsError('invalid-argument', 'scheduleId required');
+    const snap = await db.ref(`schedules/${scheduleId}`).once('value');
+    const schedule = snap.val();
+    if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
+    requireScheduleAccess(schedule, request.auth.uid, 'write');
+
+    const now = new Date();
+    const periodEnd = yesterdayUTC();
+    const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
+    const ai = makeAI(aiSettingsSnap.val() || {});
+    const translateAi = makeAI(aiSettingsSnap.val() || {}, true);
+
+    // Same shared-source protection as the automatic pipeline — a source
+    // used by more than one enabled schedule must not get pruned here.
+    const allSchedulesSnap = await db.ref('schedules').once('value');
+    const allSchedules = allSchedulesSnap.val() || {};
+    const sourceUsageCount = new Map();
+    for (const s of Object.values(allSchedules)) {
+      if (!s.enabled) continue;
+      for (const sourceId of (s.sourceIds || [])) {
+        const key = `${s.countryKey}:${sourceId}`;
+        sourceUsageCount.set(key, (sourceUsageCount.get(key) || 0) + 1);
+      }
+    }
+    const sharedSourceKeys = new Set([...sourceUsageCount.entries()].filter(([, count]) => count > 1).map(([key]) => key));
+
+    const runsSnap = await db.ref(`reportRuns/${scheduleId}`).once('value');
+    const existingMatch = Object.entries(runsSnap.val() || {}).find(([, r]) => (r.runType || 'daily') === 'daily' && r.periodEnd === periodEnd);
+    const runRef = existingMatch ? db.ref(`reportRuns/${scheduleId}/${existingMatch[0]}`) : db.ref(`reportRuns/${scheduleId}`).push();
+
+    try {
+      const { run, pendingDeletions } = await generateDailyReportRun(scheduleId, schedule, ai, translateAi, 'fullBody', now, sharedSourceKeys);
+      try {
+        const result = await generateDailySummary(schedule, run, ai);
+        if (result) {
+          run.summary = result.text;
+          const summaryCostUsd = calcCostUsd(ai, result.usage?.input_tokens || 0, result.usage?.output_tokens || 0);
+          run.costUsd = (run.costUsd || 0) + summaryCostUsd;
+          run.inputTokens = (run.inputTokens || 0) + (result.usage?.input_tokens || 0);
+          run.outputTokens = (run.outputTokens || 0) + (result.usage?.output_tokens || 0);
+          await persistCost(schedule.createdBy, schedule.createdByEmail, ai, summaryCostUsd);
+        }
+      } catch (e) {
+        console.error('generateDailySummary failed (manual regenerate)', e.message);
+        await maybeSendAiFailureAlert(schedule, e);
+      }
+      await runRef.set(run);
+      await db.ref(`schedules/${scheduleId}`).update({ lastRunAt: now.toISOString(), lastRunStatus: 'ok', lastPeriodEnd: periodEnd });
+      if (Object.keys(pendingDeletions).length > 0) {
+        try { await db.ref().update(pendingDeletions); } catch {}
+      }
+      let emailed = false;
+      if (schedule.sendDailyEmail) {
+        await sendReportEmail(schedule, run);
+        await runRef.update({ emailSent: true });
+        emailed = true;
+      }
+      return { ok: true, days: (run.days || []).length, hasSummary: !!run.summary, emailed };
+    } catch (e) {
+      await runRef.set({ scheduleId, generatedAt: now.toISOString(), periodStart: periodEnd, periodEnd, dateLabel: periodEnd, runType: 'daily', status: 'error', error: e.message });
+      await maybeSendAiFailureAlert(schedule, e);
+      throw new HttpsError('internal', e.message);
+    }
+  }
+);
+
 // Manual test/trigger — sends the most recent report of the given type right
 // now, ignoring the schedule's own sendDailyEmail/sendWeeklyEmail toggles
 // (those gate the automatic hourly firing, not an explicit manual action).

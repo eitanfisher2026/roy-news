@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.42';
+const VERSION = 'v3.43';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -4783,12 +4783,35 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setSendNowMsg(prev => ({ ...prev, [schedule.id]: '' }));
     try {
       const resp = await fns.httpsCallable('sendReportEmailNow')({ scheduleId: schedule.id, type });
-      setSendNowMsg(prev => ({ ...prev, [schedule.id]: `✓ Sent ${type} report (${formatDateLabelDMY(resp.data.dateLabel)}) to ${(schedule.emailRecipients || []).join(', ')}` }));
+      const recipients = (schedule.emailRecipients || []).map(r => typeof r === 'string' ? r : r.email).join(', ');
+      setSendNowMsg(prev => ({ ...prev, [schedule.id]: `✓ Sent ${type} report (${formatDateLabelDMY(resp.data.dateLabel)}) to ${recipients}` }));
     } catch (e) {
       setSendNowMsg(prev => ({ ...prev, [schedule.id]: '⚠ ' + e.message }));
     }
     setSendingNowId(null);
     setTimeout(() => setSendNowMsg(prev => ({ ...prev, [schedule.id]: '' })), 6000);
+  }
+
+  // Unlike Send Now (which just resends whatever's already stored), this
+  // re-runs classification/translation against today's already-archived
+  // articles using whatever topic wording is live right now — the only way
+  // to see an edited topic definition reflected today instead of waiting
+  // for tomorrow's automatic run.
+  const [regeneratingId, setRegeneratingId] = useState(null);
+  async function handleRegenerate(schedule) {
+    setRegeneratingId(schedule.id);
+    setSendNowMsg(prev => ({ ...prev, [schedule.id]: '' }));
+    try {
+      const resp = await fns.httpsCallable('regenerateDailyReportNow')({ scheduleId: schedule.id });
+      const msg = resp.data.days > 0
+        ? `✓ Regenerated — ${resp.data.days} day, ${resp.data.hasSummary ? 'summary included' : 'no summary'}${resp.data.emailed ? ', emailed' : ''}`
+        : '✓ Regenerated — still no matches for this period';
+      setSendNowMsg(prev => ({ ...prev, [schedule.id]: msg }));
+    } catch (e) {
+      setSendNowMsg(prev => ({ ...prev, [schedule.id]: '⚠ ' + e.message }));
+    }
+    setRegeneratingId(null);
+    setTimeout(() => setSendNowMsg(prev => ({ ...prev, [schedule.id]: '' })), 8000);
   }
 
   function handleDelete(schedule) {
@@ -5288,6 +5311,11 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                       title="Send the latest weekly digest, building one from existing daily reports if none exists yet"
                       style={{ ...SMALL_BTN, fontSize: 11, padding: '6px 10px' }}>
                       {sendingNowId === `${s.id}:weekly` ? <><Spinner size={9} />&nbsp;Sending…</> : '📧 Send Now · Weekly'}
+                    </button>
+                    <button onClick={() => handleRegenerate(s)} disabled={regeneratingId === s.id}
+                      title="Re-run today's daily report using current topic wording, right now — unlike Send Now, this actually re-classifies instead of resending what's already stored"
+                      style={{ ...SMALL_BTN, fontSize: 11, padding: '6px 10px' }}>
+                      {regeneratingId === s.id ? <><Spinner size={9} />&nbsp;Regenerating…</> : '🔄 Regenerate Today'}
                     </button>
                   </div>
                   {sendNowMsg[s.id] && (

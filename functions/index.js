@@ -2583,7 +2583,7 @@ async function generateWeeklySummary(schedule, days, ai) {
 Below is every article's headline and text collected this week, across all sources.
 
 RULES — follow exactly:
-1. Use ONLY the information in the articles below. Do NOT add outside knowledge, historical background, speculation, or your own analysis — every sentence must be directly supported by the article text.
+1. Use ONLY the information explicitly stated in the articles below — no outside knowledge, no historical background, no speculation, and no analysis, interpretation, or evaluation of your own. Every sentence must restate something the article text directly says, not a conclusion you have drawn from it. Do not use analytical or interpretive phrasing (e.g. "this suggests," "in an apparent attempt to," "reflecting broader tensions," "this comes amid") — state only what was explicitly reported, nothing more. If an article itself is an opinion piece, an allegation, or a claim by one side, report only that the claim was made and what it says — do not treat it as established fact, and do not add your own framing around it.
 2. Do not mention "the articles" or "sources" — write a plain factual account of what was reported.
 ${summaryStructureRules(!!schedule.sectionedSummary)}
 Write approximately ${wordCount} words in total.
@@ -2621,7 +2621,7 @@ async function generateDailySummary(schedule, run, ai) {
 Below is every article's headline and text collected today, across all sources.
 
 RULES — follow exactly:
-1. Use ONLY the information in the articles below. Do NOT add outside knowledge, historical background, speculation, or your own analysis — every sentence must be directly supported by the article text.
+1. Use ONLY the information explicitly stated in the articles below — no outside knowledge, no historical background, no speculation, and no analysis, interpretation, or evaluation of your own. Every sentence must restate something the article text directly says, not a conclusion you have drawn from it. Do not use analytical or interpretive phrasing (e.g. "this suggests," "in an apparent attempt to," "reflecting broader tensions," "this comes amid") — state only what was explicitly reported, nothing more. If an article itself is an opinion piece, an allegation, or a claim by one side, report only that the claim was made and what it says — do not treat it as established fact, and do not add your own framing around it.
 2. Do not mention "the articles" or "sources" — write a plain factual account of what was reported.
 ${summaryStructureRules(!!schedule.sectionedSummary)}
 Write approximately ${wordCount} words in total.

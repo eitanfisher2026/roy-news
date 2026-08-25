@@ -1081,7 +1081,7 @@ function buildRawReportText(schedule, run) {
   const topics = run.topics || schedule.topics || [];
   let text = `${titleCase(schedule.country)}\n`;
   if (topics.length > 0) text += `Topics: ${topics.join(', ')}\n`;
-  if (run.summary) text += `\nSummary\n${run.summary}\n`;
+  if (run.summary) text += `\nSummary\n${run.summary.replace(/\*\*(.+?)\*\*/g, '$1')}\n`;
   else if (run.runType === 'weekly') text += `\nNo coverage this period.\n`;
   text += '\n';
   for (const d of days) {
@@ -1110,7 +1110,25 @@ function escapeHtml(str) {
 // alphabetically, instead of by topic.
 // rtl only affects the translated content paragraphs (summary, article
 // title/text) — the English chrome (labels, source names, date header)
-// stays left-aligned regardless, since it's never translated.
+// Plain HTML collapses whitespace, so a sectionedSummary-mode summary
+// (blank-line-separated blocks, each optionally starting with **Heading**)
+// needs to be split into real paragraphs rather than dumped into one <p> —
+// harmless no-op for a normal flowing-paragraph summary, which is just one
+// block with no heading match.
+function renderSummaryBlocks(summary, sans, contentDir, contentAlign) {
+  return summary.split(/\n{2,}/).map(b => b.trim()).filter(Boolean).map(block => {
+    const headingMatch = block.match(/^\*\*(.+?)\*\*\s*\n?([\s\S]*)$/);
+    if (!headingMatch) {
+      return `<p${contentDir} style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0 0 14px;font-family:${sans};${contentAlign}">${escapeHtml(block)}</p>`;
+    }
+    const [, heading, rest] = headingMatch;
+    const restHtml = rest.trim()
+      ? `<p${contentDir} style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0 0 14px;font-family:${sans};${contentAlign}">${escapeHtml(rest.trim())}</p>`
+      : '';
+    return `<p${contentDir} style="font-size:13.5px;font-weight:700;color:#1c1e21;margin:0 0 4px;font-family:${sans};${contentAlign}">${escapeHtml(heading.trim())}</p>${restHtml}`;
+  }).join('');
+}
+
 function buildReportHtml(schedule, run, rtl = false) {
   const contentDir = rtl ? ' dir="rtl"' : '';
   const contentAlign = rtl ? 'text-align:right;' : '';
@@ -1132,7 +1150,7 @@ function buildReportHtml(schedule, run, rtl = false) {
   const summaryHtml = run.summary
     ? `
           <p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 10px;font-family:${sans};">Summary</p>
-          <p${contentDir} style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0 0 ${days.length > 0 ? '22px' : '0'};font-family:${sans};${contentAlign}">${escapeHtml(run.summary)}</p>
+          <div style="margin:0 0 ${days.length > 0 ? '8px' : '0'};">${renderSummaryBlocks(run.summary, sans, contentDir, contentAlign)}</div>
           ${days.length > 0 ? '<hr style="border:none;border-top:1px solid #e7e5e0;margin:0 0 22px;">' : ''}`
     : (isWeekly ? `<p style="font-size:14.5px;color:#90949c;font-family:${sans};">No coverage this period.</p>` : '');
 
@@ -2531,6 +2549,18 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
   return { run, pendingDeletions, periodEnd };
 }
 
+// Per-schedule, off by default — most reports read fine as one flowing
+// paragraph, and forcing a topic breakdown on a quiet day just produces
+// awkward stub sections. Rule 4 (skip empty topics entirely) only matters
+// once sectioning is on — a flowing paragraph already just omits whatever
+// nothing was collected on, nothing to instruct there.
+function summaryStructureRules(sectioned) {
+  return sectioned
+    ? `3. Organize the summary into clearly separated sections, one per distinct topic or storyline actually covered. Start each section with a short heading on its own line, wrapped in ** (e.g. **Heading**), followed by a plain-prose paragraph — no other markdown, no bullet points.
+4. Skip entirely any topic that had no real coverage — do not create a section, placeholder, or "nothing to report" line for it.`
+    : `3. Plain prose only — no markdown, no headers, no bullet points.`;
+}
+
 // Strictly extractive weekly digest: the one AI call in the weekly path,
 // deliberately told to use ONLY the week's own collected article text — same
 // "no outside knowledge, no invented detail" rule the per-article analysis
@@ -2555,8 +2585,8 @@ Below is every article's headline and text collected this week, across all sourc
 RULES — follow exactly:
 1. Use ONLY the information in the articles below. Do NOT add outside knowledge, historical background, speculation, or your own analysis — every sentence must be directly supported by the article text.
 2. Do not mention "the articles" or "sources" — write a plain factual account of what was reported.
-3. Plain prose only — no markdown, no headers, no bullet points.
-4. Write approximately ${wordCount} words.
+${summaryStructureRules(!!schedule.sectionedSummary)}
+Write approximately ${wordCount} words in total.
 
 Articles:
 ${lines.join('\n')}
@@ -2593,8 +2623,8 @@ Below is every article's headline and text collected today, across all sources.
 RULES — follow exactly:
 1. Use ONLY the information in the articles below. Do NOT add outside knowledge, historical background, speculation, or your own analysis — every sentence must be directly supported by the article text.
 2. Do not mention "the articles" or "sources" — write a plain factual account of what was reported.
-3. Plain prose only — no markdown, no headers, no bullet points.
-4. Write approximately ${wordCount} words.
+${summaryStructureRules(!!schedule.sectionedSummary)}
+Write approximately ${wordCount} words in total.
 
 Articles:
 ${lines.join('\n')}
@@ -2874,6 +2904,7 @@ exports.createSchedule = onCall(
       id: ref.key, country, countryKey, sourceIds, topics, contextTopics, searchScope, reportTitle,
       weeklyDay, hourUtc: hour, dailyHourUtc: dailyHour, weeklySummaryWords, dailySummaryWords,
       sendDailyEmail: !!sendDailyEmail, sendWeeklyEmail: !!sendWeeklyEmail, emailRecipients,
+      sectionedSummary: !!request.data?.sectionedSummary,
       enabled: true,
       createdBy: request.auth.uid, createdByEmail: request.auth.token.email || null,
       createdAt: new Date().toISOString(),
@@ -2903,7 +2934,8 @@ exports.updateSchedule = onCall(
     if (updates.dailyHourUtc !== undefined) updates.dailyHourUtc = Math.min(Math.max(parseInt(updates.dailyHourUtc) || 0, 0), 23);
     if (updates.reportTitle !== undefined) updates.reportTitle = String(updates.reportTitle || '').trim().slice(0, 60);
     if (updates.searchScope !== undefined) updates.searchScope = updates.searchScope === 'domestic' ? 'domestic' : 'global';
-    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope'];
+    if (updates.sectionedSummary !== undefined) updates.sectionedSummary = !!updates.sectionedSummary;
+    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope', 'sectionedSummary'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
     if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');

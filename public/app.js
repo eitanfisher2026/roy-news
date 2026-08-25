@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.43';
+const VERSION = 'v3.44';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3989,6 +3989,25 @@ function splitRecipientsForEdit(emailRecipients) {
   };
 }
 
+// A sectionedSummary-mode summary is blank-line-separated blocks, each
+// optionally starting with a **Heading** line — render those as real
+// headings instead of literal asterisks. No-op (one plain block) for an
+// ordinary flowing-paragraph summary.
+function SummaryBlocks({ summary }) {
+  const blocks = summary.split(/\n{2,}/).map(b => b.trim()).filter(Boolean);
+  return blocks.map((block, i) => {
+    const m = block.match(/^\*\*(.+?)\*\*\s*\n?([\s\S]*)$/);
+    if (!m) return <div key={i} style={{ whiteSpace: 'pre-wrap', marginBottom: i < blocks.length - 1 ? 10 : 0 }}>{block}</div>;
+    const [, heading, rest] = m;
+    return (
+      <div key={i} style={{ marginBottom: i < blocks.length - 1 ? 10 : 0 }}>
+        <div style={{ fontWeight: 700, marginBottom: 2 }}>{heading.trim()}</div>
+        {rest.trim() && <div style={{ whiteSpace: 'pre-wrap' }}>{rest.trim()}</div>}
+      </div>
+    );
+  });
+}
+
 function formatBytes(n) {
   if (!n && n !== 0) return '—';
   if (n < 1024) return n + ' B';
@@ -4307,7 +4326,7 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
       {displayRun.summary && (
         <div style={{ marginBottom: 20, padding: '10px 12px', background: '#0f1e35', borderRadius: 8, border: '1px solid ' + C.border }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: '#60a5fa', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>Summary</div>
-          <div style={{ fontSize: 13, color: '#cbd5e1', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{displayRun.summary}</div>
+          <div style={{ fontSize: 13, color: '#cbd5e1', lineHeight: 1.7 }}><SummaryBlocks summary={displayRun.summary} /></div>
         </div>
       )}
 
@@ -4467,6 +4486,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [newTimeInfoOpen, setNewTimeInfoOpen] = useState(false);
   const [newWeeklySummaryWords, setNewWeeklySummaryWords] = useState(400);
   const [newDailySummaryWords, setNewDailySummaryWords] = useState(200);
+  const [newSectionedSummary, setNewSectionedSummary] = useState(false);
   const [newSendDailyEmail, setNewSendDailyEmail] = useState(false);
   const [newSendWeeklyEmail, setNewSendWeeklyEmail] = useState(false);
   const [newEmailRecipientsEn, setNewEmailRecipientsEn] = useState('');
@@ -4579,6 +4599,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [editTimeInfoOpen, setEditTimeInfoOpen] = useState(false);
   const [editWeeklySummaryWords, setEditWeeklySummaryWords] = useState(400);
   const [editDailySummaryWords, setEditDailySummaryWords] = useState(200);
+  const [editSectionedSummary, setEditSectionedSummary] = useState(false);
   const [editSendDailyEmail, setEditSendDailyEmail] = useState(false);
   const [editSendWeeklyEmail, setEditSendWeeklyEmail] = useState(false);
   const [editEmailRecipientsEn, setEditEmailRecipientsEn] = useState('');
@@ -4645,6 +4666,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditDailyHourUtc(s.dailyHourUtc ?? s.hourUtc);
     setEditWeeklySummaryWords(s.weeklySummaryWords || 400);
     setEditDailySummaryWords(s.dailySummaryWords || 200);
+    setEditSectionedSummary(!!s.sectionedSummary);
     setEditSendDailyEmail(!!s.sendDailyEmail);
     setEditSendWeeklyEmail(!!s.sendWeeklyEmail);
     const splitRecipients = splitRecipientsForEdit(s.emailRecipients);
@@ -4676,6 +4698,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       reportTitle: editReportTitle.trim(),
       topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: editSearchScope,
       weeklyDay: editWeeklyDay, hourUtc: editHourUtc, dailyHourUtc: editDailyHourUtc, weeklySummaryWords: editWeeklySummaryWords, dailySummaryWords: editDailySummaryWords,
+      sectionedSummary: editSectionedSummary,
       sendDailyEmail: editSendDailyEmail, sendWeeklyEmail: editSendWeeklyEmail,
       emailRecipients: [
         ...editEmailRecipientsEn.split(/[,\n]/).map(e => e.trim()).filter(Boolean).map(email => ({ email, hebrew: false })),
@@ -4745,6 +4768,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
         country: selectedCountry.country, countryKey: selectedCountry.countryKey, reportTitle: newReportTitle.trim(),
         sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: newSearchScope,
         weeklyDay: newWeeklyDay, hourUtc: newHourUtc, dailyHourUtc: newDailyHourUtc, weeklySummaryWords: newWeeklySummaryWords, dailySummaryWords: newDailySummaryWords,
+        sectionedSummary: newSectionedSummary,
         sendDailyEmail: newSendDailyEmail, sendWeeklyEmail: newSendWeeklyEmail,
         emailRecipients: [
           ...newEmailRecipientsEn.split(/[,\n]/).map(e => e.trim()).filter(Boolean).map(email => ({ email, hebrew: false })),
@@ -4754,7 +4778,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       setCreateMsg('✓ Schedule created');
       setShowCreate(false);
       setNewCountryKey(''); setNewSourceIds(new Set()); setNewSelectedTopics(new Set()); setNewSearchScope('global'); setEstimate(null); setNewReportTitle('');
-      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipientsEn(''); setNewEmailRecipientsHe(''); setNewWeeklySummaryWords(400); setNewDailySummaryWords(200); setNewDailyHourUtc(6);
+      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipientsEn(''); setNewEmailRecipientsHe(''); setNewWeeklySummaryWords(400); setNewDailySummaryWords(200); setNewDailyHourUtc(6); setNewSectionedSummary(false);
       await loadSchedules();
     } catch (e) {
       setCreateMsg('⚠ ' + e.message);
@@ -5135,6 +5159,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                       </div>
                     )}
                   </div>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 10 }}>
+                    <input type="checkbox" checked={newSectionedSummary} onChange={e => setNewSectionedSummary(e.target.checked)} /> Organize summary by topic (off = one flowing paragraph)
+                  </label>
                   <UtcTimeInfo hourUtc={newHourUtc} dailyHourUtc={newDailyHourUtc} open={newTimeInfoOpen} onToggle={() => setNewTimeInfoOpen(o => !o)} />
 
                   <div style={{ marginBottom: 12, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>
@@ -5255,6 +5282,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   </div>
                 )}
               </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 10 }}>
+                <input type="checkbox" checked={editSectionedSummary} onChange={e => setEditSectionedSummary(e.target.checked)} /> Organize summary by topic (off = one flowing paragraph)
+              </label>
               <UtcTimeInfo hourUtc={editHourUtc} dailyHourUtc={editDailyHourUtc} open={editTimeInfoOpen} onToggle={() => setEditTimeInfoOpen(o => !o)} />
 
               <div style={{ marginBottom: 14, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>

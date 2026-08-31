@@ -2584,7 +2584,7 @@ Below is every article's headline and text collected this week, across all sourc
 
 RULES — follow exactly:
 1. Use ONLY the information explicitly stated in the articles below — no outside knowledge, no historical background, no speculation, and no analysis, interpretation, or evaluation of your own. Every sentence must restate something the article text directly says, not a conclusion you have drawn from it. Do not use analytical or interpretive phrasing (e.g. "this suggests," "in an apparent attempt to," "reflecting broader tensions," "this comes amid") — state only what was explicitly reported, nothing more. If an article itself is an opinion piece, an allegation, or a claim by one side, report only that the claim was made and what it says — do not treat it as established fact, and do not add your own framing around it.
-2. Do not mention "the articles" or "sources" — write a plain factual account of what was reported.
+2. Attribute each distinct claim or story to the specific outlet that reported it, by name (e.g. "Sabah reported that...", "Hürriyet said...", "In an opinion column, Sözcü argued that..."). Every sentence should make clear which outlet is the source of that information, so a reader can tell attributed reporting apart from opinion or an official statement. If several outlets covered the same story, attribute it to one representative outlet rather than listing all of them.
 ${summaryStructureRules(!!schedule.sectionedSummary)}
 Write approximately ${wordCount} words in total.
 
@@ -2622,7 +2622,7 @@ Below is every article's headline and text collected today, across all sources.
 
 RULES — follow exactly:
 1. Use ONLY the information explicitly stated in the articles below — no outside knowledge, no historical background, no speculation, and no analysis, interpretation, or evaluation of your own. Every sentence must restate something the article text directly says, not a conclusion you have drawn from it. Do not use analytical or interpretive phrasing (e.g. "this suggests," "in an apparent attempt to," "reflecting broader tensions," "this comes amid") — state only what was explicitly reported, nothing more. If an article itself is an opinion piece, an allegation, or a claim by one side, report only that the claim was made and what it says — do not treat it as established fact, and do not add your own framing around it.
-2. Do not mention "the articles" or "sources" — write a plain factual account of what was reported.
+2. Attribute each distinct claim or story to the specific outlet that reported it, by name (e.g. "Sabah reported that...", "Hürriyet said...", "In an opinion column, Sözcü argued that..."). Every sentence should make clear which outlet is the source of that information, so a reader can tell attributed reporting apart from opinion or an official statement. If several outlets covered the same story, attribute it to one representative outlet rather than listing all of them.
 ${summaryStructureRules(!!schedule.sectionedSummary)}
 Write approximately ${wordCount} words in total.
 

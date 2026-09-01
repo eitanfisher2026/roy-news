@@ -1744,10 +1744,15 @@ Do not add markdown, code blocks, or any explanation. Start with [ and end with 
 ${JSON.stringify(batch)}`;
 
   const { text, usage } = await callAI(ai, prompt, 8000);
-  const translations = extractJson(text, '[');
-  if (!Array.isArray(translations) || translations.length !== batch.length) {
-    throw new Error(`translateBatch: expected ${batch.length} translations, got ${Array.isArray(translations) ? translations.length : typeof translations}`);
+  let translations = extractJson(text, '[');
+  if (!Array.isArray(translations) || translations.length < batch.length) {
+    throw new Error(`translateBatch: expected at least ${batch.length} translations, got ${Array.isArray(translations) ? translations.length : typeof translations}`);
   }
+  // Confirmed 2026-09-01: gemini-3.1-flash-lite sometimes pads the response
+  // with extra trailing empty-string elements past what was asked for — the
+  // real translations are still correct and in order, so this only trims
+  // the harmless padding rather than discarding an otherwise-good batch.
+  if (translations.length > batch.length) translations = translations.slice(0, batch.length);
   return { translations, usage };
 }
 

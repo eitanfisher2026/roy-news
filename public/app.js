@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.50';
+const VERSION = 'v3.51';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -557,9 +557,13 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
   function changeAddLanguage(v) { setAddLanguage(v); try { localStorage.setItem('roy-news-add-language', v); } catch {} }
 
   // Refresh all
+  // Defaults to matching however many sources the country already has, so
+  // "Regenerate All" on a healthily-curated list reproduces the same size —
+  // but never below a sane floor, so a country that currently has only 1-2
+  // sources (thin/junk state) doesn't silently request just 1-2 back.
   const [refreshNum, setRefreshNum] = useState(() => {
     const p = user ? getUserPrefs(user.uid) : {};
-    return sources.length || p.numSources || 7;
+    return Math.max(sources.length, p.numSources || 7);
   });
   const [refreshFilterNoRSS, setRefreshFilterNoRSS] = useState(() => {
     const p = user ? getUserPrefs(user.uid) : {};

@@ -771,12 +771,17 @@ exports.setupCountry = onCall(
     // smaller +3 buffer, just larger since this prompt's loss rate runs
     // higher in practice — observed requesting 7 yielding as few as 3).
     const requestCount = Math.min(numSources * 2, 20);
+    // Scaled with requestCount — a fixed 3000-token budget was tuned for the
+    // old exactly-numSources request and started truncating the AI's JSON
+    // mid-array once requestCount roughly doubled, causing a parse failure
+    // instead of a clean result.
+    const maxTokens = Math.min(1500 + requestCount * 400, 10000);
 
     const ai = makeAI(request.data);
     const customPrompts = await getCustomPrompts();
     const prompt = fillPrompt(customPrompts.setup || DEFAULT_PROMPTS.setup, { country, numSources: requestCount });
 
-    const { text, usage } = await callAI(ai, prompt, 3000);
+    const { text, usage } = await callAI(ai, prompt, maxTokens);
     await recordCost(request, ai, usage?.input_tokens || 0, usage?.output_tokens || 0);
 
     let sources;

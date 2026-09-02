@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.49';
+const VERSION = 'v3.50';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2875,6 +2875,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [topicRegistry] = useTopicRegistry();
   const [newCountryKey, setNewCountryKey] = useState('');
   const [newSourceIds, setNewSourceIds] = useState(new Set());
+  const [newSourcesOpen, setNewSourcesOpen] = useState(false);
   const [newReportTitle, setNewReportTitle] = useState('');
   const [newSelectedTopics, setNewSelectedTopics] = useState(new Set());
   const [newSearchScope, setNewSearchScope] = useState('global');
@@ -3487,7 +3488,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 10 }}>New Schedule</div>
 
                   <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Country</label>
-                  <select value={newCountryKey} onChange={e => { setNewCountryKey(e.target.value); setNewSourceIds(new Set()); setEstimate(null); }}
+                  <select value={newCountryKey} onChange={e => { setNewCountryKey(e.target.value); setNewSourceIds(new Set()); setNewSourcesOpen(false); setEstimate(null); if (e.target.value) loadCountrySourcesLive(e.target.value); }}
                     className="input-field" style={{ fontSize: 13, marginBottom: 10, width: '100%' }}>
                     <option value="">Select a country…</option>
                     {countries.map(c => <option key={c.countryKey} value={c.countryKey}>{c.country}</option>)}
@@ -3495,17 +3496,37 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
 
                   {selectedCountry && (
                     <>
-                      <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Sources</label>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 10, maxHeight: 160, overflowY: 'auto', padding: 6, background: C.bg, borderRadius: 6 }}>
-                        {selectedCountry.sources.filter(s => s.rssUrl).length === 0 ? (
-                          <div style={{ color: C.faint, fontSize: 11 }}>No sources with a working feed in this country yet</div>
-                        ) : selectedCountry.sources.filter(s => s.rssUrl).map(s => (
-                          <label key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: C.text, cursor: 'pointer' }}>
-                            <input type="checkbox" checked={newSourceIds.has(s.id)} onChange={() => toggleSource(s.id)} />
-                            {s.name}
-                          </label>
-                        ))}
-                      </div>
+                      {!newSourcesOpen && (
+                        <>
+                          <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Sources</label>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8, maxHeight: 160, overflowY: 'auto', padding: 6, background: C.bg, borderRadius: 6 }}>
+                            {sourcesForCountry(selectedCountry.countryKey).filter(s => s.rssUrl).length === 0 ? (
+                              <div style={{ color: C.faint, fontSize: 11 }}>No sources with a working feed in this country yet</div>
+                            ) : sourcesForCountry(selectedCountry.countryKey).filter(s => s.rssUrl).map(s => (
+                              <label key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: C.text, cursor: 'pointer' }}>
+                                <input type="checkbox" checked={newSourceIds.has(s.id)} onChange={() => toggleSource(s.id)} />
+                                {s.name}
+                              </label>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                      <button onClick={() => setNewSourcesOpen(o => !o)} style={{ ...SMALL_BTN, fontSize: 11, marginBottom: 10 }}>
+                        {newSourcesOpen ? '▲ Hide source manager' : '🔍 Find / add sources for this country'}
+                      </button>
+                      {newSourcesOpen && (
+                        <div style={{ marginBottom: 14 }}>
+                          <SourceManager
+                            country={{ name: selectedCountry.country, key: selectedCountry.countryKey }}
+                            user={user}
+                            sources={sourcesForCountry(selectedCountry.countryKey)}
+                            onSourcesChange={newSrcs => setLiveSources(prev => ({ ...prev, [selectedCountry.countryKey]: newSrcs }))}
+                            selectable={true}
+                            selected={newSourceIds}
+                            onSelectionChange={setNewSourceIds}
+                          />
+                        </div>
+                      )}
                     </>
                   )}
 

@@ -10,7 +10,7 @@ Renamed from "Roy News" to "Airtime" on 2026-09-02 (in-app branding, email sende
 - Sibling projects (same owner, separate everything): [buli](../buli/CLAUDE.md), [foufou-pets](../FouFou-Pets/CLAUDE.md) — nothing shared with those.
 
 ## In-progress direction (as of 2026-09-02) — check with Eitan before assuming still accurate
-Eitan is moving this from "each authorized user manages their own schedules" toward "a small set of admins curate reports for a larger roster of passive, email-only recipients who never log in." Point-in-time and period analysis are planned for removal entirely (scheduled reports only, going forward) — reasoning: those features are increasingly redundant with general-purpose AI tools, while the scheduled/curated/sourced pipeline is this app's actual differentiation. Multi-admin already works today (`addAuthorizedUser` supports `role: 'admin'`, and the owner's admin status is hardcoded by email in `getRole` — not stored in `authorizedUsers`, so no one can remove/demote the owner even in principle). Recipient management (add/remove/pause per report per email) is planned but not yet built as of this note.
+Eitan is moving this from "each authorized user manages their own schedules" toward "a small set of admins curate reports for a larger roster of passive, email-only recipients who never log in." Point-in-time and period analysis were removed entirely on 2026-09-02 (Phase 3) — the app is scheduled-reports-only now; reasoning: those features were increasingly redundant with general-purpose AI tools, while the scheduled/curated/sourced pipeline is this app's actual differentiation. Multi-admin already works today (`addAuthorizedUser` supports `role: 'admin'`, and the owner's admin status is hardcoded by email in `getRole` — not stored in `authorizedUsers`, so no one can remove/demote the owner even in principle). Recipient management (add/remove/pause per report per email) is planned but not yet built as of this note.
 
 ## Stack
 - Client: no build step — `public/app.js` is loaded directly with `<script type="text/babel" src="app.js?v=X.X">`, compiled in-browser by Babel. Unlike Buli, there is **no compiled/`app.compiled.js` step** — editing `app.js` is enough, just bump `VERSION` (top of `app.js`) and the matching `?v=` in `index.html` together.
@@ -31,10 +31,9 @@ firebase deploy --only functions --project roy-news-23ab4
 Functions deploys routinely take 60-120s+ and may need to run in the background.
 
 ## Architecture — key server functions (`functions/index.js`)
-- `fetchNews` / `addSources` / `findSource` / `fixSourceUrl` / `checkFeedStats` — RSS source management and ingestion.
-- `generateScheduledReports` / `createSchedule` / `updateSchedule` / `deleteSchedule` / `listSchedules` / `estimateScheduleCost` — the scheduled-report system (a schedule = country + topics + recipients + cadence).
+- `addSources` / `findSource` / `fixSourceUrl` / `checkFeedStats` / `setupCountry` — RSS source management and ingestion.
+- `generateScheduledReports` / `createSchedule` / `updateSchedule` / `deleteSchedule` / `listSchedules` / `estimateScheduleCost` — the scheduled-report system (a schedule = country + topics + recipients + cadence). This is the only report-generation pipeline now (point-in-time `fetchNews` and period analysis were removed on 2026-09-02).
 - `sendReportEmailNow` — manual "send now" trigger for a report, separate from the scheduled path.
-- `translateResults` / `checkContextGrounding` / `fetchPeriodSummary` / `askPeriodFollowUp` — AI-assisted analysis on top of collected articles.
 - `pollArchivedSources` — background archival job; see the shared-source note below.
 - `getMyRole` / `listAuthorizedUsers` / `addAuthorizedUser` / `removeAuthorizedUser` — same authorized-user/role pattern as Buli.
 

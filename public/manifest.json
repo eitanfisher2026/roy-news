@@ -1,7 +1,7 @@
 {
   "name": "Airtime",
   "short_name": "Airtime",
-  "description": "Compare how any country's media covers the world — analyzed by AI",
+  "description": "Your daily media briefing — curated, translated, and delivered on schedule",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0d1b2a",

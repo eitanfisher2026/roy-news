@@ -927,9 +927,9 @@ If this outlet does not exist in ${country} or you are not confident it exists, 
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Shared per-source topic analysis — used by both the live fetchNews call and
-// the scheduled report generator, so the "only pay for what's relevant" and
-// keyword-override logic exists in exactly one place.
+// Shared per-source topic analysis, used by the scheduled report generator,
+// so the "only pay for what's relevant" and keyword-override logic exists in
+// exactly one place.
 // ─────────────────────────────────────────────────────────────────────────────
 // In-memory cache, backed by the DB below so it survives cold starts —
 // translations never change, so once a topic/language pair has been
@@ -1386,38 +1386,15 @@ async function maybeSendAiFailureAlert(schedule, error) {
   }
 }
 
-function notCoveredAnalysis(topics, dateLabel) {
-  return {
-    topicAnalyses: topics.map(t => ({
-      topic: t, covered: false,
-      summary: `No articles about this topic were published in this outlet on ${dateLabel}.`,
-      tone: 'neutral', narrative: null, quotes: []
-    })),
-    overallTone: 'neutral', keyStories: [], relevantArticleIndices: []
-  };
-}
-
 // ─── Context topics ────────────────────────────────────────────────────────────
 // A topic like "Israel" is a word — a literal keyword check works. A topic
 // like "internal politics" is a theme — no substring check will ever match
 // it, since the article is *about* that theme without necessarily containing
 // those words. Topics flagged as "context" (vs. the default "exact") skip
-// keyword matching and get judged instead, one of two ways depending on the
-// app-wide setting in config/contextAnalysisMode:
-//   'header'   — a cheap classification pass over just the article titles
-//                 decides which are worth a full read (default; keeps the
-//                 "only pay for what's relevant" principle intact).
-//   'fullBody' — no pre-filter at all; every article goes to the main
-//                 analysis call, which judges coverage from the full text.
-//                 Simpler and more thorough, but pricier per run.
-// This is a global toggle, not per-topic/per-schedule, specifically so it can
-// be flip-tested in production without a code change.
-async function getContextAnalysisMode() {
-  try {
-    const snap = await db.ref('config/contextAnalysisMode').once('value');
-    return snap.val() === 'fullBody' ? 'fullBody' : 'header';
-  } catch { return 'header'; }
-}
+// keyword matching and get judged instead by the AI, either from just the
+// article titles (classifyContextTopicsByHeader) or the full article text
+// (classifyContextTopicsByFullBody) — the scheduled-report pipeline always
+// uses the latter (see the comment in generateScheduledReports for why).
 
 // scope 'domestic' narrows a theme like "internal politics" or "economy" to
 // events/actors inside the schedule's own country — without it, a broad
@@ -1533,211 +1510,6 @@ Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], 
   }
 }
 
-// Given articles already fetched/date-filtered by the caller, matches them
-// against topics and (only if something matched) calls the AI with just the
-// relevant articles — not the full set — since unrelated same-day articles
-// cost tokens without ever being quoted or summarized. contextTopics is the
-// subset of topics that should be judged thematically instead of by keyword.
-async function analyzeArticlesForTopics({ ai, source, articles, topics, contextTopics = [], country, dateLabel, summaryLen, customPrompts, uid, email, contextMode }) {
-  if (articles.length === 0) {
-    return { text: JSON.stringify(notCoveredAnalysis(topics, dateLabel)), usage: null, relevantIndices: [], topicKeywordMatches: {}, contextTopics };
-  }
-
-  const { exactTopics, actualContextTopics } = splitTopicsByMode(topics, contextTopics);
-  const topicGuidance = await loadTopicGuidance(actualContextTopics);
-
-  const exactMatches = exactTopics.length > 0
-    ? await computeTopicKeywordMatches(articles, exactTopics, source, ai, uid, email)
-    : {};
-
-  let contextMatches = {};
-  if (actualContextTopics.length > 0) {
-    if (contextMode === 'fullBody') {
-      const allIdx = articles.map((_, i) => i + 1);
-      for (const t of actualContextTopics) contextMatches[t] = allIdx;
-    } else {
-      contextMatches = await classifyContextTopicsByHeader(articles, actualContextTopics, ai, uid, email, undefined, undefined, topicGuidance);
-    }
-  }
-
-  const topicKeywordMatches = { ...exactMatches, ...contextMatches };
-  const relevantIndices = relevantIndicesFromMatches(topicKeywordMatches);
-
-  if (relevantIndices.length === 0) {
-    return { text: JSON.stringify(notCoveredAnalysis(topics, dateLabel)), usage: null, relevantIndices, topicKeywordMatches, contextTopics: actualContextTopics };
-  }
-
-  const relevantArticles = relevantIndices.map(i => articles[i - 1]);
-  const origToLocal = new Map(relevantIndices.map((origIdx, localIdx) => [origIdx, localIdx + 1]));
-  const articlesText = relevantArticles.map((a, i) => `${i + 1}. ${a.title}\n${a.text}`).join('\n\n');
-  const topicMatchesText = topics.map(t => {
-    const idx = topicKeywordMatches[t].map(origIdx => origToLocal.get(origIdx));
-    return `- ${t}: ${idx.length > 0 ? idx.map(i => `article ${i}`).join(', ') : 'none'}`;
-  }).join('\n');
-  // Folds each context topic's compiled include/exclude guidance (if any)
-  // into the same {{topicList}} placeholder the prompt already has, rather
-  // than adding a new template variable — a topic with no compiled guidance
-  // renders exactly as it did before this feature existed.
-  const topicListText = topics.map(t => {
-    const g = topicGuidance[t];
-    return g ? `${t} (${g})` : t;
-  }).join(', ');
-
-  const prompt = fillPrompt(customPrompts.analysis || DEFAULT_PROMPTS.analysis, {
-    sourceName: source.name, sourceLean: source.lean, country,
-    leanDescription: source.leanDescription, date: dateLabel, topicList: topicListText,
-    articlesText, topicMatchesText, lang: 'English', summaryLen
-  });
-
-  const { text, usage } = await callAI(ai, prompt, 3000);
-  return { text, usage, relevantIndices, topicKeywordMatches, contextTopics: actualContextTopics };
-}
-
-// Applies the AI's parsed analysis + the server-side keyword override that
-// makes covered/not-covered authoritative regardless of what the prompt says
-// — but only for exact topics. A context/thematic topic's keyword-match
-// entry is just a candidate filter (which articles were worth reading), not
-// ground truth, so its covered/not-covered verdict is left as whatever the
-// main analysis concluded after reading the full article text.
-function finalizeAnalysis(rawText, relevantIndices, topicKeywordMatches, dateLabel, contextTopics = []) {
-  const contextSet = new Set((contextTopics || []).map(t => t.toLowerCase()));
-  let analysis = null;
-  if (rawText) {
-    try { analysis = extractJson(rawText, '{'); }
-    catch { analysis = { error: 'parse_error', raw: rawText.slice(0, 500) }; }
-  }
-  if (analysis && relevantIndices !== undefined) {
-    analysis.relevantArticleIndices = relevantIndices;
-    if (Array.isArray(analysis.topicAnalyses) && topicKeywordMatches) {
-      analysis.topicAnalyses = analysis.topicAnalyses.map(ta => {
-        const key = Object.keys(topicKeywordMatches).find(t => t.toLowerCase() === (ta.topic || '').toLowerCase());
-        if (!key) return ta;
-        // Carried to the client so it can merge topics that matched the exact
-        // same article(s) into one card instead of showing duplicate write-ups.
-        const matchedIndices = topicKeywordMatches[key].slice().sort((a, b) => a - b);
-        if (contextSet.has(key.toLowerCase())) return { ...ta, matchedIndices };
-        const hasMatch = matchedIndices.length > 0;
-        if (hasMatch && !ta.covered) return { ...ta, covered: true, matchedIndices };
-        if (!hasMatch && ta.covered) return { ...ta, covered: false, summary: `No articles about this topic were published in this outlet on ${dateLabel}.`, narrative: null, quotes: [], tone: 'neutral', matchedIndices };
-        return { ...ta, matchedIndices };
-      });
-    }
-  }
-  return analysis;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AGENT 2: Fetch News
-// ─────────────────────────────────────────────────────────────────────────────
-exports.fetchNews = onCall(
-  { timeoutSeconds: 300, memory: '1GiB', region: 'us-central1' },
-  async (request) => {
-    await requireAuthorized(request);
-    const { country, countryKey, selectedSources, topics, date, summaryWords, maxArticles, lookbackDays: rawLookbackDays } = request.data;
-    const contextTopics = Array.isArray(request.data.contextTopics) ? request.data.contextTopics : [];
-    const summaryLen = `~${Math.min(Math.max(summaryWords || 100, 30), 300)}-word summary`;
-    const articleLimit = Math.min(Math.max(parseInt(maxArticles) || 25, 10), 50);
-    const parsedLookbackDays = parseInt(rawLookbackDays);
-    const lookbackDays = Math.min(Math.max(Number.isFinite(parsedLookbackDays) ? parsedLookbackDays : 1, 0), 14);
-    if (!country || !selectedSources?.length) throw new HttpsError('invalid-argument', 'country and sources required');
-
-    const ai = makeAI(request.data);
-    const dateLabel = dateRangeLabel(date, lookbackDays);
-    const allResults = {};
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
-    const customPrompts = await getCustomPrompts();
-    const contextMode = await getContextAnalysisMode();
-    const { exactTopics } = splitTopicsByMode(topics, contextTopics);
-
-    // ── Per-source analysis — all sources run in parallel ───────────────────
-    const sourceResults = await Promise.all(selectedSources.map(async (source) => {
-      let articles = [];
-      let rssError = null;
-      let usedGoogleNews = false;
-
-      // Step 1: try the source's own RSS feed, kept to articles within the
-      // requested date window (the anchor date plus up to lookbackDays earlier)
-      if (source.rssUrl) {
-        try {
-          const fetched = await fetchRssWithRetry(source.rssUrl, articleLimit);
-          articles = fetched.filter(a => matchesDateRange(a.date, date, lookbackDays));
-          if (fetched.length > 0 && articles.length === 0) rssError = `No articles from ${dateLabel} in this feed's recent window`;
-        }
-        catch (e) { rssError = e.message; }
-      }
-
-      // Step 2: own RSS had nothing in that window — try Google News.
-      // Google's search endpoint has no real date-range filter (its after:/
-      // before: operators are silently ignored there), so instead we pull a
-      // much larger pool of its results and filter *those* down ourselves —
-      // filtering after truncating to articleLimit would throw away date
-      // matches that just weren't near the top of Google's relevance ranking.
-      if (articles.length === 0) {
-        const googleUrl = deriveGoogleNewsUrl(source, countryKey, topics);
-        if (googleUrl) {
-          try {
-            const googleArticles = await fetchRssWithRetry(googleUrl, GOOGLE_NEWS_FETCH_POOL);
-            const dated = googleArticles.filter(a => matchesDateRange(a.date, date, lookbackDays)).slice(0, articleLimit);
-            if (dated.length > 0) { articles = dated; rssError = null; usedGoogleNews = true; }
-          } catch {}
-        }
-      }
-
-      if (articles.length === 0) {
-        return { source, articles, rssError, usage: null, text: null, usedGoogleNews };
-      }
-
-      // Step 3: had date-matched articles but none matched any *exact* topic
-      // yet — try Google News for this source+topic before giving up on it.
-      // Context topics can't be pre-checked this cheaply (they need a read,
-      // not a substring match), so they don't factor into this decision —
-      // but a wider candidate pool from Google here only helps their later
-      // classification pass, so this is never wasted effort.
-      const preMatches = await computeTopicKeywordMatches(articles, exactTopics, source, ai, request.auth.uid, request.auth.token.email);
-      if (relevantIndicesFromMatches(preMatches).length === 0 && !usedGoogleNews) {
-        const googleUrl = deriveGoogleNewsUrl(source, countryKey, topics);
-        if (googleUrl) {
-          try {
-            const googleArticles = await fetchRssWithRetry(googleUrl, GOOGLE_NEWS_FETCH_POOL);
-            const dated = googleArticles.filter(a => matchesDateRange(a.date, date, lookbackDays)).slice(0, articleLimit);
-            if (dated.length > 0) { articles = dated; rssError = null; usedGoogleNews = true; }
-          } catch {}
-        }
-      }
-
-      try {
-        const { text, usage, relevantIndices, topicKeywordMatches, contextTopics: usedContextTopics } = await analyzeArticlesForTopics({
-          ai, source, articles, topics, contextTopics, country, dateLabel, summaryLen, customPrompts,
-          uid: request.auth.uid, email: request.auth.token.email, contextMode
-        });
-        return { source, articles, rssError, usage, text, relevantIndices, topicKeywordMatches, usedContextTopics, usedGoogleNews };
-      } catch (e) {
-        return { source, articles: [], rssError, error: e.message, usedGoogleNews };
-      }
-    }));
-
-    for (const r of sourceResults) {
-      if (r.error) {
-        allResults[r.source.id] = { source: r.source, articles: [], analysis: null, error: r.error };
-      } else {
-        totalInputTokens  += r.usage?.input_tokens  || 0;
-        totalOutputTokens += r.usage?.output_tokens || 0;
-        const analysis = finalizeAnalysis(r.text, r.relevantIndices, r.topicKeywordMatches, dateLabel, r.usedContextTopics);
-        allResults[r.source.id] = { source: r.source, articles: r.articles, analysis, fetchedAt: new Date().toISOString(), rssError: r.rssError, usedGoogleNews: r.usedGoogleNews || false };
-      }
-    }
-
-    const costUsd = await recordCost(request, ai, totalInputTokens, totalOutputTokens);
-    const rssCount = sourceResults.filter(r => !r.error && r.articles?.length > 0 && !r.usedGoogleNews).length;
-    const googleNewsCount = sourceResults.filter(r => !r.error && r.articles?.length > 0 && r.usedGoogleNews).length;
-    return { results: allResults, date, usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens, costUsd, provider: ai.type, model: ai.model, rssCount, googleNewsCount } };
-  }
-);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AGENT 3: Translate Results
-// ─────────────────────────────────────────────────────────────────────────────
 async function translateBatch(ai, batch, targetLangName) {
   const prompt = `Translate each text in this JSON array to ${targetLangName}. Text already in ${targetLangName} should be returned unchanged.
 Return ONLY a valid JSON array with exactly ${batch.length} elements in the same order.
@@ -1827,213 +1599,6 @@ exports.checkFeedStats = onCall(
       } catch {}
     }
     return { valid: probe.valid, feedStats: probe.valid ? probe.feedStats : null };
-  }
-);
-
-exports.translateResults = onCall(
-  { timeoutSeconds: 120, memory: '256MiB', region: 'us-central1' },
-  async (request) => {
-    await requireAuthorized(request);
-    const { texts } = request.data;
-    if (!Array.isArray(texts) || texts.length === 0) throw new HttpsError('invalid-argument', 'texts array required');
-
-    const ai = makeAI(request.data, true); // forTranslation=true → uses cheapest model per provider
-    const BATCH_SIZE = 20;
-    const allTranslations = [];
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
-
-    for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-      const batch = texts.slice(i, i + BATCH_SIZE);
-      try {
-        const { translations, usage } = await translateBatch(ai, batch, 'Hebrew');
-        allTranslations.push(...translations);
-        totalInputTokens  += usage?.input_tokens  || 0;
-        totalOutputTokens += usage?.output_tokens || 0;
-      } catch (e) {
-        throw new HttpsError('internal', `Translation batch ${Math.floor(i / BATCH_SIZE) + 1} failed: ${e.message}`);
-      }
-    }
-
-    const costUsd = await recordCost(request, ai, totalInputTokens, totalOutputTokens, true);
-    return { translations: allTranslations, usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens, costUsd, provider: ai.type, model: ai.model } };
-  }
-);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AGENT 4: Period Summary
-// ─────────────────────────────────────────────────────────────────────────────
-// Finds, per requested topic, which of this country's schedules (any of
-// them — the archive isn't personal data, it's a shared cache) track a
-// matching topic AND have successful report runs overlapping the requested
-// date range. Returns { 'israel': [{ schedule, runs }], ... } keyed by
-// lowercased topic — only entries with real overlapping data are included.
-// This is intentionally the single source of truth for "is this topic
-// grounded", used by both the pre-flight check and the actual analysis call.
-async function findGroundingSchedules(countryKey, topics, startDate, endDate) {
-  const schedulesSnap = await db.ref('schedules').once('value');
-  const schedules = Object.values(schedulesSnap.val() || {}).filter(s => s.countryKey === countryKey);
-  const grounding = {};
-
-  await Promise.all(schedules.map(async (schedule) => {
-    const scheduleTopics = new Set((schedule.topics || []).map(t => t.toLowerCase()));
-    const matchingTopics = topics.filter(t => scheduleTopics.has(t.toLowerCase()));
-    if (matchingTopics.length === 0) return;
-
-    const runsSnap = await db.ref(`reportRuns/${schedule.id}`).once('value');
-    const runs = Object.values(runsSnap.val() || {})
-      .filter(r => r.status === 'ok' && r.periodEnd >= startDate && r.periodStart <= endDate);
-    if (runs.length === 0) return;
-
-    for (const t of matchingTopics) {
-      const key = t.toLowerCase();
-      (grounding[key] = grounding[key] || []).push({ schedule, runs });
-    }
-  }));
-
-  return grounding;
-}
-
-// Cheap pre-flight check — no AI call — so the client can tell the user
-// exactly what's about to happen (which topics get real archived grounding,
-// which fall back to general knowledge) before they commit to the analysis.
-exports.checkPeriodGrounding = onCall(
-  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
-  async (request) => {
-    await requireAuthorized(request);
-    const { countryKey, topics, startDate, endDate } = request.data || {};
-    if (!countryKey || !topics?.length || !startDate || !endDate) {
-      throw new HttpsError('invalid-argument', 'countryKey, topics, startDate, endDate required');
-    }
-    const grounding = await findGroundingSchedules(countryKey, topics, startDate, endDate);
-    const grounded = topics.filter(t => grounding[t.toLowerCase()]);
-    const general = topics.filter(t => !grounding[t.toLowerCase()]);
-    return { grounded, general };
-  }
-);
-
-// Builds the "real archived coverage" text block injected into the period
-// prompt — only covered (real match) entries, capped so a long-running
-// schedule doesn't balloon the prompt.
-function buildGroundingSection(grounding, topics) {
-  const blocks = [];
-  for (const topic of topics) {
-    const matches = grounding[topic.toLowerCase()];
-    if (!matches) continue;
-    const lines = [];
-    for (const { runs } of matches) {
-      for (const run of runs) {
-        if (Array.isArray(run.days)) {
-          // New raw-report shape — real excerpts instead of an AI summary,
-          // which is arguably better grounding than the old paraphrase was.
-          // Articles are no longer tagged per-topic (grouped by source only,
-          // per-article topic attribution was deliberately dropped) — so this
-          // grounds on "this schedule covers the topic at all" rather than
-          // "this exact article matched it". Coarser, but the period prompt
-          // already treats grounding as directional context, not a precise
-          // per-topic transcript.
-          const runTopics = run.topics || [];
-          if (!runTopics.some(rt => rt.toLowerCase() === topic.toLowerCase())) continue;
-          for (const day of run.days) {
-            for (const src of day.sources || []) {
-              for (const a of src.articles || []) {
-                lines.push(`- ${src.sourceName} (${src.sourceLean}), ${day.day}: "${a.title}" — ${a.text}`);
-              }
-            }
-          }
-        } else {
-          for (const src of Object.values(run.results || {})) {
-            const ta = (src.analysis?.topicAnalyses || []).find(t => (t.topic || '').toLowerCase() === topic.toLowerCase());
-            if (ta && ta.covered) {
-              const quotes = ta.quotes?.length ? ` Quotes: ${ta.quotes.map(q => `"${q}"`).join('; ')}` : '';
-              lines.push(`- ${src.source.name} (${src.source.lean}), ${run.dateLabel}: [${ta.tone || 'neutral'}] ${ta.summary}${quotes}`);
-            }
-          }
-        }
-      }
-    }
-    if (lines.length > 0) {
-      blocks.push(`Real archived coverage for "${topic}":\n${lines.slice(0, 40).join('\n')}`);
-    }
-  }
-  if (blocks.length === 0) return '';
-  return `\n${blocks.join('\n\n')}\n`;
-}
-
-exports.fetchPeriodSummary = onCall(
-  { timeoutSeconds: 120, memory: '512MiB', region: 'us-central1' },
-  async (request) => {
-    await requireAuthorized(request);
-    const { country, countryKey, topics, startDate, endDate, periodReportWords: rawReportWords, persona } = request.data;
-    if (!country || !topics?.length || !startDate || !endDate) {
-      throw new HttpsError('invalid-argument', 'country, topics, startDate, endDate required');
-    }
-    const reportLen = `~${Math.min(Math.max(parseInt(rawReportWords) || 150, 50), 500)}-word summary`;
-    const personaLine = persona
-      ? `\nReader profile — apply actively and explicitly throughout:\n${persona}\n\nYou must: foreground ideological roots and cultural patterns behind each camp's framing; explicitly call out when an Israeli angle or perspective appears in coverage; tailor which fault lines, blind spots, and narrative shifts you emphasize to directly serve this reader's stated purpose.\n`
-      : '';
-
-    const ai = makeAI(request.data);
-    const topicList = topics.join(', ');
-    const customPrompts = await getCustomPrompts();
-    const grounding = countryKey ? await findGroundingSchedules(countryKey, topics, startDate, endDate) : {};
-    const groundingSection = buildGroundingSection(grounding, topics);
-    const prompt = fillPrompt(customPrompts.period || DEFAULT_PROMPTS.period, {
-      country, topicList, startDate, endDate, reportLen, personaLine, groundingSection
-    });
-
-    const { text, usage } = await callAI(ai, prompt, 4000);
-
-    let result;
-    try {
-      result = extractJson(text, '{');
-    } catch (e) {
-      throw new HttpsError('internal', 'Failed to parse period summary from AI: ' + e.message);
-    }
-
-    const costUsd = await recordCost(request, ai, usage?.input_tokens || 0, usage?.output_tokens || 0);
-    return {
-      result,
-      usage: { inputTokens: usage?.input_tokens || 0, outputTokens: usage?.output_tokens || 0, costUsd, provider: ai.type, model: ai.model }
-    };
-  }
-);
-
-// Turns the one-shot period summary into a real back-and-forth: the client
-// resends the original analysis plus the running Q&A history each time, so
-// the model can elaborate, clarify, or reconsider instead of the user having
-// to re-prompt from scratch. Not grounded in new data — same knowledge basis
-// as the original summary, just conversational access to it.
-exports.askPeriodFollowUp = onCall(
-  { timeoutSeconds: 60, memory: '256MiB', region: 'us-central1' },
-  async (request) => {
-    await requireAuthorized(request);
-    const { country, topics, startDate, endDate, persona, originalResult, history, question } = request.data || {};
-    if (!country || !topics?.length || !startDate || !endDate || !originalResult || !question) {
-      throw new HttpsError('invalid-argument', 'country, topics, startDate, endDate, originalResult, and question required');
-    }
-
-    const ai = makeAI(request.data);
-    const personaLine = persona ? `\nReader profile for this analysis: ${persona}\n` : '';
-    const historyText = (history || [])
-      .map(h => `Q: ${h.question}\nA: ${h.answer}`)
-      .join('\n\n');
-
-    const prompt = `You previously analyzed how ${country}'s media covered these topics between ${startDate} and ${endDate}: ${topics.join(', ')}.${personaLine}
-
-Your original analysis (JSON):
-${JSON.stringify(originalResult)}
-${historyText ? `\nEarlier follow-up questions in this conversation:\n${historyText}\n` : ''}
-Follow-up question: ${question}
-
-Answer specifically and conversationally, grounded in your original analysis above — elaborate, clarify, reconsider, or push back as the question warrants. Don't repeat the full analysis back; just answer what was asked. Plain text only, no JSON, no markdown headers.`;
-
-    const { text, usage } = await callAI(ai, prompt, 1200);
-    const costUsd = await recordCost(request, ai, usage?.input_tokens || 0, usage?.output_tokens || 0);
-    return {
-      answer: text.trim(),
-      usage: { inputTokens: usage?.input_tokens || 0, outputTokens: usage?.output_tokens || 0, costUsd, provider: ai.type, model: ai.model }
-    };
   }
 );
 
@@ -2258,7 +1823,7 @@ exports.savePromptTemplate = onCall(
   async (request) => {
     requireAdmin(await requireAuthorized(request));
     const { key, value } = request.data || {};
-    if (!['setup', 'analysis', 'period', 'addSources'].includes(key) || typeof value !== 'string') {
+    if (!['setup', 'addSources'].includes(key) || typeof value !== 'string') {
       throw new HttpsError('invalid-argument', 'valid key and value required');
     }
     await db.ref(`config/prompts/${key}`).set(value);
@@ -2271,22 +1836,8 @@ exports.resetPromptTemplate = onCall(
   async (request) => {
     requireAdmin(await requireAuthorized(request));
     const { key } = request.data || {};
-    if (!['setup', 'analysis', 'period', 'addSources'].includes(key)) throw new HttpsError('invalid-argument', 'valid key required');
+    if (!['setup', 'addSources'].includes(key)) throw new HttpsError('invalid-argument', 'valid key required');
     await db.ref(`config/prompts/${key}`).remove();
-    return { ok: true };
-  }
-);
-
-// App-wide switch (not per-topic/per-schedule) for how "Context" topics get
-// judged — see getContextAnalysisMode below for what each mode does. Kept as
-// a runtime setting specifically so it can be A/B tested without a redeploy.
-exports.setContextAnalysisMode = onCall(
-  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
-  async (request) => {
-    requireAdmin(await requireAuthorized(request));
-    const { mode } = request.data || {};
-    if (!['header', 'fullBody'].includes(mode)) throw new HttpsError('invalid-argument', 'mode must be "header" or "fullBody"');
-    await db.ref('config/contextAnalysisMode').set(mode);
     return { ok: true };
   }
 );
@@ -2294,12 +1845,11 @@ exports.setContextAnalysisMode = onCall(
 // ─────────────────────────────────────────────────────────────────────────────
 // Scheduled Reports — reliable daily/weekly topic digests
 //
-// The live fetchNews path checks a source's RSS feed at one point in time,
-// which is unreliable for high-volume outlets: their feed only exposes a
-// small rolling window of recent items, so a topic published earlier in the
-// day can already have scrolled off by the time anyone checks. A schedule
-// can't just re-run that same live check on a timer — it would inherit the
-// exact same blind spot.
+// A single point-in-time check of a source's RSS feed is unreliable for
+// high-volume outlets: their feed only exposes a small rolling window of
+// recent items, so a topic published earlier in the day can already have
+// scrolled off by the time anyone checks. A schedule can't just re-run that
+// same live check on a timer — it would inherit the exact same blind spot.
 //
 // Instead: a frequent poller (pollArchivedSources) continuously archives
 // each source's feed into our own permanent store, often enough that no
@@ -2417,14 +1967,14 @@ function addDaysUTC(dateStr, delta) {
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
 // Always ends yesterday (UTC) — the last calendar day the poller has had a
-// full day to archive. "Today" is deliberately excluded, same reasoning as
-// the point-in-time date warning: it's still in progress.
+// full day to archive. "Today" is deliberately excluded since it's still in
+// progress.
 function yesterdayUTC() {
   return addDaysUTC(isoDateUTC(new Date()), -1);
 }
 
 // Each returned article carries its own archive path (_archivePath) so the
-// caller can delete specific entries later — analyzeArticlesForTopics only
+// caller can delete specific entries later — the topic-matching pipeline only
 // reads .title/.text, so this extra field rides along harmlessly.
 async function readArchivedArticles(countryKey, sourceId, dayKeys) {
   const snaps = await Promise.all(dayKeys.map(day => db.ref(`articleArchive/${countryKey}/${sourceId}/${day}`).once('value')));
@@ -2694,17 +2244,14 @@ exports.generateScheduledReports = onSchedule(
     const now = new Date();
     const schedulesSnap = await db.ref('schedules').once('value');
     const schedules = schedulesSnap.val() || {};
-    // Always the precise, full-article classifier here — NOT the global
-    // config/contextAnalysisMode toggle. That setting's 'header' mode is a
-    // deliberately loose "first pass, err on inclusion" classification
-    // (see classifyContextTopicsByHeader) meant to be corrected by a
-    // follow-up full-text analysis call — which only the old AI-summary
-    // pipeline (fetchNews) has. This raw scheduled pipeline has no such
-    // follow-up, so 'header' mode's loose guesses were standing as the
-    // FINAL decision — which is exactly what was letting unrelated articles
-    // (e.g. global wire stories) through under narrow topics like "Internal
-    // Politics". 'fullBody' costs more per run but is the only mode that's
-    // actually correct for a pipeline with no correction step.
+    // Always the precise, full-article classifier here (classifyContextTopicsByFullBody),
+    // never the cheaper header-only pass (classifyContextTopicsByHeader) — that one is a
+    // deliberately loose "first pass, err on inclusion" classification meant to be
+    // corrected by a follow-up full-text read, which this raw scheduled pipeline has no
+    // such follow-up step for. Using it here let unrelated articles (e.g. global wire
+    // stories) through under narrow topics like "Internal Politics" as a FINAL decision,
+    // not just a candidate filter. 'fullBody' costs more per run but is the only mode
+    // that's actually correct for a pipeline with no correction step.
     const contextMode = 'fullBody';
 
     // A source shared by more than one enabled schedule for the same country

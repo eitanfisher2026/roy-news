@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.51';
+const VERSION = 'v3.52';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -570,6 +570,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
     return p.filterNoRSS ?? true;
   });
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState('');
 
   // Fix URL
   const [fixingSourceId, setFixingSourceId] = useState(null);
@@ -713,6 +714,7 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
 
   async function handleRefreshAll() {
     setRefreshing(true);
+    setRefreshMsg('');
     try {
       const fn = fns.httpsCallable('setupCountry', { timeout: 120000 });
       const result = await fn({ country: country.name, numSources: refreshNum, filterNoRSS: refreshFilterNoRSS, ...await getAISettings(uid) });
@@ -720,6 +722,9 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
       onSourcesChange(newSrcs);
       if (selectable && onSelectionChange) {
         onSelectionChange(new Set(newSrcs.filter(s => s.rssUrl).map(s => s.id)));
+      }
+      if (newSrcs.length < (result.data.requestedCount || refreshNum)) {
+        setRefreshMsg(`Got ${newSrcs.length} of the ${result.data.requestedCount || refreshNum} requested — ${result.data.rssFilteredCount || 0} outlet${result.data.rssFilteredCount === 1 ? '' : 's'} the AI suggested didn't have a working RSS feed when checked live. Try again, or uncheck "Only sources with RSS" to see them anyway and use ⚙ Fix on the ones you want.`);
       }
       setActivePanel(null);
     } catch (e) {
@@ -927,6 +932,11 @@ function SourceManager({ country, user, sources, onSourcesChange, selectable = f
       {addMsg && (
         <div style={{ marginBottom: 10, padding: '8px 12px', borderRadius: 7, fontSize: 12, color: addMsg.startsWith('✓') ? '#4ade80' : '#fb923c', background: addMsg.startsWith('✓') ? '#052e16' : '#2a1505', border: '1px solid ' + (addMsg.startsWith('✓') ? '#14532d' : '#7c3d00') }}>
           {addMsg}
+        </div>
+      )}
+      {refreshMsg && (
+        <div style={{ marginBottom: 10, padding: '8px 12px', borderRadius: 7, fontSize: 12, color: '#fb923c', background: '#2a1505', border: '1px solid #7c3d00' }}>
+          {refreshMsg}
         </div>
       )}
 

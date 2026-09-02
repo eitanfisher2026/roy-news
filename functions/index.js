@@ -764,10 +764,17 @@ exports.setupCountry = onCall(
     const { country, numSources: rawNumSources, filterNoRSS } = request.data;
     if (!country || typeof country !== 'string') throw new HttpsError('invalid-argument', 'country required');
     const numSources = Math.min(Math.max(parseInt(rawNumSources) || 7, 1), 15);
+    // Ask for more than requested — a meaningful share of the AI's guessed
+    // RSS URLs won't actually resolve when live-probed below, and asking
+    // for exactly numSources meant any validation loss directly shrank the
+    // final count with no way to compensate (same reasoning as addSources'
+    // smaller +3 buffer, just larger since this prompt's loss rate runs
+    // higher in practice — observed requesting 7 yielding as few as 3).
+    const requestCount = Math.min(numSources * 2, 20);
 
     const ai = makeAI(request.data);
     const customPrompts = await getCustomPrompts();
-    const prompt = fillPrompt(customPrompts.setup || DEFAULT_PROMPTS.setup, { country, numSources });
+    const prompt = fillPrompt(customPrompts.setup || DEFAULT_PROMPTS.setup, { country, numSources: requestCount });
 
     const { text, usage } = await callAI(ai, prompt, 3000);
     await recordCost(request, ai, usage?.input_tokens || 0, usage?.output_tokens || 0);
@@ -785,7 +792,10 @@ exports.setupCountry = onCall(
       sources.map(s => s.rssUrl ? probeRssFeed(s.rssUrl) : Promise.resolve({ valid: false }))
     );
     sources = sources.map((s, i) => probes[i].valid ? { ...s, feedStats: probes[i].feedStats } : { ...s, rssUrl: null });
+    const beforeRssFilter = sources.length;
     if (filterNoRSS) sources = sources.filter(s => s.rssUrl);
+    const rssFilteredCount = filterNoRSS ? beforeRssFilter - sources.length : 0;
+    sources = sources.slice(0, numSources);
 
     const countryKey = countryToKey(country);
     const setupDate = new Date().toISOString();
@@ -794,7 +804,7 @@ exports.setupCountry = onCall(
       db.ref(`country-meta/${countryKey}`).set({ country, countryKey, setupDate }),
     ]);
 
-    return { countryKey, sources };
+    return { countryKey, sources, rssFilteredCount, requestedCount: numSources };
   }
 );
 

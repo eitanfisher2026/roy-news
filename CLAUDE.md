@@ -1,11 +1,16 @@
-# Roy News — Claude Context
+# Airtime (formerly Roy News) — Claude Context
 
 AI-assisted news aggregation app, owned by Eitan. Pulls RSS sources per country/topic, uses AI (Anthropic by default) to translate/summarize/analyze, and can email scheduled reports.
+
+Renamed from "Roy News" to "Airtime" on 2026-09-02 (in-app branding, email sender name, page title, manifest — see commit around this date). **The Firebase project ID (`roy-news-23ab4`), GitHub repo name, and internal `db`/URLs deliberately still say "roy-news"** — that's permanent/low-value-to-change infrastructure, invisible to end users since this is an email-delivered tool, not a browsed website. Don't be confused seeing "roy-news" in deploy commands or the database — that's expected, not a leftover to fix.
 
 - **Repo:** github.com/eitanfisher2026/roy-news
 - **Firebase project:** roy-news-23ab4
 - **Functions region:** us-central1
 - Sibling projects (same owner, separate everything): [buli](../buli/CLAUDE.md), [foufou-pets](../FouFou-Pets/CLAUDE.md) — nothing shared with those.
+
+## In-progress direction (as of 2026-09-02) — check with Eitan before assuming still accurate
+Eitan is moving this from "each authorized user manages their own schedules" toward "a small set of admins curate reports for a larger roster of passive, email-only recipients who never log in." Point-in-time and period analysis are planned for removal entirely (scheduled reports only, going forward) — reasoning: those features are increasingly redundant with general-purpose AI tools, while the scheduled/curated/sourced pipeline is this app's actual differentiation. Multi-admin already works today (`addAuthorizedUser` supports `role: 'admin'`, and the owner's admin status is hardcoded by email in `getRole` — not stored in `authorizedUsers`, so no one can remove/demote the owner even in principle). Recipient management (add/remove/pause per report per email) is planned but not yet built as of this note.
 
 ## Stack
 - Client: no build step — `public/app.js` is loaded directly with `<script type="text/babel" src="app.js?v=X.X">`, compiled in-browser by Babel. Unlike Buli, there is **no compiled/`app.compiled.js` step** — editing `app.js` is enough, just bump `VERSION` (top of `app.js`) and the matching `?v=` in `index.html` together.

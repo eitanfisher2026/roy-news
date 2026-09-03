@@ -1525,8 +1525,28 @@ Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], 
   }
 }
 
+// Arabic letters that look nearly identical to a Hebrew counterpart — a
+// cheap/fast translation model transliterating a foreign proper noun (e.g.
+// "Thailand" → תאילנד) occasionally substitutes the Arabic lookalike for the
+// Hebrew letter instead, producing text that reads fine visually but is the
+// wrong script underneath. Confirmed in production 2026-09-02. Only the
+// specific pairs actually observed are mapped; anything else Arabic-range
+// that survives is logged rather than guessed at.
+const ARABIC_TO_HEBREW_LOOKALIKES = { 'ا': 'א', 'ي': 'י' };
+function fixArabicLookalikes(str) {
+  if (typeof str !== 'string') return str;
+  let fixed = str.replace(/[اي]/g, ch => ARABIC_TO_HEBREW_LOOKALIKES[ch]);
+  if (/[؀-ۿ]/.test(fixed)) {
+    console.error('translateBatch: unmapped Arabic-range character survived Hebrew translation:', JSON.stringify(fixed));
+  }
+  return fixed;
+}
+
 async function translateBatch(ai, batch, targetLangName) {
-  const prompt = `Translate each text in this JSON array to ${targetLangName}. Text already in ${targetLangName} should be returned unchanged.
+  const scriptNote = targetLangName === 'Hebrew'
+    ? ' Use Hebrew script exclusively — never substitute a similar-looking Arabic letter (e.g. Arabic ا or ي) for a Hebrew one (א, י), even inside a transliterated foreign name like a country.'
+    : '';
+  const prompt = `Translate each text in this JSON array to ${targetLangName}. Text already in ${targetLangName} should be returned unchanged.${scriptNote}
 Return ONLY a valid JSON array with exactly ${batch.length} elements in the same order.
 Each element must be a properly JSON-escaped string. Preserve empty strings as "".
 Do not add markdown, code blocks, or any explanation. Start with [ and end with ].
@@ -1543,6 +1563,7 @@ ${JSON.stringify(batch)}`;
   // real translations are still correct and in order, so this only trims
   // the harmless padding rather than discarding an otherwise-good batch.
   if (translations.length > batch.length) translations = translations.slice(0, batch.length);
+  if (targetLangName === 'Hebrew') translations = translations.map(fixArabicLookalikes);
   return { translations, usage };
 }
 

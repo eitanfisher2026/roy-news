@@ -41,7 +41,7 @@ async function requireAuthorized(request) {
   const role = await getRole(request.auth.token.email);
   if (!role) {
     throw new HttpsError('permission-denied',
-      'Your account is not authorized to use Airtime.\n\nHow to fix: ask the administrator to add your email in Settings → Manage Users.'
+      'Your account is not authorized to use PressWatch.\n\nHow to fix: ask the administrator to add your email in Settings → Manage Users.'
     );
   }
   return role;
@@ -1201,7 +1201,7 @@ function buildReportHtml(schedule, run, rtl = false) {
     <div style="max-width:640px;margin:0 auto;padding:32px 16px;">
       <div style="background:#ffffff;border-radius:3px;box-shadow:0 1px 2px rgba(20,22,26,0.06),0 8px 24px rgba(20,22,26,0.07);">
         <div style="padding:30px 28px 36px;font-family:${sans};">
-          <p style="font-family:Georgia,'Times New Roman',serif;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#90949c;margin:0 0 16px;">Airtime</p>
+          <p style="font-family:Georgia,'Times New Roman',serif;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#90949c;margin:0 0 16px;">PressWatch</p>
           <p style="font-size:19px;font-weight:600;margin:0 0 3px;letter-spacing:-0.005em;color:#1c1e21;">${escapeHtml(titleCase(schedule.country))} — ${kind} Report</p>
           <p style="font-size:13px;color:#90949c;margin:0 0 3px;">${escapeHtml(dateHeader)}</p>
           ${topics.length > 0 ? `<p style="font-size:13px;color:#90949c;margin:0 0 20px;">Topics: ${escapeHtml(topics.join(', '))}</p>` : ''}
@@ -1335,7 +1335,7 @@ async function sendReportEmail(schedule, run) {
   if (enRecipients.length > 0) {
     try {
       await transporter.sendMail({
-        from: `Airtime <${OWNER_EMAIL}>`, to: enRecipients.join(', '), subject,
+        from: `PressWatch <${OWNER_EMAIL}>`, to: enRecipients.join(', '), subject,
         text: buildRawReportText(schedule, run),
         html: buildReportHtml(schedule, run)
       });
@@ -1349,7 +1349,7 @@ async function sendReportEmail(schedule, run) {
       const translateAi = makeAI(aiSettingsSnap.val() || {}, true);
       const hebrewRun = await translateRunToHebrew(run, translateAi, schedule.createdBy, schedule.createdByEmail);
       await transporter.sendMail({
-        from: `Airtime <${OWNER_EMAIL}>`, to: heRecipients.join(', '), subject,
+        from: `PressWatch <${OWNER_EMAIL}>`, to: heRecipients.join(', '), subject,
         text: buildRawReportText(schedule, hebrewRun),
         html: buildReportHtml(schedule, hebrewRun, true)
       });
@@ -1391,10 +1391,10 @@ async function maybeSendAiFailureAlert(schedule, error) {
     });
     const reportName = (schedule.reportTitle || '').trim() || titleCase(schedule.country);
     await transporter.sendMail({
-      from: `Airtime <${OWNER_EMAIL}>`,
+      from: `PressWatch <${OWNER_EMAIL}>`,
       to,
-      subject: '⚠ Airtime — AI provider error, reports may be empty',
-      text: `Your "${reportName}" report just failed to generate because of an AI provider error:\n\n${error.message}\n\nThis usually means the AI account under Settings → AI Provider is out of credits, hit a quota limit, or has an invalid/expired API key — until it's fixed, affected reports will keep coming back empty instead of failing loudly.\n\nOpen Airtime → Settings → AI Provider to check your key and billing.\n\n(You'll only get one of these emails per day even if several of your reports are affected.)`
+      subject: '⚠ PressWatch — AI provider error, reports may be empty',
+      text: `Your "${reportName}" report just failed to generate because of an AI provider error:\n\n${error.message}\n\nThis usually means the AI account under Settings → AI Provider is out of credits, hit a quota limit, or has an invalid/expired API key — until it's fixed, affected reports will keep coming back empty instead of failing loudly.\n\nOpen PressWatch → Settings → AI Provider to check your key and billing.\n\n(You'll only get one of these emails per day even if several of your reports are affected.)`
     });
   } catch (e2) {
     console.error('maybeSendAiFailureAlert failed', e2.message);
@@ -3066,13 +3066,13 @@ exports.shareSchedule = onCall(
     const role = await getRole(email);
     if (!role) {
       throw new HttpsError('failed-precondition',
-        `${email} isn't authorized to use Airtime yet.\n\nHow to fix: add them in Settings → Manage Users first, then share again.`
+        `${email} isn't authorized to use PressWatch yet.\n\nHow to fix: add them in Settings → Manage Users first, then share again.`
       );
     }
     const targetUid = await resolveUidByEmail(email);
     if (!targetUid) {
       throw new HttpsError('failed-precondition',
-        `${email} hasn't signed in to Airtime yet.\n\nHow to fix: ask them to log in once, then share again.`
+        `${email} hasn't signed in to PressWatch yet.\n\nHow to fix: ask them to log in once, then share again.`
       );
     }
     if (level === null) {

@@ -1,8 +1,8 @@
-# Airtime (formerly Roy News) — Claude Context
+# PressWatch (formerly Roy News, briefly Airtime) — Claude Context
 
 AI-assisted news aggregation app, owned by Eitan. Pulls RSS sources per country/topic, uses AI (Anthropic by default) to translate/summarize/analyze, and can email scheduled reports.
 
-Renamed from "Roy News" to "Airtime" on 2026-09-02 (in-app branding, email sender name, page title, manifest — see commit around this date). **The Firebase project ID (`roy-news-23ab4`), GitHub repo name, and internal `db`/URLs deliberately still say "roy-news"** — that's permanent/low-value-to-change infrastructure, invisible to end users since this is an email-delivered tool, not a browsed website. Don't be confused seeing "roy-news" in deploy commands or the database — that's expected, not a leftover to fix.
+Renamed from "Roy News" to "Airtime" on 2026-09-02, then from "Airtime" to "PressWatch" on 2026-09-07 after "Airtime" was rejected by a stakeholder (in-app branding, email sender name, page title, manifest — see commits around these dates). **The Firebase project ID (`roy-news-23ab4`), GitHub repo name, and internal `db`/URLs deliberately still say "roy-news"** — that's permanent/low-value-to-change infrastructure, invisible to end users since this is an email-delivered tool, not a browsed website. Don't be confused seeing "roy-news" in deploy commands or the database — that's expected, not a leftover to fix.
 
 - **Repo:** github.com/eitanfisher2026/roy-news
 - **Firebase project:** roy-news-23ab4

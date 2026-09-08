@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.53';
+const VERSION = 'v3.54';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2650,16 +2650,11 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
     setTranslateProgress(0);
     try {
       const { texts, paths } = extractRawTexts(run);
-      const CONCURRENCY = 6;
-      const allTranslations = new Array(texts.length);
-      for (let i = 0; i < texts.length; i += CONCURRENCY) {
-        const batch = texts.slice(i, i + CONCURRENCY);
-        const translated = await Promise.all(batch.map(t => translateViaGoogle(t)));
-        translated.forEach((t, j) => { allTranslations[i + j] = t; });
-        setTranslateProgress(Math.round(((i + batch.length) / texts.length) * 100));
-      }
-      setHebrewRun(applyRawTranslations(run, paths, allTranslations));
+      const aiSettings = await getAISettings(user?.uid);
+      const resp = await fns.httpsCallable('translateResults', { timeout: 120000 })({ texts, ...aiSettings });
+      setHebrewRun(applyRawTranslations(run, paths, resp.data.translations));
       setIsHebrew(true);
+      setTranslateProgress(100);
     } catch (e) {
       alert('Could not translate: ' + e.message);
     }
@@ -2778,7 +2773,7 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
 // Older reports generated before the raw-report rewrite still have this
 // AI-summary shape (results keyed by source) — kept viewable as-is rather
 // than migrated.
-function LegacyScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClose }) {
+function LegacyScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClose, user }) {
   const [isHebrew, setIsHebrew] = useState(false);
   const [hebrewResults, setHebrewResults] = useState(null);
   const [translating, setTranslating] = useState(false);
@@ -2795,16 +2790,11 @@ function LegacyScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onC
     setTranslateProgress(0);
     try {
       const { texts, paths } = extractTexts(run.results);
-      const CONCURRENCY = 6;
-      const allTranslations = new Array(texts.length);
-      for (let i = 0; i < texts.length; i += CONCURRENCY) {
-        const batch = texts.slice(i, i + CONCURRENCY);
-        const translated = await Promise.all(batch.map(t => translateViaGoogle(t)));
-        translated.forEach((t, j) => { allTranslations[i + j] = t; });
-        setTranslateProgress(Math.round(((i + batch.length) / texts.length) * 100));
-      }
-      setHebrewResults(applyTranslations(run.results, paths, allTranslations));
+      const aiSettings = await getAISettings(user?.uid);
+      const resp = await fns.httpsCallable('translateResults', { timeout: 120000 })({ texts, ...aiSettings });
+      setHebrewResults(applyTranslations(run.results, paths, resp.data.translations));
       setIsHebrew(true);
+      setTranslateProgress(100);
     } catch (e) {
       alert('Could not translate: ' + e.message);
     }

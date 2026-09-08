@@ -1542,29 +1542,60 @@ function fixArabicLookalikes(str) {
   return fixed;
 }
 
+// Callers used to hand this an entire source's articles (title+text pairs)
+// in one shot, up to 100+ strings for a high-volume source — with a fixed
+// 8000-token response budget that was sized for small batches, that made
+// the AI's JSON response get cut off mid-string well before finishing,
+// producing a parse failure (confirmed in production 2026-09-07: a 58-
+// article source failed with "Unterminated string in JSON"), and the whole
+// source fell back to untranslated. Chunking here — rather than trusting
+// every caller to chunk correctly — fixes it for all of them at once,
+// including the Hebrew email pass (translateRunToHebrew), which had the
+// same unbounded-batch problem.
+const TRANSLATE_CHUNK_SIZE = 20;
+
 async function translateBatch(ai, batch, targetLangName) {
   const scriptNote = targetLangName === 'Hebrew'
     ? ' Use Hebrew script exclusively — never substitute a similar-looking Arabic letter (e.g. Arabic ا or ي) for a Hebrew one (א, י), even inside a transliterated foreign name like a country.'
     : '';
-  const prompt = `Translate each text in this JSON array to ${targetLangName}. Text already in ${targetLangName} should be returned unchanged.${scriptNote}
-Return ONLY a valid JSON array with exactly ${batch.length} elements in the same order.
+
+  const allTranslations = [];
+  let totalInputTokens = 0, totalOutputTokens = 0;
+
+  for (let i = 0; i < batch.length; i += TRANSLATE_CHUNK_SIZE) {
+    const chunk = batch.slice(i, i + TRANSLATE_CHUNK_SIZE);
+    const prompt = `Translate each text in this JSON array to ${targetLangName}. Text already in ${targetLangName} should be returned unchanged.${scriptNote}
+Return ONLY a valid JSON array with exactly ${chunk.length} elements in the same order.
 Each element must be a properly JSON-escaped string. Preserve empty strings as "".
 Do not add markdown, code blocks, or any explanation. Start with [ and end with ].
 
-${JSON.stringify(batch)}`;
+${JSON.stringify(chunk)}`;
 
-  const { text, usage } = await callAI(ai, prompt, 8000);
-  let translations = extractJson(text, '[');
-  if (!Array.isArray(translations) || translations.length < batch.length) {
-    throw new Error(`translateBatch: expected at least ${batch.length} translations, got ${Array.isArray(translations) ? translations.length : typeof translations}`);
+    // Scaled to the chunk's actual content, not just its item count — a
+    // fixed budget sized for short strings silently truncates full article
+    // bodies. ~2 chars/token is a conservative (safe-high) estimate for
+    // non-Latin scripts, which run fewer characters per token than English.
+    const totalChars = chunk.reduce((sum, t) => sum + (typeof t === 'string' ? t.length : 0), 0);
+    const maxTokens = Math.min(Math.max(2000, Math.ceil(totalChars / 2) + chunk.length * 50), 16000);
+
+    const { text, usage } = await callAI(ai, prompt, maxTokens);
+    let translations = extractJson(text, '[');
+    if (!Array.isArray(translations) || translations.length < chunk.length) {
+      throw new Error(`translateBatch: expected at least ${chunk.length} translations, got ${Array.isArray(translations) ? translations.length : typeof translations}`);
+    }
+    // Confirmed 2026-09-01: gemini-3.1-flash-lite sometimes pads the response
+    // with extra trailing empty-string elements past what was asked for — the
+    // real translations are still correct and in order, so this only trims
+    // the harmless padding rather than discarding an otherwise-good batch.
+    if (translations.length > chunk.length) translations = translations.slice(0, chunk.length);
+    if (targetLangName === 'Hebrew') translations = translations.map(fixArabicLookalikes);
+
+    allTranslations.push(...translations);
+    totalInputTokens += usage?.input_tokens || 0;
+    totalOutputTokens += usage?.output_tokens || 0;
   }
-  // Confirmed 2026-09-01: gemini-3.1-flash-lite sometimes pads the response
-  // with extra trailing empty-string elements past what was asked for — the
-  // real translations are still correct and in order, so this only trims
-  // the harmless padding rather than discarding an otherwise-good batch.
-  if (translations.length > batch.length) translations = translations.slice(0, batch.length);
-  if (targetLangName === 'Hebrew') translations = translations.map(fixArabicLookalikes);
-  return { translations, usage };
+
+  return { translations: allTranslations, usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens } };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1606,6 +1637,30 @@ If you are not confident a working URL exists, return: { "rssUrl": null }`;
     } catch {}
 
     return { rssUrl, feedStats };
+  }
+);
+
+// On-demand translation for the in-app "Translate to Hebrew" report viewer —
+// separate from the automatic Hebrew email pass (translateRunToHebrew), which
+// runs unconditionally at send time. This lets a viewer preview a report in
+// Hebrew without waiting for/triggering an email.
+exports.translateResults = onCall(
+  { timeoutSeconds: 120, memory: '256MiB', region: 'us-central1' },
+  async (request) => {
+    await requireAuthorized(request);
+    const { texts } = request.data;
+    if (!Array.isArray(texts) || texts.length === 0) throw new HttpsError('invalid-argument', 'texts array required');
+
+    const ai = makeAI(request.data, true); // forTranslation=true → uses cheapest model per provider
+    let translations, usage;
+    try {
+      ({ translations, usage } = await translateBatch(ai, texts, 'Hebrew'));
+    } catch (e) {
+      throw new HttpsError('internal', `Translation failed: ${e.message}`);
+    }
+
+    const costUsd = await recordCost(request, ai, usage.input_tokens || 0, usage.output_tokens || 0, true);
+    return { translations, usage: { inputTokens: usage.input_tokens || 0, outputTokens: usage.output_tokens || 0, costUsd, provider: ai.type, model: ai.model } };
   }
 );
 

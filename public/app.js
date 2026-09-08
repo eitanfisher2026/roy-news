@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.54';
+const VERSION = 'v3.55';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1196,8 +1196,8 @@ const OPENAI_MODELS = [
   { id: 'gpt-5.4',      label: 'GPT-5.4 — Most capable' },
 ];
 const ANTHROPIC_MODELS = [
-  { id: 'claude-sonnet-4-6',         label: 'Claude Sonnet 4.6 — Balanced & capable' },
   { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 — Fast & affordable' },
+  { id: 'claude-sonnet-4-6',         label: 'Claude Sonnet 4.6 — Balanced & capable' },
 ];
 
 function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
@@ -1228,7 +1228,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
   const [openaiKey,    setOpenaiKey]    = useState('');
   const [openaiModel,  setOpenaiModel]  = useState('gpt-4o-mini');
   const [anthropicKey, setAnthropicKey] = useState('');
-  const [anthropicModel, setAnthropicModel] = useState('claude-sonnet-4-6');
+  const [anthropicModel, setAnthropicModel] = useState('claude-haiku-4-5-20251001');
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [showOpenAIKey, setShowOpenAIKey] = useState(false);
   const [showAnthropicKey, setShowAnthropicKey] = useState(false);
@@ -1278,24 +1278,24 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
         try {
           const ls = JSON.parse(localStorage.getItem(`roy-news-ai-${user.uid}`));
           if (ls?.provider) {
-            setAiProvider(ls.provider === 'anthropic' || ls.provider === 'gemini' || ls.provider === 'openai' ? ls.provider : 'gemini');
+            setAiProvider(ls.provider === 'anthropic' || ls.provider === 'gemini' || ls.provider === 'openai' ? ls.provider : 'anthropic');
             setGeminiKey(ls.geminiApiKey || '');
             setGeminiModel(ls.geminiModel || 'gemini-2.5-flash');
             setOpenaiKey(ls.openaiApiKey || '');
             setOpenaiModel(ls.openaiModel || 'gpt-4o-mini');
             setAnthropicKey(ls.anthropicApiKey || '');
-            setAnthropicModel(ls.anthropicModel || 'claude-sonnet-4-6');
+            setAnthropicModel(ls.anthropicModel || 'claude-haiku-4-5-20251001');
           }
         } catch {}
         return;
       }
-      setAiProvider(d.provider === 'anthropic' || d.provider === 'gemini' || d.provider === 'openai' ? d.provider : 'gemini');
+      setAiProvider(d.provider === 'anthropic' || d.provider === 'gemini' || d.provider === 'openai' ? d.provider : 'anthropic');
       setGeminiKey(d.geminiApiKey || '');
       setGeminiModel(d.geminiModel || 'gemini-2.5-flash');
       setOpenaiKey(d.openaiApiKey || '');
       setOpenaiModel(d.openaiModel || 'gpt-4o-mini');
       setAnthropicKey(d.anthropicApiKey || '');
-      setAnthropicModel(d.anthropicModel || 'claude-sonnet-4-6');
+      setAnthropicModel(d.anthropicModel || 'claude-haiku-4-5-20251001');
     }).catch(() => {});
   }, [user?.uid]);
 
@@ -1977,9 +1977,9 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
         {settingsTab === 'general' && (
         <>
         <div style={{ marginBottom: 28 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 14, textTransform: 'uppercase', letterSpacing: 0.5 }}>AI Provider</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 14, textTransform: 'uppercase', letterSpacing: 0.5 }}>AI Provider for Source Setup</div>
           <div style={{ fontSize: 12, color: C.faint, marginBottom: 14, lineHeight: 1.6 }}>
-            PressWatch runs on your own API key — pick a provider and paste your key below.
+            Used only when finding or refreshing news sources (Find by name, + Add More, Refresh All) — this is where a stronger model's real-world recall of things like RSS feed URLs actually matters. Daily and weekly report generation always runs on Gemini to keep recurring costs low, regardless of what's picked here. Pick a provider and paste your own API key below.
           </div>
 
           {[
@@ -1996,6 +1996,19 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
               {aiProvider === p.id && <span style={{ color: '#4ade80', fontSize: 11, fontWeight: 700 }}>Active</span>}
             </label>
           ))}
+
+          {aiProvider !== 'gemini' && (
+            <div style={{ padding: 12, background: '#0f1e35', borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>
+              <div style={{ fontSize: 12, color: C.faint, fontWeight: 600, marginBottom: 8 }}>
+                Google AI Studio API Key <span style={{ fontWeight: 400 }}>(needed for daily/weekly report generation, which always uses Gemini — see note above)</span>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input type={showGeminiKey ? 'text' : 'password'} value={geminiKey} onChange={e => setGeminiKey(e.target.value)} placeholder="Paste your AIza… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
+                <button onClick={() => setShowGeminiKey(x => !x)} style={SMALL_BTN}>{showGeminiKey ? '🙈' : '👁'}</button>
+              </div>
+              {!geminiKey.trim() && <div style={{ color: '#fb923c', fontSize: 11, marginTop: 6 }}>⚠ No Gemini key on file — reports will fall back to whatever's selected above, which costs more.</div>}
+            </div>
+          )}
 
           {aiProvider === 'gemini' && (
             <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>

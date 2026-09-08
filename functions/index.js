@@ -160,12 +160,40 @@ function makeAI(data, forTranslation = false) {
     return { type: 'openai', client: new OpenAI({ apiKey: openaiApiKey }), model };
   }
   if (provider === 'anthropic' && anthropicApiKey) {
-    const model = forTranslation ? 'claude-haiku-4-5-20251001' : (anthropicModel || 'claude-sonnet-4-6');
+    // Haiku by default, not Sonnet — Sonnet's real advantage is recalling
+    // obscure real-world facts (e.g. a specific outlet's actual RSS URL),
+    // which only matters for source setup (setupCountry/addSources/
+    // fixSourceUrl/findSource). Everyday classification/summary work is a
+    // much easier task Haiku handles just as well, at roughly a third of
+    // Sonnet's price — confirmed 2026-09-08 after Sonnet becoming the
+    // default (for RSS-guessing reasons) silently 10x'd daily report costs
+    // since the same provider setting drove report generation too. Still
+    // fully overridable via the model dropdown in Settings.
+    const model = forTranslation ? 'claude-haiku-4-5-20251001' : (anthropicModel || 'claude-haiku-4-5-20251001');
     return { type: 'anthropic', client: new Anthropic({ apiKey: anthropicApiKey }), model };
   }
   throw new HttpsError('failed-precondition',
     'No AI provider configured.\n\nHow to fix: open Settings → AI Provider and add your Gemini, OpenAI, or Anthropic API key.'
   );
+}
+
+// Daily/weekly scheduled-report generation (classification, translation,
+// summary) is always forced to Gemini here, regardless of what the user
+// picked in Settings — that provider/model choice is now specifically for
+// source-setup tasks (setupCountry/addSources/fixSourceUrl/findSource),
+// where a stronger model's real-world recall of things like RSS URLs
+// matters. Report generation is a much easier task Gemini handles fine,
+// and it runs every day across every schedule, so its provider choice
+// dominates total spend far more than the occasional source-setup call —
+// confirmed 2026-09-08: switching the shared provider setting to Anthropic
+// Sonnet (for RSS-guessing quality) silently made every daily report ~10x
+// more expensive too, since both paths read the same setting. Falls back
+// to whatever's actually configured if no Gemini key is on file, so a user
+// who only ever set up Anthropic doesn't get "no AI provider configured"
+// for a provider they never chose.
+function makeReportAI(data, forTranslation = false) {
+  if (data?.geminiApiKey) return makeAI({ ...data, provider: 'gemini' }, forTranslation);
+  return makeAI(data, forTranslation);
 }
 
 async function callAI(ai, prompt, maxTokens) {
@@ -1346,7 +1374,7 @@ async function sendReportEmail(schedule, run) {
   if (heRecipients.length > 0) {
     try {
       const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
-      const translateAi = makeAI(aiSettingsSnap.val() || {}, true);
+      const translateAi = makeReportAI(aiSettingsSnap.val() || {}, true);
       const hebrewRun = await translateRunToHebrew(run, translateAi, schedule.createdBy, schedule.createdByEmail);
       await transporter.sendMail({
         from: `PressWatch <${OWNER_EMAIL}>`, to: heRecipients.join(', '), subject,
@@ -1441,7 +1469,7 @@ function buildThemesBlock(contextTopics, topicGuidance) {
 
 async function classifyContextTopicsByHeader(articles, contextTopics, ai, uid, email, scope, country, topicGuidance) {
   const empty = Object.fromEntries(contextTopics.map(t => [t, []]));
-  if (articles.length === 0) return empty;
+  if (articles.length === 0) return { matches: empty, usage: null };
 
   const titlesList = articles.map((a, i) => `${i + 1}. ${a.title}`).join('\n');
   const scopeLine = domesticScopeLine(scope, country, { loose: true });
@@ -1454,9 +1482,15 @@ ${buildThemesBlock(contextTopics, topicGuidance)}
 
 Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], "other theme": [] }`;
 
+  // Scales with how many themes are being classified in one call — callers
+  // may union several schedules' context topics into a single shared call
+  // (see generateScheduledReports), and a fixed small budget would
+  // truncate a longer response exactly like the setupCountry/translateBatch
+  // bugs fixed earlier.
+  const maxTokens = Math.min(300 + contextTopics.length * 150, 4000);
+
   try {
-    const { text, usage } = await callAI(ai, prompt, 500);
-    if (usage) await persistCost(uid, email, ai, calcCostUsd(ai, usage.input_tokens || 0, usage.output_tokens || 0));
+    const { text, usage } = await callAI(ai, prompt, maxTokens);
     const parsed = extractJson(text, '{') || {};
     const normalized = {};
     for (const [k, v] of Object.entries(parsed)) normalized[k.trim().toLowerCase()] = v;
@@ -1465,14 +1499,14 @@ Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], 
       const v = normalized[t.trim().toLowerCase()];
       result[t] = Array.isArray(v) ? v.filter(n => Number.isInteger(n) && n >= 1 && n <= articles.length) : [];
     }
-    return result;
+    return { matches: result, usage };
   } catch (e) {
     // A failed classification call should fail closed (no matches, no main
     // analysis call either), not fail open into a full-body-priced pass —
     // still logged now, though, so a real failure (billing, invalid key,
     // outage) leaves a trace instead of looking identical to a quiet day.
     console.error('classifyContextTopicsByHeader failed:', e.message);
-    return empty;
+    return { matches: empty, usage: null };
   }
 }
 
@@ -1485,7 +1519,7 @@ Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], 
 // the point.
 async function classifyContextTopicsByFullBody(articles, contextTopics, ai, uid, email, scope, country, topicGuidance) {
   const empty = Object.fromEntries(contextTopics.map(t => [t, []]));
-  if (articles.length === 0) return empty;
+  if (articles.length === 0) return { matches: empty, usage: null };
 
   const articlesList = articles.map((a, i) => `${i + 1}. ${a.title}\n${a.text}`).join('\n\n');
   const scopeLine = domesticScopeLine(scope, country);
@@ -1498,9 +1532,15 @@ ${buildThemesBlock(contextTopics, topicGuidance)}
 
 Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], "other theme": [] }`;
 
+  // Scales with how many themes are being classified in one call — callers
+  // may union several schedules' context topics into a single shared call
+  // (see generateScheduledReports), and a fixed small budget would
+  // truncate a longer response exactly like the setupCountry/translateBatch
+  // bugs fixed earlier.
+  const maxTokens = Math.min(300 + contextTopics.length * 150, 4000);
+
   try {
-    const { text, usage } = await callAI(ai, prompt, 500);
-    if (usage) await persistCost(uid, email, ai, calcCostUsd(ai, usage.input_tokens || 0, usage.output_tokens || 0));
+    const { text, usage } = await callAI(ai, prompt, maxTokens);
     const parsed = extractJson(text, '{') || {};
     const normalized = {};
     for (const [k, v] of Object.entries(parsed)) normalized[k.trim().toLowerCase()] = v;
@@ -1509,7 +1549,7 @@ Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], 
       const v = normalized[t.trim().toLowerCase()];
       result[t] = Array.isArray(v) ? v.filter(n => Number.isInteger(n) && n >= 1 && n <= articles.length) : [];
     }
-    return result;
+    return { matches: result, usage };
   } catch (e) {
     // Unlike classifyContextTopicsByHeader below, this IS the final decision
     // for the scheduled-report pipeline — there's no follow-up pass to "fail
@@ -1651,7 +1691,7 @@ exports.translateResults = onCall(
     const { texts } = request.data;
     if (!Array.isArray(texts) || texts.length === 0) throw new HttpsError('invalid-argument', 'texts array required');
 
-    const ai = makeAI(request.data, true); // forTranslation=true → uses cheapest model per provider
+    const ai = makeReportAI(request.data, true); // report translation always uses Gemini — see makeReportAI
     let translations, usage;
     try {
       ({ translations, usage } = await translateBatch(ai, texts, 'Hebrew'));
@@ -2103,8 +2143,9 @@ async function loadTopicGuidance(topicNames) {
 // it), and weekly is built by aggregating 7 of these already-stored runs
 // (see aggregateWeeklyFromDailyRuns) rather than re-running this over a week
 // pooled together.
-async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, contextMode, now, sharedSourceKeys) {
+async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, contextMode, now, shared) {
   const periodEnd = yesterdayUTC();
+  const { sharedSourceKeys, cache, classificationTopics } = shared;
 
   let sources = (await db.ref(`countries/${schedule.countryKey}/setup/sources`).once('value')).val() || [];
   sources = sources.filter(s => (schedule.sourceIds || []).includes(s.id));
@@ -2112,6 +2153,7 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
   const topics = schedule.topics || [];
   const contextTopics = schedule.contextTopics || [];
   const { exactTopics, actualContextTopics } = splitTopicsByMode(topics, contextTopics);
+  const scope = schedule.searchScope === 'domestic' ? 'domestic' : 'global';
 
   // One read for the whole run (not per source/day) — topicGuidance is just
   // each context topic's already-compiled prompt fragment, so this is a
@@ -2124,19 +2166,71 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
   const pendingDeletions = {};
   const perSourceMatchData = [];
 
+  // Was hardcoded to 0 before 2026-09-08 — the run's own cost/token fields
+  // never actually counted the classification or translation calls below
+  // (both bill the monthly total via persistCost independently), so every
+  // report's displayed cost silently understated the true spend by however
+  // much its classification+translation cost — often the majority of it.
+  let inputTokens = 0, outputTokens = 0, costUsd = 0;
+  function addSpend(usage, aiForPricing) {
+    if (!usage) return;
+    inputTokens += usage.input_tokens || 0;
+    outputTokens += usage.output_tokens || 0;
+    costUsd += calcCostUsd(aiForPricing, usage.input_tokens || 0, usage.output_tokens || 0);
+  }
+
   await Promise.all(sources.map(async (source) => {
-    const articles = await readArchivedArticles(schedule.countryKey, source.id, [periodEnd]);
+    // Archive reads, classification, and translation are all memoized per
+    // country+source on the `shared` cache passed in from
+    // generateScheduledReports — schedules for the same tick are processed
+    // one at a time (not concurrently), so a plain Map is enough, no
+    // locking needed. A source shared by more than one schedule (very
+    // common — two schedules for the same country routinely use the same
+    // outlet) now gets read/classified/translated once per day instead of
+    // once per schedule.
+    const articlesKey = `${schedule.countryKey}:${source.id}`;
+    if (!cache.articles.has(articlesKey)) {
+      cache.articles.set(articlesKey, await readArchivedArticles(schedule.countryKey, source.id, [periodEnd]));
+    }
+    const articles = cache.articles.get(articlesKey);
     if (articles.length === 0) return;
 
+    // Exact-topic matching is already ~free (a substring check plus a
+    // one-time, permanently-cached-forever translation per topic+language),
+    // so it's left per-schedule rather than added to the sharing below.
     const exactMatches = exactTopics.length > 0
       ? await computeTopicKeywordMatches(articles, exactTopics, source, ai, schedule.createdBy, schedule.createdByEmail)
       : {};
+
     let contextMatches = {};
     if (actualContextTopics.length > 0) {
-      contextMatches = contextMode === 'fullBody'
-        ? await classifyContextTopicsByFullBody(articles, actualContextTopics, ai, schedule.createdBy, schedule.createdByEmail, schedule.searchScope, schedule.country, topicGuidance)
-        : await classifyContextTopicsByHeader(articles, actualContextTopics, ai, schedule.createdBy, schedule.createdByEmail, schedule.searchScope, schedule.country, topicGuidance);
+      // The priciest call in this whole pipeline (reads every article's
+      // full text) — shared across every schedule that uses this exact
+      // country+source+searchScope combination this tick. The union of
+      // every such schedule's context topics was precomputed in
+      // generateScheduledReports, so whichever schedule reaches this first
+      // asks for everyone's topics in one call; every other schedule
+      // (including a later source on this same schedule) just reads the
+      // cached result and picks out its own topics — no second AI call.
+      const classifyKey = `${articlesKey}:${scope}`;
+      if (!cache.classification.has(classifyKey)) {
+        const unionTopics = [...(classificationTopics.get(classifyKey) || new Set(actualContextTopics))];
+        const { matches, usage } = contextMode === 'fullBody'
+          ? await classifyContextTopicsByFullBody(articles, unionTopics, ai, schedule.createdBy, schedule.createdByEmail, schedule.searchScope, schedule.country, topicGuidance)
+          : await classifyContextTopicsByHeader(articles, unionTopics, ai, schedule.createdBy, schedule.createdByEmail, schedule.searchScope, schedule.country, topicGuidance);
+        if (usage) await persistCost(schedule.createdBy, schedule.createdByEmail, ai, calcCostUsd(ai, usage.input_tokens || 0, usage.output_tokens || 0));
+        cache.classification.set(classifyKey, { matches, usage, billedToScheduleId: scheduleId });
+      }
+      const entry = cache.classification.get(classifyKey);
+      contextMatches = Object.fromEntries(actualContextTopics.map(t => [t, entry.matches[t] || []]));
+      // The shared call is billed once, in full, to whichever schedule
+      // triggered it (recorded above) — the real monthly total is correct
+      // either way; this just decides which report's own displayed cost
+      // shows it, so a schedule that got a free ride off another one's
+      // already-computed classification doesn't also show it twice.
+      if (entry.billedToScheduleId === scheduleId) addSpend(entry.usage, ai);
     }
+
     const topicKeywordMatches = { ...exactMatches, ...contextMatches };
     const relevantIndices = relevantIndicesFromMatches(topicKeywordMatches);
 
@@ -2149,7 +2243,7 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
     // them under its own unrelated topics. Only safe to prune when this
     // schedule is the sole consumer of the source.
     const relevantSet = new Set(relevantIndices);
-    const isSharedSource = sharedSourceKeys.has(`${schedule.countryKey}:${source.id}`);
+    const isSharedSource = sharedSourceKeys.has(articlesKey);
     if (!isSharedSource) {
       articles.forEach((a, i) => { if (!relevantSet.has(i + 1)) pendingDeletions[a._archivePath] = null; });
     }
@@ -2167,22 +2261,41 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
     const translatedArticles = articles.map(a => ({ title: a.title, text: a.text, link: a.link }));
     const toTranslate = isEnglish ? [] : relevantIndices;
     if (toTranslate.length > 0) {
-      const batch = toTranslate.flatMap(i => [articles[i - 1].title, articles[i - 1].text]);
-      try {
-        const { translations, usage } = await translateBatch(translateAi, batch, 'English');
-        if (usage) await persistCost(schedule.createdBy, schedule.createdByEmail, translateAi, calcCostUsd(translateAi, usage.input_tokens || 0, usage.output_tokens || 0));
-        toTranslate.forEach((i, idx) => {
-          translatedArticles[i - 1] = { title: translations[idx * 2], text: translations[idx * 2 + 1], link: articles[i - 1].link };
-        });
-      } catch (e) {
-        // A report with an untranslated article, clearly flagged, beats an
-        // article silently dropped (or worse, a whole report that looks
-        // empty) — the original text (already seeded above) is left as-is,
-        // translationFailed just drives the "couldn't translate" note the
-        // email/report renderers show next to it.
-        console.error(`translateBatch failed for source ${source.id}, showing ${toTranslate.length} article(s) untranslated:`, e.message);
-        toTranslate.forEach(i => { translatedArticles[i - 1] = { ...translatedArticles[i - 1], translationFailed: true }; });
+      // Cached per individual article (not per whole batch) rather than
+      // per (source, exact topic set) — two schedules sharing a source
+      // usually need overlapping-but-not-identical sets of articles
+      // translated (different topics match different articles), so
+      // whichever schedule needs a given article first translates and
+      // caches just that one; every later schedule reuses it for free
+      // instead of re-translating articles it happens to also need.
+      if (!cache.translatedArticles.has(articlesKey)) cache.translatedArticles.set(articlesKey, new Map());
+      const perArticle = cache.translatedArticles.get(articlesKey);
+      const needed = toTranslate.filter(i => !perArticle.has(i));
+      if (needed.length > 0) {
+        const batch = needed.flatMap(i => [articles[i - 1].title, articles[i - 1].text]);
+        try {
+          const { translations, usage } = await translateBatch(translateAi, batch, 'English');
+          if (usage) {
+            await persistCost(schedule.createdBy, schedule.createdByEmail, translateAi, calcCostUsd(translateAi, usage.input_tokens || 0, usage.output_tokens || 0));
+            addSpend(usage, translateAi);
+          }
+          needed.forEach((i, idx) => perArticle.set(i, { title: translations[idx * 2], text: translations[idx * 2 + 1] }));
+        } catch (e) {
+          // A report with an untranslated article, clearly flagged, beats an
+          // article silently dropped (or worse, a whole report that looks
+          // empty) — the original text (already seeded above) is left as-is,
+          // translationFailed just drives the "couldn't translate" note the
+          // email/report renderers show next to it.
+          console.error(`translateBatch failed for source ${source.id}, showing ${needed.length} article(s) untranslated:`, e.message);
+          needed.forEach(i => perArticle.set(i, { failed: true }));
+        }
       }
+      toTranslate.forEach(i => {
+        const t = perArticle.get(i);
+        translatedArticles[i - 1] = t.failed
+          ? { ...translatedArticles[i - 1], translationFailed: true }
+          : { title: t.title, text: t.text, link: articles[i - 1].link };
+      });
     }
 
     perSourceMatchData.push({ source, topicKeywordMatches, translatedArticles });
@@ -2193,7 +2306,7 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
 
   const run = {
     scheduleId, generatedAt: now.toISOString(), periodStart: periodEnd, periodEnd, dateLabel: periodEnd,
-    days, topics, runType: 'daily', costUsd: 0, inputTokens: 0, outputTokens: 0, provider: ai.type, model: ai.model, status: 'ok'
+    days, topics, runType: 'daily', costUsd, inputTokens, outputTokens, provider: ai.type, model: ai.model, status: 'ok'
   };
   return { run, pendingDeletions, periodEnd };
 }
@@ -2358,6 +2471,37 @@ exports.generateScheduledReports = onSchedule(
     }
     const sharedSourceKeys = new Set([...sourceUsageCount.entries()].filter(([, count]) => count > 1).map(([key]) => key));
 
+    // Precompute, for every schedule that will actually attempt daily
+    // generation this tick, the union of context (classify-mode) topics
+    // needed per country+source+searchScope — lets generateDailyReportRun
+    // ask for everyone's topics in one shared classification call per
+    // source instead of one call per schedule. Exact-topic matching isn't
+    // included here since it's already ~free (see computeTopicKeywordMatches).
+    const nowHour = now.getUTCHours();
+    const todayPeriodEnd = yesterdayUTC();
+    const classificationTopics = new Map(); // `${countryKey}:${sourceId}:${scope}` -> Set<topic>
+    for (const s of Object.values(schedules)) {
+      if (!s.enabled) continue;
+      const dailyHour = s.dailyHourUtc ?? s.hourUtc;
+      if (nowHour !== dailyHour) continue;
+      if (s.lastRunStatus === 'ok' && s.lastPeriodEnd === todayPeriodEnd) continue; // already done today
+      const { actualContextTopics } = splitTopicsByMode(s.topics || [], s.contextTopics || []);
+      if (actualContextTopics.length === 0) continue;
+      const scope = s.searchScope === 'domestic' ? 'domestic' : 'global';
+      for (const sourceId of (s.sourceIds || [])) {
+        const key = `${s.countryKey}:${sourceId}:${scope}`;
+        const set = classificationTopics.get(key) || new Set();
+        actualContextTopics.forEach(t => set.add(t));
+        classificationTopics.set(key, set);
+      }
+    }
+    // Fresh per invocation (this function runs once an hour) — memoizes
+    // archive reads, classification, and translation across every schedule
+    // processed in this one tick. See generateDailyReportRun for how each
+    // is shared.
+    const cache = { articles: new Map(), classification: new Map(), translatedArticles: new Map() };
+    const shared = { sharedSourceKeys, cache, classificationTopics };
+
     for (const [scheduleId, schedule] of Object.entries(schedules)) {
       if (!schedule.enabled) continue;
       const periodEnd = yesterdayUTC();
@@ -2395,9 +2539,9 @@ exports.generateScheduledReports = onSchedule(
           const runRef = db.ref(`reportRuns/${scheduleId}`).push();
           try {
             const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
-            const ai = makeAI(aiSettingsSnap.val() || {});
-            const translateAi = makeAI(aiSettingsSnap.val() || {}, true);
-            const { run, pendingDeletions } = await generateDailyReportRun(scheduleId, schedule, ai, translateAi, contextMode, now, sharedSourceKeys);
+            const ai = makeReportAI(aiSettingsSnap.val() || {});
+            const translateAi = makeReportAI(aiSettingsSnap.val() || {}, true);
+            const { run, pendingDeletions } = await generateDailyReportRun(scheduleId, schedule, ai, translateAi, contextMode, now, shared);
             // Daily always gets a summary now, same as weekly already does —
             // a failed summary must never fail the report itself, the
             // per-source article listing is still useful without it.
@@ -2473,7 +2617,7 @@ exports.generateScheduledReports = onSchedule(
           const weeklyRunRef = db.ref(`reportRuns/${scheduleId}`).push();
           try {
             const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
-            const ai = makeAI(aiSettingsSnap.val() || {});
+            const ai = makeReportAI(aiSettingsSnap.val() || {});
             const weeklyRun = await aggregateWeeklyFromDailyRuns(scheduleId, schedule, periodEnd, now, ai);
             await weeklyRunRef.set(weeklyRun);
             await db.ref(`schedules/${scheduleId}`).update({ lastWeeklyRunAt: now.toISOString(), lastWeeklyRunStatus: 'ok', lastWeeklyPeriodEnd: periodEnd });
@@ -2763,8 +2907,8 @@ exports.regenerateDailyReportNow = onCall(
     const now = new Date();
     const periodEnd = yesterdayUTC();
     const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
-    const ai = makeAI(aiSettingsSnap.val() || {});
-    const translateAi = makeAI(aiSettingsSnap.val() || {}, true);
+    const ai = makeReportAI(aiSettingsSnap.val() || {});
+    const translateAi = makeReportAI(aiSettingsSnap.val() || {}, true);
 
     // Same shared-source protection as the automatic pipeline — a source
     // used by more than one enabled schedule must not get pruned here.
@@ -2779,13 +2923,18 @@ exports.regenerateDailyReportNow = onCall(
       }
     }
     const sharedSourceKeys = new Set([...sourceUsageCount.entries()].filter(([, count]) => count > 1).map(([key]) => key));
+    // A one-off manual regenerate of a single schedule has no other
+    // same-tick schedule to share a classification call with, so this is
+    // just an empty cache/topic-union — generateDailyReportRun falls back
+    // to this schedule's own topics when nothing's precomputed for a key.
+    const shared = { sharedSourceKeys, cache: { articles: new Map(), classification: new Map(), translatedArticles: new Map() }, classificationTopics: new Map() };
 
     const runsSnap = await db.ref(`reportRuns/${scheduleId}`).once('value');
     const existingMatch = Object.entries(runsSnap.val() || {}).find(([, r]) => (r.runType || 'daily') === 'daily' && r.periodEnd === periodEnd);
     const runRef = existingMatch ? db.ref(`reportRuns/${scheduleId}/${existingMatch[0]}`) : db.ref(`reportRuns/${scheduleId}`).push();
 
     try {
-      const { run, pendingDeletions } = await generateDailyReportRun(scheduleId, schedule, ai, translateAi, 'fullBody', now, sharedSourceKeys);
+      const { run, pendingDeletions } = await generateDailyReportRun(scheduleId, schedule, ai, translateAi, 'fullBody', now, shared);
       try {
         const result = await generateDailySummary(schedule, run, ai);
         if (result) {
@@ -2854,7 +3003,7 @@ exports.sendReportEmailNow = onCall(
     if (!run && type === 'weekly') {
       const periodEnd = yesterdayUTC();
       const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
-      const ai = makeAI(aiSettingsSnap.val() || {});
+      const ai = makeReportAI(aiSettingsSnap.val() || {});
       const built = await aggregateWeeklyFromDailyRuns(scheduleId, schedule, periodEnd, new Date(), ai);
       if (built.days.length === 0) {
         throw new HttpsError('failed-precondition', 'No daily report history yet to build a weekly digest from.');
@@ -2872,7 +3021,7 @@ exports.sendReportEmailNow = onCall(
     // Now never sends without one.
     if (!run.summary && runId) {
       const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
-      const ai = makeAI(aiSettingsSnap.val() || {});
+      const ai = makeReportAI(aiSettingsSnap.val() || {});
       const result = await generateDailySummary(schedule, run, ai);
       if (result) {
         if (result.usage) await persistCost(schedule.createdBy, schedule.createdByEmail, ai, calcCostUsd(ai, result.usage.input_tokens || 0, result.usage.output_tokens || 0));
@@ -3214,7 +3363,7 @@ exports.summarizeReportRun = onCall(
     if (!run) throw new HttpsError('not-found', 'Report run not found');
     if (run.summary) return { summary: run.summary };
 
-    const ai = makeAI(request.data);
+    const ai = makeReportAI(request.data);
     const result = await generateDailySummary(schedule, run, ai);
     if (!result) return { summary: null };
     if (result.usage) await persistCost(request.auth.uid, request.auth.token.email, ai, calcCostUsd(ai, result.usage.input_tokens || 0, result.usage.output_tokens || 0));
@@ -3249,7 +3398,11 @@ exports.estimateScheduleCost = onCall(
     const { sourceIds, topics, contextTopics, countryKey } = request.data || {};
     if (!sourceIds?.length || !topics?.length) throw new HttpsError('invalid-argument', 'sourceIds and topics required');
 
-    const ai = makeAI(request.data);
+    // Pricing reflects makeReportAI, not the user's chosen provider — real
+    // report generation always runs on Gemini now (see makeReportAI), so
+    // an estimate priced on whatever provider is picked in Settings (which
+    // now only governs source setup) would be misleading.
+    const ai = makeReportAI(request.data);
     const contextSet = new Set((contextTopics || []).map(t => t.toLowerCase()));
     const hasContext = topics.some(t => contextSet.has(t.toLowerCase()));
     // Matches generateScheduledReports, which always runs 'fullBody' now —
@@ -3295,7 +3448,7 @@ exports.estimateScheduleCost = onCall(
         const selected = (sourcesSnap.val() || []).filter(s => sourceIds.includes(s.id));
         const nonEnglishCount = selected.filter(s => !sourceIsEnglishOnly(s)).length;
         if (nonEnglishCount > 0) {
-          const translateAi = makeAI(request.data, true);
+          const translateAi = makeReportAI(request.data, true);
           const perArticleTokens = Math.round(120 * 1.3);
           const translateTokens = assumedArticlesPerDay * nonEnglishCount * perArticleTokens;
           translateUsd = calcCostUsd(translateAi, translateTokens, translateTokens);

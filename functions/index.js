@@ -3216,7 +3216,14 @@ Return ONLY valid JSON, no markdown, no explanation: { "include": ["...", ...] }
 );
 
 exports.listSchedules = onCall(
-  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  // Bumped from 128MiB 2026-09-08 after it started crashing ("Memory limit
+  // of 128 MiB exceeded with 137 MiB used") — it pulls every schedule's
+  // full reportRuns history (including full article text) just to check
+  // for unread runs, and that's only grown as more schedules and daily
+  // history accumulated. 512MiB is a safety margin, not a tight fit —
+  // worth revisiting with a cheaper unread-check that doesn't require
+  // loading full run bodies if this keeps growing.
+  { timeoutSeconds: 30, memory: '512MiB', region: 'us-central1' },
   async (request) => {
     await requireAuthorized(request);
     const uid = request.auth.uid;

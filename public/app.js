@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.55';
+const VERSION = 'v3.56';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1222,7 +1222,8 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
     setTimeout(() => setPersonaSaved(false), 2000);
   }
 
-  const [aiProvider,   setAiProvider]   = useState('gemini');
+  const [aiProvider,   setAiProvider]   = useState('anthropic');
+  const [reportProvider, setReportProvider] = useState('gemini');
   const [geminiKey,    setGeminiKey]    = useState('');
   const [geminiModel,  setGeminiModel]  = useState('gemini-2.5-flash');
   const [openaiKey,    setOpenaiKey]    = useState('');
@@ -1279,6 +1280,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
           const ls = JSON.parse(localStorage.getItem(`roy-news-ai-${user.uid}`));
           if (ls?.provider) {
             setAiProvider(ls.provider === 'anthropic' || ls.provider === 'gemini' || ls.provider === 'openai' ? ls.provider : 'anthropic');
+            setReportProvider(ls.reportProvider === 'anthropic' || ls.reportProvider === 'gemini' || ls.reportProvider === 'openai' ? ls.reportProvider : 'gemini');
             setGeminiKey(ls.geminiApiKey || '');
             setGeminiModel(ls.geminiModel || 'gemini-2.5-flash');
             setOpenaiKey(ls.openaiApiKey || '');
@@ -1290,6 +1292,7 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
         return;
       }
       setAiProvider(d.provider === 'anthropic' || d.provider === 'gemini' || d.provider === 'openai' ? d.provider : 'anthropic');
+      setReportProvider(d.reportProvider === 'anthropic' || d.reportProvider === 'gemini' || d.reportProvider === 'openai' ? d.reportProvider : 'gemini');
       setGeminiKey(d.geminiApiKey || '');
       setGeminiModel(d.geminiModel || 'gemini-2.5-flash');
       setOpenaiKey(d.openaiApiKey || '');
@@ -1636,9 +1639,135 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
 
   async function saveAISettings() {
     if (!user?.uid) return;
-    await db.ref(`users/${user.uid}/ai`).set({ provider: aiProvider, geminiApiKey: geminiKey, geminiModel, openaiApiKey: openaiKey, openaiModel, anthropicApiKey: anthropicKey, anthropicModel });
+    await db.ref(`users/${user.uid}/ai`).set({ provider: aiProvider, reportProvider, geminiApiKey: geminiKey, geminiModel, openaiApiKey: openaiKey, openaiModel, anthropicApiKey: anthropicKey, anthropicModel });
     setAiSaveMsg('✓ Saved');
     setTimeout(() => setAiSaveMsg(''), 2500);
+  }
+
+  // Shared between the "Source Setup" and "Daily/Weekly Reports" provider
+  // sections — both pick from the same three providers and the same
+  // underlying stored keys/models, they just independently choose which
+  // provider is used for which purpose.
+  function ProviderRadios({ value, onChange, name }) {
+    return [
+      { id: 'gemini',    name: 'Gemini (Google)',   desc: 'Google AI Studio · Your API key' },
+      { id: 'openai',    name: 'ChatGPT (OpenAI)',  desc: 'OpenAI API · Your API key' },
+      { id: 'anthropic', name: 'Claude (Anthropic)', desc: 'Anthropic API · Your API key' },
+    ].map(p => (
+      <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: value === p.id ? C.card : '#0f1e35', border: '1px solid ' + (value === p.id ? '#3b82f6' : C.border), borderRadius: 8, cursor: 'pointer', marginBottom: 7 }}>
+        <input type="radio" name={name} value={p.id} checked={value === p.id} onChange={() => onChange(p.id)} style={{ accentColor: '#3b82f6', flexShrink: 0 }} />
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 600, fontSize: 13, color: C.text }}>{p.name}</div>
+          <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{p.desc}</div>
+        </div>
+        {value === p.id && <span style={{ color: '#4ade80', fontSize: 11, fontWeight: 700 }}>Active</span>}
+      </label>
+    ));
+  }
+
+  function ProviderKeyPanel({ provider }) {
+    if (provider === 'gemini') return (
+      <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Google AI Studio API Key</div>
+          <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
+            style={{ fontSize: 12, color: '#60a5fa', fontWeight: 600, textDecoration: 'none', padding: '4px 10px', background: '#0f2a4a', border: '1px solid #1e3a5f', borderRadius: 6, whiteSpace: 'nowrap' }}>
+            🔑 Get API Key ↗
+          </a>
+        </div>
+        <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
+          Tap "Get API Key" → create a key on Google AI Studio → come back and paste it below
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+          <input type={showGeminiKey ? 'text' : 'password'} value={geminiKey} onChange={e => setGeminiKey(e.target.value)} placeholder="Paste your AIza… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
+          <button onClick={() => setShowGeminiKey(x => !x)} style={SMALL_BTN}>{showGeminiKey ? '🙈' : '👁'}</button>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+          <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Model</div>
+          <button onClick={() => refreshModels('gemini', geminiKey)} disabled={!geminiKey.trim() || liveModelsLoading === 'gemini'}
+            style={{ ...SMALL_BTN, opacity: (!geminiKey.trim() || liveModelsLoading === 'gemini') ? 0.5 : 1 }}>
+            {liveModelsLoading === 'gemini' ? 'Checking…' : '🔄 Refresh list'}
+          </button>
+        </div>
+        <select value={geminiModel} onChange={e => setGeminiModel(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
+          {modelOptions(liveModels.gemini?.models || GEMINI_MODELS, geminiModel).map(m =>
+            <option key={m.id} value={m.id}>{modelLabel(m, liveModels.gemini?.cheapestId)}</option>
+          )}
+        </select>
+        <div style={{ fontSize: 11, color: C.faint, marginTop: 6 }}>
+          {liveModels.gemini ? `Showing ${liveModels.gemini.models.length} models live from your Gemini account.` : 'Showing a default list — press "Refresh list" to pull the current models from your Gemini account.'}
+        </div>
+        {liveModelsErr.gemini && <div style={{ color: '#f87171', fontSize: 11, marginTop: 6 }}>{liveModelsErr.gemini}</div>}
+      </div>
+    );
+    if (provider === 'openai') return (
+      <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>OpenAI API Key</div>
+          <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer"
+            style={{ fontSize: 12, color: '#60a5fa', fontWeight: 600, textDecoration: 'none', padding: '4px 10px', background: '#0f2a4a', border: '1px solid #1e3a5f', borderRadius: 6, whiteSpace: 'nowrap' }}>
+            🔑 Get API Key ↗
+          </a>
+        </div>
+        <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
+          Tap "Get API Key" → create a key on OpenAI Platform → come back and paste it below
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+          <input type={showOpenAIKey ? 'text' : 'password'} value={openaiKey} onChange={e => setOpenaiKey(e.target.value)} placeholder="Paste your sk-… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
+          <button onClick={() => setShowOpenAIKey(x => !x)} style={SMALL_BTN}>{showOpenAIKey ? '🙈' : '👁'}</button>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+          <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Model</div>
+          <button onClick={() => refreshModels('openai', openaiKey)} disabled={!openaiKey.trim() || liveModelsLoading === 'openai'}
+            style={{ ...SMALL_BTN, opacity: (!openaiKey.trim() || liveModelsLoading === 'openai') ? 0.5 : 1 }}>
+            {liveModelsLoading === 'openai' ? 'Checking…' : '🔄 Refresh list'}
+          </button>
+        </div>
+        <select value={openaiModel} onChange={e => setOpenaiModel(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
+          {modelOptions(liveModels.openai?.models || OPENAI_MODELS, openaiModel).map(m =>
+            <option key={m.id} value={m.id}>{modelLabel(m, liveModels.openai?.cheapestId)}</option>
+          )}
+        </select>
+        <div style={{ fontSize: 11, color: C.faint, marginTop: 6 }}>
+          {liveModels.openai ? `Showing ${liveModels.openai.models.length} models live from your OpenAI account.` : 'Showing a default list — press "Refresh list" to pull the current models from your OpenAI account.'}
+        </div>
+        {liveModelsErr.openai && <div style={{ color: '#f87171', fontSize: 11, marginTop: 6 }}>{liveModelsErr.openai}</div>}
+      </div>
+    );
+    return (
+      <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Anthropic API Key</div>
+          <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer"
+            style={{ fontSize: 12, color: '#60a5fa', fontWeight: 600, textDecoration: 'none', padding: '4px 10px', background: '#0f2a4a', border: '1px solid #1e3a5f', borderRadius: 6, whiteSpace: 'nowrap' }}>
+            🔑 Get API Key ↗
+          </a>
+        </div>
+        <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
+          Tap "Get API Key" → create a key on the Anthropic Console → come back and paste it below
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input type={showAnthropicKey ? 'text' : 'password'} value={anthropicKey} onChange={e => setAnthropicKey(e.target.value)} placeholder="Paste your sk-ant-… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
+          <button onClick={() => setShowAnthropicKey(x => !x)} style={SMALL_BTN}>{showAnthropicKey ? '🙈' : '👁'}</button>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, marginBottom: 6 }}>
+          <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Model</div>
+          <button onClick={() => refreshModels('anthropic', anthropicKey)} disabled={!anthropicKey.trim() || liveModelsLoading === 'anthropic'}
+            style={{ ...SMALL_BTN, opacity: (!anthropicKey.trim() || liveModelsLoading === 'anthropic') ? 0.5 : 1 }}>
+            {liveModelsLoading === 'anthropic' ? 'Checking…' : '🔄 Refresh list'}
+          </button>
+        </div>
+        <select value={anthropicModel} onChange={e => setAnthropicModel(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
+          {modelOptions(liveModels.anthropic?.models || ANTHROPIC_MODELS, anthropicModel).map(m =>
+            <option key={m.id} value={m.id}>{modelLabel(m, liveModels.anthropic?.cheapestId)}</option>
+          )}
+        </select>
+        <div style={{ fontSize: 11, color: C.faint, marginTop: 6 }}>
+          {liveModels.anthropic ? `Showing ${liveModels.anthropic.models.length} models live from your Anthropic account.` : 'Showing a default list — press "Refresh list" to pull the current models from your Anthropic account.'}
+        </div>
+        {liveModelsErr.anthropic && <div style={{ color: '#f87171', fontSize: 11, marginTop: 6 }}>{liveModelsErr.anthropic}</div>}
+      </div>
+    );
   }
 
   useEffect(() => {
@@ -1979,146 +2108,24 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
         <div style={{ marginBottom: 28 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 14, textTransform: 'uppercase', letterSpacing: 0.5 }}>AI Provider for Source Setup</div>
           <div style={{ fontSize: 12, color: C.faint, marginBottom: 14, lineHeight: 1.6 }}>
-            Used only when finding or refreshing news sources (Find by name, + Add More, Refresh All) — this is where a stronger model's real-world recall of things like RSS feed URLs actually matters. Daily and weekly report generation always runs on Gemini to keep recurring costs low, regardless of what's picked here. Pick a provider and paste your own API key below.
+            Used only when finding or refreshing news sources (Find by name, + Add More, Refresh All) — this is where a stronger model's real-world recall of things like RSS feed URLs actually matters. Pick a provider and paste your own API key below.
           </div>
-
-          {[
-            { id: 'gemini',    name: 'Gemini (Google)',   desc: 'Google AI Studio · Your API key' },
-            { id: 'openai',    name: 'ChatGPT (OpenAI)',  desc: 'OpenAI API · Your API key' },
-            { id: 'anthropic', name: 'Claude (Anthropic)', desc: 'Anthropic API · Your API key' },
-          ].map(p => (
-            <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: aiProvider === p.id ? C.card : '#0f1e35', border: '1px solid ' + (aiProvider === p.id ? '#3b82f6' : C.border), borderRadius: 8, cursor: 'pointer', marginBottom: 7 }}>
-              <input type="radio" name="aiprovider" value={p.id} checked={aiProvider === p.id} onChange={() => setAiProvider(p.id)} style={{ accentColor: '#3b82f6', flexShrink: 0 }} />
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 13, color: C.text }}>{p.name}</div>
-                <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{p.desc}</div>
-              </div>
-              {aiProvider === p.id && <span style={{ color: '#4ade80', fontSize: 11, fontWeight: 700 }}>Active</span>}
-            </label>
-          ))}
-
-          {aiProvider !== 'gemini' && (
-            <div style={{ padding: 12, background: '#0f1e35', borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>
-              <div style={{ fontSize: 12, color: C.faint, fontWeight: 600, marginBottom: 8 }}>
-                Google AI Studio API Key <span style={{ fontWeight: 400 }}>(needed for daily/weekly report generation, which always uses Gemini — see note above)</span>
-              </div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <input type={showGeminiKey ? 'text' : 'password'} value={geminiKey} onChange={e => setGeminiKey(e.target.value)} placeholder="Paste your AIza… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
-                <button onClick={() => setShowGeminiKey(x => !x)} style={SMALL_BTN}>{showGeminiKey ? '🙈' : '👁'}</button>
-              </div>
-              {!geminiKey.trim() && <div style={{ color: '#fb923c', fontSize: 11, marginTop: 6 }}>⚠ No Gemini key on file — reports will fall back to whatever's selected above, which costs more.</div>}
-            </div>
-          )}
-
-          {aiProvider === 'gemini' && (
-            <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Google AI Studio API Key</div>
-                <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer"
-                  style={{ fontSize: 12, color: '#60a5fa', fontWeight: 600, textDecoration: 'none', padding: '4px 10px', background: '#0f2a4a', border: '1px solid #1e3a5f', borderRadius: 6, whiteSpace: 'nowrap' }}>
-                  🔑 Get API Key ↗
-                </a>
-              </div>
-              <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
-                Tap "Get API Key" → create a key on Google AI Studio → come back and paste it below
-              </div>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-                <input type={showGeminiKey ? 'text' : 'password'} value={geminiKey} onChange={e => setGeminiKey(e.target.value)} placeholder="Paste your AIza… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
-                <button onClick={() => setShowGeminiKey(x => !x)} style={SMALL_BTN}>{showGeminiKey ? '🙈' : '👁'}</button>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Model</div>
-                <button onClick={() => refreshModels('gemini', geminiKey)} disabled={!geminiKey.trim() || liveModelsLoading === 'gemini'}
-                  style={{ ...SMALL_BTN, opacity: (!geminiKey.trim() || liveModelsLoading === 'gemini') ? 0.5 : 1 }}>
-                  {liveModelsLoading === 'gemini' ? 'Checking…' : '🔄 Refresh list'}
-                </button>
-              </div>
-              <select value={geminiModel} onChange={e => setGeminiModel(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
-                {modelOptions(liveModels.gemini?.models || GEMINI_MODELS, geminiModel).map(m =>
-                  <option key={m.id} value={m.id}>{modelLabel(m, liveModels.gemini?.cheapestId)}</option>
-                )}
-              </select>
-              <div style={{ fontSize: 11, color: C.faint, marginTop: 6 }}>
-                {liveModels.gemini ? `Showing ${liveModels.gemini.models.length} models live from your Gemini account.` : 'Showing a default list — press "Refresh list" to pull the current models from your Gemini account.'}
-              </div>
-              {liveModelsErr.gemini && <div style={{ color: '#f87171', fontSize: 11, marginTop: 6 }}>{liveModelsErr.gemini}</div>}
-            </div>
-          )}
-
-          {aiProvider === 'openai' && (
-            <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>OpenAI API Key</div>
-                <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer"
-                  style={{ fontSize: 12, color: '#60a5fa', fontWeight: 600, textDecoration: 'none', padding: '4px 10px', background: '#0f2a4a', border: '1px solid #1e3a5f', borderRadius: 6, whiteSpace: 'nowrap' }}>
-                  🔑 Get API Key ↗
-                </a>
-              </div>
-              <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
-                Tap "Get API Key" → create a key on OpenAI Platform → come back and paste it below
-              </div>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-                <input type={showOpenAIKey ? 'text' : 'password'} value={openaiKey} onChange={e => setOpenaiKey(e.target.value)} placeholder="Paste your sk-… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
-                <button onClick={() => setShowOpenAIKey(x => !x)} style={SMALL_BTN}>{showOpenAIKey ? '🙈' : '👁'}</button>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Model</div>
-                <button onClick={() => refreshModels('openai', openaiKey)} disabled={!openaiKey.trim() || liveModelsLoading === 'openai'}
-                  style={{ ...SMALL_BTN, opacity: (!openaiKey.trim() || liveModelsLoading === 'openai') ? 0.5 : 1 }}>
-                  {liveModelsLoading === 'openai' ? 'Checking…' : '🔄 Refresh list'}
-                </button>
-              </div>
-              <select value={openaiModel} onChange={e => setOpenaiModel(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
-                {modelOptions(liveModels.openai?.models || OPENAI_MODELS, openaiModel).map(m =>
-                  <option key={m.id} value={m.id}>{modelLabel(m, liveModels.openai?.cheapestId)}</option>
-                )}
-              </select>
-              <div style={{ fontSize: 11, color: C.faint, marginTop: 6 }}>
-                {liveModels.openai ? `Showing ${liveModels.openai.models.length} models live from your OpenAI account.` : 'Showing a default list — press "Refresh list" to pull the current models from your OpenAI account.'}
-              </div>
-              {liveModelsErr.openai && <div style={{ color: '#f87171', fontSize: 11, marginTop: 6 }}>{liveModelsErr.openai}</div>}
-            </div>
-          )}
-
-          {aiProvider === 'anthropic' && (
-            <div style={{ padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + C.border, marginTop: 4, marginBottom: 10 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Anthropic API Key</div>
-                <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer"
-                  style={{ fontSize: 12, color: '#60a5fa', fontWeight: 600, textDecoration: 'none', padding: '4px 10px', background: '#0f2a4a', border: '1px solid #1e3a5f', borderRadius: 6, whiteSpace: 'nowrap' }}>
-                  🔑 Get API Key ↗
-                </a>
-              </div>
-              <div style={{ fontSize: 11, color: C.faint, marginBottom: 10, lineHeight: 1.5 }}>
-                Tap "Get API Key" → create a key on the Anthropic Console → come back and paste it below
-              </div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <input type={showAnthropicKey ? 'text' : 'password'} value={anthropicKey} onChange={e => setAnthropicKey(e.target.value)} placeholder="Paste your sk-ant-… key here" className="input-field" style={{ flex: 1, fontSize: 13 }} />
-                <button onClick={() => setShowAnthropicKey(x => !x)} style={SMALL_BTN}>{showAnthropicKey ? '🙈' : '👁'}</button>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, marginBottom: 6 }}>
-                <div style={{ fontSize: 12, color: C.faint, fontWeight: 600 }}>Model</div>
-                <button onClick={() => refreshModels('anthropic', anthropicKey)} disabled={!anthropicKey.trim() || liveModelsLoading === 'anthropic'}
-                  style={{ ...SMALL_BTN, opacity: (!anthropicKey.trim() || liveModelsLoading === 'anthropic') ? 0.5 : 1 }}>
-                  {liveModelsLoading === 'anthropic' ? 'Checking…' : '🔄 Refresh list'}
-                </button>
-              </div>
-              <select value={anthropicModel} onChange={e => setAnthropicModel(e.target.value)} className="input-field" style={{ fontSize: 13 }}>
-                {modelOptions(liveModels.anthropic?.models || ANTHROPIC_MODELS, anthropicModel).map(m =>
-                  <option key={m.id} value={m.id}>{modelLabel(m, liveModels.anthropic?.cheapestId)}</option>
-                )}
-              </select>
-              <div style={{ fontSize: 11, color: C.faint, marginTop: 6 }}>
-                {liveModels.anthropic ? `Showing ${liveModels.anthropic.models.length} models live from your Anthropic account.` : 'Showing a default list — press "Refresh list" to pull the current models from your Anthropic account.'}
-              </div>
-              {liveModelsErr.anthropic && <div style={{ color: '#f87171', fontSize: 11, marginTop: 6 }}>{liveModelsErr.anthropic}</div>}
-            </div>
-          )}
-
-          <button onClick={saveAISettings} style={{ ...BTN('#2563eb'), marginTop: 6 }}>
-            {aiSaveMsg || 'Save AI Settings'}
-          </button>
+          {ProviderRadios({ value: aiProvider, onChange: setAiProvider, name: 'aiprovider' })}
+          {ProviderKeyPanel({ provider: aiProvider })}
         </div>
+
+        <div style={{ marginBottom: 28 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 14, textTransform: 'uppercase', letterSpacing: 0.5 }}>AI Provider for Daily/Weekly Reports</div>
+          <div style={{ fontSize: 12, color: C.faint, marginBottom: 14, lineHeight: 1.6 }}>
+            Used for the recurring work that runs every day across every schedule — topic classification, translation, and summaries. This is a much easier task than source lookup, so a cheaper model here has an outsized effect on your total cost. Defaults to Gemini; change it if you'd rather pay for a different provider's quality here too.
+          </div>
+          {ProviderRadios({ value: reportProvider, onChange: setReportProvider, name: 'reportprovider' })}
+          {ProviderKeyPanel({ provider: reportProvider })}
+        </div>
+
+        <button onClick={saveAISettings} style={{ ...BTN('#2563eb'), marginTop: -14, marginBottom: 28 }}>
+          {aiSaveMsg || 'Save AI Settings'}
+        </button>
 
         {/* Install on phone */}
         <div style={{ marginBottom: 28 }}>

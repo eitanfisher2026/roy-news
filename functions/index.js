@@ -178,20 +178,23 @@ function makeAI(data, forTranslation = false) {
 }
 
 // Daily/weekly scheduled-report generation (classification, translation,
-// summary) is always forced to Gemini here, regardless of what the user
-// picked in Settings — that provider/model choice is now specifically for
-// source-setup tasks (setupCountry/addSources/fixSourceUrl/findSource),
+// summary) reads its own, separate provider setting — `reportProvider` —
+// instead of the main `provider` field, which is now specifically for
+// source-setup tasks (setupCountry/addSources/fixSourceUrl/findSource)
 // where a stronger model's real-world recall of things like RSS URLs
-// matters. Report generation is a much easier task Gemini handles fine,
-// and it runs every day across every schedule, so its provider choice
-// dominates total spend far more than the occasional source-setup call —
-// confirmed 2026-09-08: switching the shared provider setting to Anthropic
-// Sonnet (for RSS-guessing quality) silently made every daily report ~10x
-// more expensive too, since both paths read the same setting. Falls back
-// to whatever's actually configured if no Gemini key is on file, so a user
-// who only ever set up Anthropic doesn't get "no AI provider configured"
-// for a provider they never chose.
+// matters. Report generation is a much easier task a cheap model handles
+// fine, and it runs every day across every schedule, so its provider
+// choice dominates total spend far more than the occasional source-setup
+// call — confirmed 2026-09-08: switching the shared (single) provider
+// setting to Anthropic Sonnet (for RSS-guessing quality) silently made
+// every daily report ~10x more expensive too, since both paths read the
+// same field. Defaults to Gemini. Falls back to Gemini (if a key is on
+// file) or whatever's actually configured if the chosen reportProvider's
+// own key is missing, so a misconfigured choice never hard-fails a report.
 function makeReportAI(data, forTranslation = false) {
+  const reportProvider = data?.reportProvider === 'anthropic' || data?.reportProvider === 'openai' ? data.reportProvider : 'gemini';
+  const keyField = reportProvider === 'anthropic' ? 'anthropicApiKey' : reportProvider === 'openai' ? 'openaiApiKey' : 'geminiApiKey';
+  if (data?.[keyField]) return makeAI({ ...data, provider: reportProvider }, forTranslation);
   if (data?.geminiApiKey) return makeAI({ ...data, provider: 'gemini' }, forTranslation);
   return makeAI(data, forTranslation);
 }
@@ -1594,6 +1597,67 @@ function fixArabicLookalikes(str) {
 // same unbounded-batch problem.
 const TRANSLATE_CHUNK_SIZE = 20;
 
+// One chunk's worth of the translation call, isolated so it can retry and
+// split on failure (see translateChunkResilient below) without duplicating
+// the prompt/parsing logic.
+async function translateChunkOnce(ai, chunk, targetLangName, scriptNote) {
+  const prompt = `Translate each text in this JSON array to ${targetLangName}. Text already in ${targetLangName} should be returned unchanged.${scriptNote}
+Return ONLY a valid JSON array with exactly ${chunk.length} elements in the same order.
+Each element must be a properly JSON-escaped string — escape every double quote, backslash, and newline inside the translated text itself, and never output unescaped control characters. Preserve empty strings as "".
+Do not add markdown, code blocks, or any explanation. Start with [ and end with ].
+
+${JSON.stringify(chunk)}`;
+
+  // Scaled to the chunk's actual content, not just its item count — a
+  // fixed budget sized for short strings silently truncates full article
+  // bodies. ~2 chars/token is a conservative (safe-high) estimate for
+  // non-Latin scripts, which run fewer characters per token than English.
+  const totalChars = chunk.reduce((sum, t) => sum + (typeof t === 'string' ? t.length : 0), 0);
+  const maxTokens = Math.min(Math.max(2000, Math.ceil(totalChars / 2) + chunk.length * 50), 16000);
+
+  const { text, usage } = await callAI(ai, prompt, maxTokens);
+  let translations = extractJson(text, '[');
+  if (!Array.isArray(translations) || translations.length < chunk.length) {
+    throw new Error(`translateBatch: expected at least ${chunk.length} translations, got ${Array.isArray(translations) ? translations.length : typeof translations}`);
+  }
+  // Confirmed 2026-09-01: gemini-3.1-flash-lite sometimes pads the response
+  // with extra trailing empty-string elements past what was asked for — the
+  // real translations are still correct and in order, so this only trims
+  // the harmless padding rather than discarding an otherwise-good batch.
+  if (translations.length > chunk.length) translations = translations.slice(0, chunk.length);
+  return { translations, usage };
+}
+
+// A cheap/fast translation model occasionally emits JSON with an unescaped
+// quote or stray character inside one translated string, breaking the
+// whole array (confirmed in production 2026-09-08: "Expected ',' or ']'
+// after array element" on an otherwise-normal chunk). One retry absorbs a
+// transient glitch; a chunk that still fails is bisected so a single bad
+// element only takes down its own half instead of every article translated
+// alongside it, down to one article at a time in the worst case (where a
+// genuinely untranslatable item surfaces as translationFailed for just
+// that one article, not the whole source).
+async function translateChunkResilient(ai, chunk, targetLangName, scriptNote) {
+  try {
+    return await translateChunkOnce(ai, chunk, targetLangName, scriptNote);
+  } catch (e) {
+    try {
+      return await translateChunkOnce(ai, chunk, targetLangName, scriptNote);
+    } catch (e2) {
+      if (chunk.length <= 1) throw e2;
+      const mid = Math.ceil(chunk.length / 2);
+      const [a, b] = await Promise.all([
+        translateChunkResilient(ai, chunk.slice(0, mid), targetLangName, scriptNote),
+        translateChunkResilient(ai, chunk.slice(mid), targetLangName, scriptNote),
+      ]);
+      return {
+        translations: [...a.translations, ...b.translations],
+        usage: { input_tokens: (a.usage?.input_tokens || 0) + (b.usage?.input_tokens || 0), output_tokens: (a.usage?.output_tokens || 0) + (b.usage?.output_tokens || 0) }
+      };
+    }
+  }
+}
+
 async function translateBatch(ai, batch, targetLangName) {
   const scriptNote = targetLangName === 'Hebrew'
     ? ' Use Hebrew script exclusively — never substitute a similar-looking Arabic letter (e.g. Arabic ا or ي) for a Hebrew one (א, י), even inside a transliterated foreign name like a country.'
@@ -1604,30 +1668,7 @@ async function translateBatch(ai, batch, targetLangName) {
 
   for (let i = 0; i < batch.length; i += TRANSLATE_CHUNK_SIZE) {
     const chunk = batch.slice(i, i + TRANSLATE_CHUNK_SIZE);
-    const prompt = `Translate each text in this JSON array to ${targetLangName}. Text already in ${targetLangName} should be returned unchanged.${scriptNote}
-Return ONLY a valid JSON array with exactly ${chunk.length} elements in the same order.
-Each element must be a properly JSON-escaped string. Preserve empty strings as "".
-Do not add markdown, code blocks, or any explanation. Start with [ and end with ].
-
-${JSON.stringify(chunk)}`;
-
-    // Scaled to the chunk's actual content, not just its item count — a
-    // fixed budget sized for short strings silently truncates full article
-    // bodies. ~2 chars/token is a conservative (safe-high) estimate for
-    // non-Latin scripts, which run fewer characters per token than English.
-    const totalChars = chunk.reduce((sum, t) => sum + (typeof t === 'string' ? t.length : 0), 0);
-    const maxTokens = Math.min(Math.max(2000, Math.ceil(totalChars / 2) + chunk.length * 50), 16000);
-
-    const { text, usage } = await callAI(ai, prompt, maxTokens);
-    let translations = extractJson(text, '[');
-    if (!Array.isArray(translations) || translations.length < chunk.length) {
-      throw new Error(`translateBatch: expected at least ${chunk.length} translations, got ${Array.isArray(translations) ? translations.length : typeof translations}`);
-    }
-    // Confirmed 2026-09-01: gemini-3.1-flash-lite sometimes pads the response
-    // with extra trailing empty-string elements past what was asked for — the
-    // real translations are still correct and in order, so this only trims
-    // the harmless padding rather than discarding an otherwise-good batch.
-    if (translations.length > chunk.length) translations = translations.slice(0, chunk.length);
+    let { translations, usage } = await translateChunkResilient(ai, chunk, targetLangName, scriptNote);
     if (targetLangName === 'Hebrew') translations = translations.map(fixArabicLookalikes);
 
     allTranslations.push(...translations);

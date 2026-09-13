@@ -15,6 +15,10 @@ const db = admin.database();
 
 // ─── Access control ───────────────────────────────────────────────────────────
 const OWNER_EMAIL = 'eitanfisher100@gmail.com';
+// Shown as a small support contact link at the end of every report — a
+// separate address from OWNER_EMAIL (which is what "reply to this email"
+// above it already goes to), for whoever wants a dedicated support inbox.
+const SUPPORT_EMAIL = 'eitanfisher.apps@gmail.com';
 
 function sanitizeEmailKey(email) {
   return email.trim().toLowerCase().replace(/\./g, ',');
@@ -1178,6 +1182,7 @@ function buildRawReportText(schedule, run, sourceWebsites = {}) {
     }
   }
   text += '\nQuestions or feedback on this report? Just reply to this email.\n';
+  text += `Support: ${SUPPORT_EMAIL}\n`;
   return text;
 }
 
@@ -1302,7 +1307,8 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
           ${body}
           ${linksHtml}
           <hr style="border:none;border-top:1px solid #e7e5e0;margin:28px 0 14px;">
-          <p style="font-size:12px;color:#90949c;margin:0;font-family:${sans};">Questions or feedback on this report? Just reply to this email.</p>
+          <p style="font-size:12px;color:#90949c;margin:0 0 4px;font-family:${sans};">Questions or feedback on this report? Just reply to this email.</p>
+          <p style="font-size:10px;color:#b3b6bb;margin:0;font-family:${sans};">Support: <a href="mailto:${SUPPORT_EMAIL}" style="color:#b3b6bb;">${SUPPORT_EMAIL}</a></p>
         </div>
       </div>
     </div>

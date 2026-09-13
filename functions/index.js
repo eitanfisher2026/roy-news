@@ -1113,6 +1113,26 @@ function titleCase(str) {
   return String(str || '').replace(/\b\w/g, c => c.toUpperCase());
 }
 
+// Auto-derived from the schedule's own selected sources — their website
+// (not RSS) URLs, so a reader can go browse an outlet directly. Opt-in per
+// schedule (off by default) and daily-only; sourceWebsites is a
+// {sourceId: {name, websiteUrl}} lookup built once in sendReportEmail from
+// the country's source list, since the run itself doesn't carry websiteUrl.
+function buildSourceLinksList(schedule, sourceWebsites) {
+  return (schedule.sourceIds || [])
+    .map(id => sourceWebsites[id])
+    .filter(s => s && s.websiteUrl)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Manually curated, comma-separated URLs for sites this report can't pull
+// live content from (no RSS feed) but are still worth pointing the reader
+// at — never read by the AI, just displayed as-is. Opt-in per schedule
+// (off by default) and daily-only, same as the source-links section above.
+function parseReferenceLinks(referenceLinks) {
+  return String(referenceLinks || '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
 // Plain-text fallback for clients that don't render HTML. A daily report is
 // one day, so the date only needs to appear once, in the header — Day: lines
 // only earn their place when a report actually spans more than one day.
@@ -1121,7 +1141,7 @@ function titleCase(str) {
 // Weekly shows the summary only, never the underlying day-by-day articles —
 // those still get collected internally (the summary is extracted from them),
 // just never surfaced on their own for a weekly report.
-function buildRawReportText(schedule, run) {
+function buildRawReportText(schedule, run, sourceWebsites = {}) {
   const days = run.runType === 'weekly' ? [] : (run.days || []);
   const isMultiDay = days.length > 1;
   const topics = run.topics || schedule.topics || [];
@@ -1138,6 +1158,22 @@ function buildRawReportText(schedule, run) {
         text += `   ${a.title}\n   ${a.text}\n`;
         if (a.translationFailed) text += `   ⚠ Could not translate this article right now — shown in its original language.\n`;
         if (a.link) text += `   ${a.link}\n`;
+      }
+    }
+  }
+  if (run.runType !== 'weekly') {
+    if (schedule.includeSourceLinks) {
+      const sourceLinks = buildSourceLinksList(schedule, sourceWebsites);
+      if (sourceLinks.length > 0) {
+        text += `\nSource Websites\nThe outlets this report draws from — visit them directly for the full picture beyond what's summarized above.\n`;
+        sourceLinks.forEach(s => { text += `  ${s.name}: ${s.websiteUrl}\n`; });
+      }
+    }
+    if (schedule.includeReferenceLinks) {
+      const refLinks = parseReferenceLinks(schedule.referenceLinks);
+      if (refLinks.length > 0) {
+        text += `\nReference Links\nThese sites don't publish an automatic feed, so this report can't pull live articles from them — listed here for manual reference only.\n`;
+        refLinks.forEach(l => { text += `  ${l}\n`; });
       }
     }
   }
@@ -1176,7 +1212,7 @@ function renderSummaryBlocks(summary, sans, contentDir, contentAlign) {
   }).join('');
 }
 
-function buildReportHtml(schedule, run, rtl = false) {
+function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
   const contentDir = rtl ? ' dir="rtl"' : '';
   const contentAlign = rtl ? 'text-align:right;' : '';
   const isWeekly = run.runType === 'weekly';
@@ -1226,6 +1262,31 @@ function buildReportHtml(schedule, run, rtl = false) {
     });
   });
 
+  // Both blocks are opt-in per schedule (off by default) and daily-only —
+  // a weekly digest is a summary-only artifact already, no per-source
+  // listing to hang a "here are the sites" section off of.
+  let linksHtml = '';
+  if (!isWeekly) {
+    if (schedule.includeSourceLinks) {
+      const sourceLinks = buildSourceLinksList(schedule, sourceWebsites);
+      if (sourceLinks.length > 0) {
+        linksHtml += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:28px 0 14px;">
+          <p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 8px;font-family:${sans};">Source Websites</p>
+          <p style="font-size:12px;color:#90949c;margin:0 0 10px;font-family:${sans};">The outlets this report draws from — visit them directly for the full picture beyond what's summarized above.</p>
+          ${sourceLinks.map(s => `<p style="font-size:13px;margin:0 0 4px;font-family:${sans};"><a href="${escapeHtml(s.websiteUrl)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(s.name)} ↗</a></p>`).join('')}`;
+      }
+    }
+    if (schedule.includeReferenceLinks) {
+      const refLinks = parseReferenceLinks(schedule.referenceLinks);
+      if (refLinks.length > 0) {
+        linksHtml += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:28px 0 14px;">
+          <p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 8px;font-family:${sans};">Reference Links</p>
+          <p style="font-size:12px;color:#90949c;margin:0 0 10px;font-family:${sans};">These sites don't publish an automatic feed, so this report can't pull live articles from them — listed here for manual reference only.</p>
+          ${refLinks.map(l => `<p style="font-size:13px;margin:0 0 4px;font-family:${sans};"><a href="${escapeHtml(l)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(l)} ↗</a></p>`).join('')}`;
+      }
+    }
+  }
+
   return `<!doctype html>
 <html>
   <body style="margin:0;padding:0;background:#eef0f3;">
@@ -1239,6 +1300,7 @@ function buildReportHtml(schedule, run, rtl = false) {
           <hr style="border:none;border-top:1px solid #e7e5e0;margin:0 0 22px;">
           ${summaryHtml}
           ${body}
+          ${linksHtml}
           <hr style="border:none;border-top:1px solid #e7e5e0;margin:28px 0 14px;">
           <p style="font-size:12px;color:#90949c;margin:0;font-family:${sans};">Questions or feedback on this report? Just reply to this email.</p>
         </div>
@@ -1356,6 +1418,17 @@ async function sendReportEmail(schedule, run) {
   // rendered it fine; only that one RTL-paragraph area needed the hint).
   const subject = `‎${formatEmailDateRange(run)} ${titlePart}`;
 
+  // The run itself doesn't carry each source's website URL (only id/name/
+  // lean) — only fetched when actually needed (daily report, section
+  // switched on) to avoid a pointless DB read on every other send.
+  let sourceWebsites = {};
+  if (schedule.includeSourceLinks && run.runType !== 'weekly') {
+    try {
+      const sourcesSnap = await db.ref(`countries/${schedule.countryKey}/setup/sources`).once('value');
+      for (const s of (sourcesSnap.val() || [])) sourceWebsites[s.id] = { name: s.name, websiteUrl: s.websiteUrl };
+    } catch {}
+  }
+
   // Two separate sends (when both language groups exist) rather than one
   // email with mixed content — different recipients need genuinely
   // different bodies. Hebrew is only ever translated once here, reused for
@@ -1367,8 +1440,8 @@ async function sendReportEmail(schedule, run) {
     try {
       await transporter.sendMail({
         from: `PressWatch <${OWNER_EMAIL}>`, to: enRecipients.join(', '), subject,
-        text: buildRawReportText(schedule, run),
-        html: buildReportHtml(schedule, run)
+        text: buildRawReportText(schedule, run, sourceWebsites),
+        html: buildReportHtml(schedule, run, false, sourceWebsites)
       });
     } catch (e) {
       console.error('sendReportEmail (English) failed', e.message);
@@ -1381,8 +1454,8 @@ async function sendReportEmail(schedule, run) {
       const hebrewRun = await translateRunToHebrew(run, translateAi, schedule.createdBy, schedule.createdByEmail);
       await transporter.sendMail({
         from: `PressWatch <${OWNER_EMAIL}>`, to: heRecipients.join(', '), subject,
-        text: buildRawReportText(schedule, hebrewRun),
-        html: buildReportHtml(schedule, hebrewRun, true)
+        text: buildRawReportText(schedule, hebrewRun, sourceWebsites),
+        html: buildReportHtml(schedule, hebrewRun, true, sourceWebsites)
       });
     } catch (e) {
       console.error('sendReportEmail (Hebrew) failed', e.message);
@@ -2729,6 +2802,10 @@ exports.createSchedule = onCall(
     const dailySummaryWords = clampDailySummaryWords(request.data?.dailySummaryWords);
     const searchScope = request.data?.searchScope === 'domestic' ? 'domestic' : 'global';
     const reportTitle = String(request.data?.reportTitle || '').trim().slice(0, 60);
+    // Free-text, comma-separated URLs the report can't pull live content
+    // from (no RSS) but are still worth pointing the reader at — shown as a
+    // static "Reference Links" line in the report, never read by the AI.
+    const referenceLinks = String(request.data?.referenceLinks || '').trim().slice(0, 2000);
 
     const ref = db.ref('schedules').push();
     const schedule = {
@@ -2736,6 +2813,8 @@ exports.createSchedule = onCall(
       weeklyDay, hourUtc: hour, dailyHourUtc: dailyHour, weeklySummaryWords, dailySummaryWords,
       sendDailyEmail: !!sendDailyEmail, sendWeeklyEmail: !!sendWeeklyEmail, emailRecipients,
       sectionedSummary: !!request.data?.sectionedSummary,
+      referenceLinks, includeReferenceLinks: !!request.data?.includeReferenceLinks,
+      includeSourceLinks: !!request.data?.includeSourceLinks,
       enabled: true,
       createdBy: request.auth.uid, createdByEmail: request.auth.token.email || null,
       createdAt: new Date().toISOString(),
@@ -2766,7 +2845,10 @@ exports.updateSchedule = onCall(
     if (updates.reportTitle !== undefined) updates.reportTitle = String(updates.reportTitle || '').trim().slice(0, 60);
     if (updates.searchScope !== undefined) updates.searchScope = updates.searchScope === 'domestic' ? 'domestic' : 'global';
     if (updates.sectionedSummary !== undefined) updates.sectionedSummary = !!updates.sectionedSummary;
-    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope', 'sectionedSummary'];
+    if (updates.referenceLinks !== undefined) updates.referenceLinks = String(updates.referenceLinks || '').trim().slice(0, 2000);
+    if (updates.includeReferenceLinks !== undefined) updates.includeReferenceLinks = !!updates.includeReferenceLinks;
+    if (updates.includeSourceLinks !== undefined) updates.includeSourceLinks = !!updates.includeSourceLinks;
+    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope', 'sectionedSummary', 'referenceLinks', 'includeReferenceLinks', 'includeSourceLinks'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
     if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');

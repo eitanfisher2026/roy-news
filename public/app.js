@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.56';
+const VERSION = 'v3.57';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2910,6 +2910,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [newWeeklySummaryWords, setNewWeeklySummaryWords] = useState(400);
   const [newDailySummaryWords, setNewDailySummaryWords] = useState(200);
   const [newSectionedSummary, setNewSectionedSummary] = useState(false);
+  const [newIncludeSourceLinks, setNewIncludeSourceLinks] = useState(false);
+  const [newIncludeReferenceLinks, setNewIncludeReferenceLinks] = useState(false);
+  const [newReferenceLinks, setNewReferenceLinks] = useState('');
   const [newSendDailyEmail, setNewSendDailyEmail] = useState(false);
   const [newSendWeeklyEmail, setNewSendWeeklyEmail] = useState(false);
   const [newEmailRecipientsEn, setNewEmailRecipientsEn] = useState('');
@@ -3023,6 +3026,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [editWeeklySummaryWords, setEditWeeklySummaryWords] = useState(400);
   const [editDailySummaryWords, setEditDailySummaryWords] = useState(200);
   const [editSectionedSummary, setEditSectionedSummary] = useState(false);
+  const [editIncludeSourceLinks, setEditIncludeSourceLinks] = useState(false);
+  const [editIncludeReferenceLinks, setEditIncludeReferenceLinks] = useState(false);
+  const [editReferenceLinks, setEditReferenceLinks] = useState('');
   const [editSendDailyEmail, setEditSendDailyEmail] = useState(false);
   const [editSendWeeklyEmail, setEditSendWeeklyEmail] = useState(false);
   const [editEmailRecipientsEn, setEditEmailRecipientsEn] = useState('');
@@ -3090,6 +3096,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditWeeklySummaryWords(s.weeklySummaryWords || 400);
     setEditDailySummaryWords(s.dailySummaryWords || 200);
     setEditSectionedSummary(!!s.sectionedSummary);
+    setEditIncludeSourceLinks(!!s.includeSourceLinks);
+    setEditIncludeReferenceLinks(!!s.includeReferenceLinks);
+    setEditReferenceLinks(s.referenceLinks || '');
     setEditSendDailyEmail(!!s.sendDailyEmail);
     setEditSendWeeklyEmail(!!s.sendWeeklyEmail);
     const splitRecipients = splitRecipientsForEdit(s.emailRecipients);
@@ -3122,6 +3131,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: editSearchScope,
       weeklyDay: editWeeklyDay, hourUtc: editHourUtc, dailyHourUtc: editDailyHourUtc, weeklySummaryWords: editWeeklySummaryWords, dailySummaryWords: editDailySummaryWords,
       sectionedSummary: editSectionedSummary,
+      includeSourceLinks: editIncludeSourceLinks, includeReferenceLinks: editIncludeReferenceLinks, referenceLinks: editReferenceLinks,
       sendDailyEmail: editSendDailyEmail, sendWeeklyEmail: editSendWeeklyEmail,
       emailRecipients: [
         ...editEmailRecipientsEn.split(/[,\n]/).map(e => e.trim()).filter(Boolean).map(email => ({ email, hebrew: false })),
@@ -3192,6 +3202,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
         sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: newSearchScope,
         weeklyDay: newWeeklyDay, hourUtc: newHourUtc, dailyHourUtc: newDailyHourUtc, weeklySummaryWords: newWeeklySummaryWords, dailySummaryWords: newDailySummaryWords,
         sectionedSummary: newSectionedSummary,
+        includeSourceLinks: newIncludeSourceLinks, includeReferenceLinks: newIncludeReferenceLinks, referenceLinks: newReferenceLinks,
         sendDailyEmail: newSendDailyEmail, sendWeeklyEmail: newSendWeeklyEmail,
         emailRecipients: [
           ...newEmailRecipientsEn.split(/[,\n]/).map(e => e.trim()).filter(Boolean).map(email => ({ email, hebrew: false })),
@@ -3605,6 +3616,21 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 10 }}>
                     <input type="checkbox" checked={newSectionedSummary} onChange={e => setNewSectionedSummary(e.target.checked)} /> Organize summary by topic (off = one flowing paragraph)
                   </label>
+
+                  <div style={{ marginBottom: 12, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 8 }}>
+                      <input type="checkbox" checked={newIncludeSourceLinks} onChange={e => setNewIncludeSourceLinks(e.target.checked)} /> Include source website links (daily reports only)
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 6 }}>
+                      <input type="checkbox" checked={newIncludeReferenceLinks} onChange={e => setNewIncludeReferenceLinks(e.target.checked)} /> Include reference links (daily reports only)
+                    </label>
+                    <div style={{ fontSize: 10, color: C.faint, marginBottom: 6 }}>
+                      For sites with no RSS feed the report can't pull articles from — shown as plain links only, never read by the AI. Separate with commas.
+                    </div>
+                    <input value={newReferenceLinks} onChange={e => setNewReferenceLinks(e.target.value)}
+                      placeholder="e.g. https://example.com, https://another-site.com"
+                      className="input-field" style={{ fontSize: 12, width: '100%' }} />
+                  </div>
                   <UtcTimeInfo hourUtc={newHourUtc} dailyHourUtc={newDailyHourUtc} open={newTimeInfoOpen} onToggle={() => setNewTimeInfoOpen(o => !o)} />
 
                   <div style={{ marginBottom: 12, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>
@@ -3728,6 +3754,21 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 10 }}>
                 <input type="checkbox" checked={editSectionedSummary} onChange={e => setEditSectionedSummary(e.target.checked)} /> Organize summary by topic (off = one flowing paragraph)
               </label>
+
+              <div style={{ marginBottom: 14, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 8 }}>
+                  <input type="checkbox" checked={editIncludeSourceLinks} onChange={e => setEditIncludeSourceLinks(e.target.checked)} /> Include source website links (daily reports only)
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 6 }}>
+                  <input type="checkbox" checked={editIncludeReferenceLinks} onChange={e => setEditIncludeReferenceLinks(e.target.checked)} /> Include reference links (daily reports only)
+                </label>
+                <div style={{ fontSize: 10, color: C.faint, marginBottom: 6 }}>
+                  For sites with no RSS feed the report can't pull articles from — shown as plain links only, never read by the AI. Separate with commas.
+                </div>
+                <input value={editReferenceLinks} onChange={e => setEditReferenceLinks(e.target.value)}
+                  placeholder="e.g. https://example.com, https://another-site.com"
+                  className="input-field" style={{ fontSize: 12, width: '100%' }} />
+              </div>
               <UtcTimeInfo hourUtc={editHourUtc} dailyHourUtc={editDailyHourUtc} open={editTimeInfoOpen} onToggle={() => setEditTimeInfoOpen(o => !o)} />
 
               <div style={{ marginBottom: 14, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>

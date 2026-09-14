@@ -93,9 +93,20 @@ async function recordCost(request, ai, inputTokens, outputTokens) {
   return costUsd;
 }
 
+// A self-identifying bot UA is exactly the profile Cloudflare's (and
+// similar WAFs') bot-detection rules are built to catch, especially
+// combined with a Google Cloud egress IP — confirmed 2026-09-15: bacc.or.th
+// and rivercitybangkok.com are both Cloudflare-fronted and had never once
+// successfully archived here, despite fetching/parsing fine when tested
+// manually from a normal residential connection. A standard browser UA
+// won't defeat sophisticated bot detection (TLS fingerprinting, behavioral
+// checks), but it clears simple UA-pattern blocking, which is the most
+// common tier.
+const RSS_FETCH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
 const rssParser = new Parser({
   timeout: 12000,
-  headers: { 'User-Agent': 'Mozilla/5.0 (compatible; RoyNewsBot/1.0; +https://roy-news.web.app)' },
+  headers: { 'User-Agent': RSS_FETCH_USER_AGENT },
   customFields: { item: ['description', 'content:encoded'] }
 });
 
@@ -465,7 +476,7 @@ async function fetchRss(url, limit = 25) {
   try {
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; RoyNewsBot/1.0; +https://roy-news.web.app)' }
+      headers: { 'User-Agent': RSS_FETCH_USER_AGENT }
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     xml = await res.text();
@@ -510,7 +521,7 @@ async function probeRssFeed(url) {
   try {
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; RoyNewsBot/1.0; +https://roy-news.web.app)' }
+      headers: { 'User-Agent': RSS_FETCH_USER_AGENT }
     });
     if (!res.ok) return { valid: false };
     const xml = await res.text();

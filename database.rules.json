@@ -33,6 +33,11 @@
       ".read": "auth != null && root.child('authorizedUids').child(auth.uid).exists()",
       ".write": false
     },
+    "reportRuns": {
+      "$scheduleId": {
+        ".indexOn": "generatedAt"
+      }
+    },
     "authorizedUsers": {
       ".read": false,
       ".write": false

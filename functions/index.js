@@ -1183,6 +1183,7 @@ function buildRawReportText(schedule, run, sourceWebsites = {}) {
   }
   text += '\nQuestions or feedback on this report? Just reply to this email.\n';
   text += `Support: ${SUPPORT_EMAIL}\n`;
+  text += `PressWatch © ${new Date().getFullYear()} All rights reserved\n`;
   return text;
 }
 
@@ -1308,7 +1309,8 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
           ${linksHtml}
           <hr style="border:none;border-top:1px solid #e7e5e0;margin:28px 0 14px;">
           <p style="font-size:12px;color:#90949c;margin:0 0 4px;font-family:${sans};">Questions or feedback on this report? Just reply to this email.</p>
-          <p style="font-size:10px;color:#b3b6bb;margin:0;font-family:${sans};">Support: <a href="mailto:${SUPPORT_EMAIL}" style="color:#b3b6bb;">${SUPPORT_EMAIL}</a></p>
+          <p style="font-size:10px;color:#b3b6bb;margin:0 0 4px;font-family:${sans};">Support: <a href="mailto:${SUPPORT_EMAIL}" style="color:#b3b6bb;">${SUPPORT_EMAIL}</a></p>
+          <p style="font-size:10px;color:#b3b6bb;margin:0;text-align:center;font-family:${sans};">PressWatch © ${new Date().getFullYear()} All rights reserved</p>
         </div>
       </div>
     </div>
@@ -3428,20 +3430,28 @@ exports.listReportRuns = onCall(
   { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
   async (request) => {
     await requireAuthorized(request);
-    const { scheduleId } = request.data || {};
+    const { scheduleId, latestOnly } = request.data || {};
     if (!scheduleId) throw new HttpsError('invalid-argument', 'scheduleId required');
     const scheduleSnap = await db.ref(`schedules/${scheduleId}`).once('value');
     const schedule = scheduleSnap.val();
     if (!schedule) throw new HttpsError('not-found', 'Schedule not found');
     requireScheduleAccess(schedule, request.auth.uid, 'read');
+    // The response is metadata-only, but building it still requires each
+    // run's FULL body in memory first (computeRunSourceCount/RelevantTotal
+    // read every article) — a schedule with a long history of full-text
+    // runs made this the same class of memory blowup fixed in listSchedules
+    // on 2026-09-08. latestOnly asks Realtime Database to sort and limit
+    // server-side (orderByChild + limitToLast) instead of pulling every run
+    // into this function just to show the one most recent row — fetches 2
+    // (not 1) so hasMore can say whether there's really more to page in
+    // without a second round-trip.
+    const runsRef = db.ref(`reportRuns/${scheduleId}`);
     const [snap, readSnap] = await Promise.all([
-      db.ref(`reportRuns/${scheduleId}`).once('value'),
+      (latestOnly ? runsRef.orderByChild('generatedAt').limitToLast(2) : runsRef).once('value'),
       db.ref(`users/${request.auth.uid}/readReports/${scheduleId}`).once('value')
     ]);
     const val = snap.val() || {};
     const readMap = readSnap.val() || {};
-    // Metadata only — not the full per-source analysis payload, so browsing
-    // history for a schedule with many runs stays lightweight.
     const runs = Object.entries(val).map(([runId, r]) => {
       return {
         runId, generatedAt: r.generatedAt, periodStart: r.periodStart, periodEnd: r.periodEnd,
@@ -3457,6 +3467,7 @@ exports.listReportRuns = onCall(
       };
     });
     runs.sort((a, b) => (b.generatedAt || '').localeCompare(a.generatedAt || ''));
+    if (latestOnly) return { runs: runs.slice(0, 1), hasMore: runs.length > 1 };
     return { runs };
   }
 );

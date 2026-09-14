@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.57';
+const VERSION = 'v3.58';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2891,7 +2891,6 @@ function ScheduledRunView(props) {
 function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const uid = user?.uid;
   const [confirm, confirmDialog] = useConfirm();
-  const [open, setOpen] = useState(defaultOpen);
   const [schedules, setSchedules] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
@@ -2927,6 +2926,11 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   // (see loadSchedules) — no clicking through each country one at a time.
   const [expandedIds, setExpandedIds] = useState(new Set());
   const [runsByScheduleId, setRunsByScheduleId] = useState({});
+  // Whether there's more history than the single latest run currently
+  // shown for a schedule — drives the "Show more" control; cleared once
+  // the full history has actually been loaded in.
+  const [hasMoreRuns, setHasMoreRuns] = useState({});
+  const [loadingMoreRunsId, setLoadingMoreRunsId] = useState(null);
   const [viewingRun, setViewingRun] = useState(null); // { scheduleId, run }
   const [viewingRunLoadingId, setViewingRunLoadingId] = useState(null); // runId currently being opened
   const [busyId, setBusyId] = useState(null);
@@ -3154,16 +3158,17 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setLoading(true);
     try {
       const resp = await fns.httpsCallable('listSchedules')({});
-      const list = resp.data.schedules || [];
-      setSchedules(list);
-      // Auto-expand every schedule's report history and eager-load it —
-      // "open all countries and expand their report automatically."
-      setExpandedIds(new Set(list.map(s => s.id)));
-      list.forEach(s => {
-        fns.httpsCallable('listReportRuns')({ scheduleId: s.id }).then(r => {
-          setRunsByScheduleId(prev => ({ ...prev, [s.id]: r.data.runs || [] }));
-        }).catch(() => {});
+      // Alphabetical by country, then by report title within a country —
+      // not creation order, so a growing list stays easy to scan.
+      const list = (resp.data.schedules || []).slice().sort((a, b) => {
+        const byCountry = (a.country || '').localeCompare(b.country || '');
+        return byCountry !== 0 ? byCountry : (a.reportTitle || '').localeCompare(b.reportTitle || '');
       });
+      setSchedules(list);
+      // Collapsed by default — report history (and its runs) now loads
+      // lazily per schedule only when its "Report history" row is expanded
+      // (see toggleExpand), instead of eager-loading every schedule's full
+      // run history up front on every page load.
     } catch {}
     setLoading(false);
   }
@@ -3324,12 +3329,26 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       n.has(schedule.id) ? n.delete(schedule.id) : n.add(schedule.id);
       return n;
     });
+    // First time opening — load just the latest report, not the whole
+    // history (see listReportRuns' latestOnly mode). "Show more" below
+    // loads the rest, only if there turns out to be more than this one.
     if (!runsByScheduleId[schedule.id]) {
       try {
-        const resp = await fns.httpsCallable('listReportRuns')({ scheduleId: schedule.id });
+        const resp = await fns.httpsCallable('listReportRuns')({ scheduleId: schedule.id, latestOnly: true });
         setRunsByScheduleId(prev => ({ ...prev, [schedule.id]: resp.data.runs || [] }));
+        setHasMoreRuns(prev => ({ ...prev, [schedule.id]: !!resp.data.hasMore }));
       } catch {}
     }
+  }
+
+  async function loadAllRuns(scheduleId) {
+    setLoadingMoreRunsId(scheduleId);
+    try {
+      const resp = await fns.httpsCallable('listReportRuns')({ scheduleId });
+      setRunsByScheduleId(prev => ({ ...prev, [scheduleId]: resp.data.runs || [] }));
+      setHasMoreRuns(prev => ({ ...prev, [scheduleId]: false }));
+    } catch {}
+    setLoadingMoreRunsId(null);
   }
 
   async function viewRun(scheduleId, runId) {
@@ -3381,22 +3400,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
 
   return (
     <div style={{ marginBottom: 28 }}>
-      <button
-        onClick={() => { setOpen(o => { if (!o) loadSchedules(); return !o; }); }}
-        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: '12px 14px', background: open ? C.card : '#0f1e35', border: '1px solid ' + (open ? C.borderLight : C.border), borderRadius: 9, cursor: 'pointer', color: C.text }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontSize: 16 }}>🗓️</span>
-          <div style={{ textAlign: 'left' }}>
-            <div style={{ fontWeight: 700, fontSize: 13 }}>Scheduled Reports</div>
-            <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>Recurring daily/weekly topic digests, built from a continuously-archived feed</div>
-          </div>
-        </div>
-        <span style={{ color: C.faint, fontSize: 12 }}>{open ? '▲ Hide' : '▼ Show'}</span>
-      </button>
-
-      {open && (
-        <div style={{ marginTop: 12 }}>
+      <div>
           {loading ? (
             <div style={{ display: 'flex', justifyContent: 'center', padding: 20 }}><Spinner /></div>
           ) : (
@@ -3511,6 +3515,12 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                           )}
                         </div>
                       ))}
+                      {hasMoreRuns[s.id] && (
+                        <button onClick={() => loadAllRuns(s.id)} disabled={loadingMoreRunsId === s.id}
+                          style={{ background: 'none', border: 'none', color: '#60a5fa', cursor: 'pointer', fontSize: 11, padding: '4px 0 0', display: 'flex', alignItems: 'center', gap: 5 }}>
+                          {loadingMoreRunsId === s.id ? <><Spinner size={10} />&nbsp;Loading…</> : 'Show more'}
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -3684,8 +3694,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
               )}
             </div>
           )}
-        </div>
-      )}
+      </div>
 
       {editingId && (() => {
         const s = schedules.find(x => x.id === editingId);

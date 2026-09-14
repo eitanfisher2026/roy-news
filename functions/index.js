@@ -1161,7 +1161,7 @@ function buildRawReportText(schedule, run, sourceWebsites = {}) {
   // line to the footer with nothing explaining the gap, which reads as
   // broken rather than "a quiet day" (confirmed in production 2026-09-14 —
   // Culture in Bangkok's report for 12/09 matched nothing and looked empty).
-  else if (days.length === 0) text += `\nNo matching articles were found for this period.\n`;
+  else if (days.length === 0) text += `\nNothing matched your topics today — none of your sources published anything relevant. This is normal on a quiet news day; check back tomorrow.\n`;
   text += '\n';
   for (const d of days) {
     if (isMultiDay) text += `Day: ${formatDayLabel(d.day)}\n`;
@@ -1255,7 +1255,7 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
       // Same reasoning as buildRawReportText's text version — a daily
       // report with nothing summarized and no articles previously just
       // went straight to the footer with no explanation at all.
-      : (days.length === 0 ? `<p style="font-size:14.5px;color:#90949c;font-family:${sans};">No matching articles were found for this period.</p>` : ''));
+      : (days.length === 0 ? `<p style="font-size:14.5px;color:#90949c;font-family:${sans};">Nothing matched your topics today — none of your sources published anything relevant. This is normal on a quiet news day; check back tomorrow.</p>` : ''));
 
   let body = '';
   days.forEach((d, di) => {
@@ -2138,7 +2138,16 @@ function articleKey(article) {
 
 async function archiveSourceArticles(countryKey, sourceId, rssUrl) {
   let articles;
-  try { articles = await fetchRssWithRetry(rssUrl, 30); } catch { return; }
+  try { articles = await fetchRssWithRetry(rssUrl, 30); } catch (e) {
+    // Previously swallowed with zero trace — a source that started failing
+    // (or, per bacc/river-city-bangkok on 2026-09-15, never once succeeded)
+    // left no signal anywhere that a poll was even attempted, only ever
+    // showing up as "missing from articleArchiveMeta," indistinguishable
+    // from "never configured." Logged now so a real failure is diagnosable
+    // without re-deriving it from scratch each time.
+    console.error(`archiveSourceArticles: fetch/parse failed for ${countryKey}/${sourceId} (${rssUrl}):`, e.message);
+    return;
+  }
 
   // Lightweight per-source poll record (timestamp + count only, not article
   // content) — lets the UI show "last refreshed" / item count as a feed

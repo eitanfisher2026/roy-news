@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.59';
+const VERSION = 'v3.60';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2624,7 +2624,7 @@ function buildRawShareText(country, dateLabel, run) {
 // The new per-day, no-AI-summary report — raw RSS text (translated where
 // needed), grouped by day → topic → source, matching daily's and weekly's
 // shared structure.
-function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClose, user, scheduleId, runId, onSummaryGenerated }) {
+function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, dateLabel, run, onDelete, onClose, user, scheduleId, runId, onSummaryGenerated }) {
   const [isHebrew, setIsHebrew] = useState(false);
   const [hebrewRun, setHebrewRun] = useState(null);
   const [translating, setTranslating] = useState(false);
@@ -2758,7 +2758,7 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
       )}
 
       {displayDays.length === 0 ? (
-        !displayRun.summary && <div style={{ color: C.faint, fontSize: 13, padding: '10px 0' }}>No matches found for this period.</div>
+        !displayRun.summary && <div style={{ color: C.faint, fontSize: 13, padding: '10px 0' }}>Nothing matched your topics today — none of your sources published anything relevant. This is normal on a quiet news day; check back tomorrow.</div>
       ) : displayDays.map((d, di) => (
         <div key={di} style={{ marginBottom: 20 }}>
           {isMultiDay && (
@@ -2786,6 +2786,39 @@ function RawScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onClos
           ))}
         </div>
       ))}
+
+      {/* Opt-in per schedule (off by default) and daily-only — mirrors the
+          same two sections added to the emailed report. */}
+      {(run.runType || 'daily') !== 'weekly' && schedule?.includeSourceLinks && (() => {
+        const sourceLinks = (schedule.sourceIds || []).map(id => sourceWebsites[id]).filter(s => s?.websiteUrl).sort((a, b) => a.name.localeCompare(b.name));
+        if (sourceLinks.length === 0) return null;
+        return (
+          <div className="no-print" style={{ marginTop: 20, paddingTop: 14, borderTop: '1px solid ' + C.border }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#60a5fa', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>Source Websites</div>
+            <div style={{ fontSize: 11, color: C.faint, marginBottom: 8 }}>The outlets this report draws from — visit them directly for the full picture beyond what's summarized above.</div>
+            {sourceLinks.map(s => (
+              <div key={s.websiteUrl} style={{ marginBottom: 3 }}>
+                <a href={s.websiteUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#60a5fa', fontSize: 12, textDecoration: 'none' }}>{s.name} ↗</a>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+      {(run.runType || 'daily') !== 'weekly' && schedule?.includeReferenceLinks && (() => {
+        const refLinks = (schedule.referenceLinks || '').split(',').map(s => s.trim()).filter(Boolean);
+        if (refLinks.length === 0) return null;
+        return (
+          <div className="no-print" style={{ marginTop: 20, paddingTop: 14, borderTop: '1px solid ' + C.border }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#60a5fa', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>Reference Links</div>
+            <div style={{ fontSize: 11, color: C.faint, marginBottom: 8 }}>These sites don't publish an automatic feed, so this report can't pull live articles from them — listed here for manual reference only.</div>
+            {refLinks.map(l => (
+              <div key={l} style={{ marginBottom: 3 }}>
+                <a href={l} target="_blank" rel="noopener noreferrer" style={{ color: '#60a5fa', fontSize: 12, textDecoration: 'none' }}>{l} ↗</a>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -3981,6 +4014,8 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
           <ScheduledRunView
             key={viewingRun.runId}
             scheduleCountry={schedules.find(s => s.id === viewingRun.scheduleId)?.country || ''}
+            schedule={schedules.find(s => s.id === viewingRun.scheduleId) || null}
+            sourceWebsites={Object.fromEntries(sourcesForCountry(schedules.find(s => s.id === viewingRun.scheduleId)?.countryKey).map(s => [s.id, { name: s.name, websiteUrl: s.websiteUrl }]))}
             dateLabel={viewingRun.run.dateLabel}
             run={viewingRun.run}
             user={user}

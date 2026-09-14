@@ -1152,7 +1152,11 @@ function buildRawReportText(schedule, run, sourceWebsites = {}) {
   let text = `${titleCase(schedule.country)}\n`;
   if (topics.length > 0) text += `Topics: ${topics.join(', ')}\n`;
   if (run.summary) text += `\nSummary\n${run.summary.replace(/\*\*(.+?)\*\*/g, '$1')}\n`;
-  else if (run.runType === 'weekly') text += `\nNo coverage this period.\n`;
+  // Weekly already showed this; daily just went straight from the topics
+  // line to the footer with nothing explaining the gap, which reads as
+  // broken rather than "a quiet day" (confirmed in production 2026-09-14 —
+  // Culture in Bangkok's report for 12/09 matched nothing and looked empty).
+  else if (days.length === 0) text += `\nNo matching articles were found for this period.\n`;
   text += '\n';
   for (const d of days) {
     if (isMultiDay) text += `Day: ${formatDayLabel(d.day)}\n`;
@@ -1241,7 +1245,12 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
           <p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 10px;font-family:${sans};">Summary</p>
           <div style="margin:0 0 ${days.length > 0 ? '8px' : '0'};">${renderSummaryBlocks(run.summary, sans, contentDir, contentAlign)}</div>
           ${days.length > 0 ? '<hr style="border:none;border-top:1px solid #e7e5e0;margin:0 0 22px;">' : ''}`
-    : (isWeekly ? `<p style="font-size:14.5px;color:#90949c;font-family:${sans};">No coverage this period.</p>` : '');
+    : (isWeekly
+      ? `<p style="font-size:14.5px;color:#90949c;font-family:${sans};">No coverage this period.</p>`
+      // Same reasoning as buildRawReportText's text version — a daily
+      // report with nothing summarized and no articles previously just
+      // went straight to the footer with no explanation at all.
+      : (days.length === 0 ? `<p style="font-size:14.5px;color:#90949c;font-family:${sans};">No matching articles were found for this period.</p>` : ''));
 
   let body = '';
   days.forEach((d, di) => {

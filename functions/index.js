@@ -87,8 +87,8 @@ async function persistCost(uid, email, ai, costUsd) {
   ]).catch(() => {}); // never fail the caller over a cost-logging hiccup
 }
 
-async function recordCost(request, ai, inputTokens, outputTokens, isTranslation = false) {
-  const costUsd = calcCostUsd(ai, inputTokens, outputTokens, isTranslation);
+async function recordCost(request, ai, inputTokens, outputTokens) {
+  const costUsd = calcCostUsd(ai, inputTokens, outputTokens);
   if (request.auth) await persistCost(request.auth.uid, request.auth.token.email, ai, costUsd);
   return costUsd;
 }
@@ -259,19 +259,24 @@ async function callAI(ai, prompt, maxTokens) {
   }
 }
 
-function calcCostUsd(ai, inputTokens, outputTokens, isTranslation = false) {
+// Always prices whatever model `ai.model` actually is — never override it
+// here. An `isTranslation` flag used to force a hardcoded "cheap" model
+// for pricing purposes, but that duplicated (and disagreed with) makeAI's
+// own forTranslation flag, which already picks the real cheap model the
+// call actually used (e.g. Gemini: gemini-3.1-flash-lite) — the override
+// here hardcoded a DIFFERENT model (gemini-2.5-flash) for pricing, so
+// translateResults was silently billed and displayed at the wrong price.
+// Confirmed 2026-09-15 during a full cost-calculation audit.
+function calcCostUsd(ai, inputTokens, outputTokens) {
   if (ai.type === 'gemini') {
-    const model = isTranslation ? 'gemini-2.5-flash' : ai.model;
-    const p = PRICING.gemini[model] || PRICING.gemini['gemini-2.5-flash'];
+    const p = PRICING.gemini[ai.model] || PRICING.gemini['gemini-2.5-flash'];
     return (inputTokens * p.in + outputTokens * p.out) / 1_000_000;
   }
   if (ai.type === 'openai') {
-    const model = isTranslation ? 'gpt-4o-mini' : ai.model;
-    const p = PRICING.openai[model] || PRICING.openai['gpt-4o-mini'];
+    const p = PRICING.openai[ai.model] || PRICING.openai['gpt-4o-mini'];
     return (inputTokens * p.in + outputTokens * p.out) / 1_000_000;
   }
-  const model = isTranslation ? 'claude-haiku-4-5-20251001' : ai.model;
-  const p = PRICING.anthropic[model] || PRICING.anthropic['claude-sonnet-4-6'];
+  const p = PRICING.anthropic[ai.model] || PRICING.anthropic['claude-sonnet-4-6'];
   return (inputTokens * p.in + outputTokens * p.out) / 1_000_000;
 }
 
@@ -1830,7 +1835,7 @@ exports.translateResults = onCall(
       throw new HttpsError('internal', `Translation failed: ${e.message}`);
     }
 
-    const costUsd = await recordCost(request, ai, usage.input_tokens || 0, usage.output_tokens || 0, true);
+    const costUsd = await recordCost(request, ai, usage.input_tokens || 0, usage.output_tokens || 0);
     return { translations, usage: { inputTokens: usage.input_tokens || 0, outputTokens: usage.output_tokens || 0, costUsd, provider: ai.type, model: ai.model } };
   }
 );

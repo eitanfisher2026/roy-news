@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.58';
+const VERSION = 'v3.59';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2885,7 +2885,20 @@ function LegacyScheduledRunView({ scheduleCountry, dateLabel, run, onDelete, onC
 }
 
 function ScheduledRunView(props) {
-  return Array.isArray(props.run.days) ? <RawScheduledRunView {...props} /> : <LegacyScheduledRunView {...props} />;
+  // Checking for `days` (raw-pipeline shape) rather than `results` (legacy
+  // shape) broke for a genuinely empty raw report: generateDailyReportRun
+  // always sets days to an array, but an EMPTY array written to Realtime
+  // Database is dropped entirely rather than stored — so run.days comes
+  // back undefined, Array.isArray(undefined) is false, and the report
+  // silently rendered through LegacyScheduledRunView instead (which has no
+  // "nothing matched" message at all, since it expects `results`, not
+  // `days") — confirmed 2026-09-15 against a real empty Culture in Bangkok
+  // report that looked blank in the app despite the "No matching articles"
+  // fallback already being added to RawScheduledRunView. `results` only
+  // ever exists on the old (pre-raw-pipeline) shape, so checking for ITS
+  // presence — rather than days' — correctly defaults an empty raw report
+  // to the view that actually explains why it's empty.
+  return props.run.results ? <LegacyScheduledRunView {...props} /> : <RawScheduledRunView {...props} />;
 }
 
 function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {

@@ -1180,6 +1180,12 @@ function refEventVenue(e, hebrew) {
   const same = String(e.venue || '').trim().toLowerCase() === String(e.site || '').trim().toLowerCase();
   return same ? '' : refEventField(e, 'venue', hebrew);
 }
+// The site name is only worth linking when it leads somewhere other than
+// the event title's own link.
+function sameRefUrl(a, b) {
+  const norm = u => String(u || '').trim().toLowerCase().replace(/^https?:\/\/(www\.)?/, '').replace(/[\/#?]+$/, '');
+  return norm(a) === norm(b);
+}
 function refEventMeta(e, hebrew) {
   return [refEventField(e, 'dates', hebrew), refEventVenue(e, hebrew), e.site ? `via ${e.site}` : ''].filter(Boolean).join(' · ');
 }
@@ -1410,7 +1416,7 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
       if (!g.newsOnly) {
         body += `<p style="${partLabel}${g.articles.length > 0 ? 'margin-top:18px;' : ''}">${escapeHtml(refEventsLabel(combined))}</p>`;
         g.events.forEach(e => {
-          const siteUrl = combined.siteUrls[e.site];
+          const siteUrl = sameRefUrl(combined.siteUrls[e.site], e.url) ? null : combined.siteUrls[e.site];
           const metaParts = [refEventField(e, 'dates', rtl), refEventVenue(e, rtl)].filter(Boolean).map(escapeHtml);
           if (e.site) metaParts.push(siteUrl ? `via <a href="${escapeHtml(siteUrl)}" style="${linkStyle}">${escapeHtml(e.site)}</a>` : `via ${escapeHtml(e.site)}`);
           body += `<p${contentDir} style="font-size:13.5px;line-height:1.45;margin:0 0 9px;font-family:${sans};${contentAlign}"><a href="${escapeHtml(e.url)}" style="${linkStyle}font-weight:600;">${escapeHtml(refEventField(e, 'title', rtl))}</a>${metaParts.length ? `<br><span style="font-size:12.5px;color:#6b7078;">${metaParts.join(' · ')}</span>` : ''}</p>`;

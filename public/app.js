@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.65';
+const VERSION = 'v3.66';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2779,6 +2779,7 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
         const linkStyle = { color: '#60a5fa', fontSize: 12, textDecoration: 'underline' };
         const siteUrls = {};
         schedule.referenceGroups.forEach(g => (g.links || []).forEach(l => { siteUrls[l.name] = l.url; }));
+        const normUrl = u => String(u || '').trim().toLowerCase().replace(/^https?:\/\/(www\.)?/, '').replace(/[\/#?]+$/, '');
         const partLabel = { fontSize: 10, fontWeight: 700, color: C.faint, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 6 };
         const eventsLabel = 'Coming up · updated weekly' + (highlights.refreshedAt ? ` (last updated ${new Date(highlights.refreshedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })})` : '');
         return (
@@ -2817,7 +2818,7 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
                         <a href={e.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontWeight: 600 }}>{e.title}</a>
                         <div style={{ fontSize: 11, color: '#cbd5e1' }}>
                           {[e.dates, (e.venue || '').trim().toLowerCase() === (e.site || '').trim().toLowerCase() ? '' : e.venue].filter(Boolean).join(' · ')}
-                          {e.site && <span>{(e.dates || e.venue) ? ' · ' : ''}via {siteUrls[e.site]
+                          {e.site && <span>{(e.dates || e.venue) ? ' · ' : ''}via {siteUrls[e.site] && normUrl(siteUrls[e.site]) !== normUrl(e.url)
                             ? <a href={siteUrls[e.site]} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontSize: 11 }}>{e.site}</a>
                             : e.site}</span>}
                         </div>

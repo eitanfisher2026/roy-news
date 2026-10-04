@@ -4,7 +4,8 @@
 
 const FETCH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const MAX_PAGE_CHARS = 40000;
-const MAX_EVENTS_PER_GROUP = 10;
+const MAX_EVENTS_PER_SITE = 10;
+const MAX_EVENTS_PER_GROUP = 15;
 // Below this a page is a script-rendered shell or a bot-challenge page, not content.
 const MIN_READABLE_CHARS = 400;
 
@@ -78,7 +79,7 @@ Rules:
 - "startDate": YYYY-MM-DD of the first day if known, otherwise empty string.
 - "venue": the venue name in English, or empty string if not stated.
 - "url": the event's own link exactly as it appears in the brackets, or empty string if it has none.
-- At most ${MAX_EVENTS_PER_GROUP} events. If more qualify, prefer the ones starting soonest from today, then the ones that opened most recently.
+- At most ${MAX_EVENTS_PER_SITE} events. If more qualify, prefer the ones starting soonest from today, then the ones that opened most recently.
 
 Reply with ONLY a JSON array, no other text. Reply [] if nothing qualifies.
 
@@ -132,7 +133,23 @@ function mergeGroupEvents(events, todayIso, seen = new Set()) {
     if (ra === 1) return b.startDate.localeCompare(a.startDate);
     return 0;
   });
-  return unique.slice(0, MAX_EVENTS_PER_GROUP);
+  if (unique.length <= MAX_EVENTS_PER_GROUP) return unique;
+  // Over the limit: take turns between sites so one large listing site
+  // can't crowd out the venues' own pages, then keep the date order.
+  const bySite = new Map();
+  for (const e of unique) {
+    if (!bySite.has(e.site)) bySite.set(e.site, []);
+    bySite.get(e.site).push(e);
+  }
+  const picked = new Set();
+  while (picked.size < MAX_EVENTS_PER_GROUP) {
+    let added = false;
+    for (const queue of bySite.values()) {
+      if (queue.length > 0 && picked.size < MAX_EVENTS_PER_GROUP) { picked.add(queue.shift()); added = true; }
+    }
+    if (!added) break;
+  }
+  return unique.filter(e => picked.has(e));
 }
 
 module.exports = { extractSiteEvents, mergeGroupEvents, fetchPageText, htmlToText, parseEvents, buildPrompt, MAX_EVENTS_PER_GROUP };

@@ -7,6 +7,7 @@ const OpenAI = require('openai');
 const Parser = require('rss-parser');
 const nodemailer = require('nodemailer');
 const { defineSecret } = require('firebase-functions/params');
+const { extractSiteEvents, mergeGroupEvents } = require('./referenceHighlights');
 
 const gmailAppPassword = defineSecret('GMAIL_APP_PASSWORD');
 
@@ -1153,6 +1154,51 @@ function parseReferenceLinks(referenceLinks) {
   return String(referenceLinks || '').split(',').map(s => s.trim()).filter(Boolean);
 }
 
+// Grouped variant of the reference-links section, set up per schedule
+// directly in the database (no editing UI): `referenceGroups` is
+// [{title, links: [{name, url, eventsUrl?}]}], `referenceUnreadable` is
+// [{name, url}] for sites that can't be read automatically, and
+// `referenceHighlights` is the weekly output of refreshReferenceHighlights.
+// A schedule without referenceGroups keeps the plain flat list.
+const REF_HIGHLIGHTS_INTRO = "Upcoming exhibitions and events, gathered once a week from sites that don't publish an automatic feed. Follow a link for full details.";
+const REF_UNREADABLE_TITLE = 'More places to check — no automatic highlights';
+const REF_UNREADABLE_INTRO = "These sites can't be read automatically, so nothing from them is highlighted above. Visit them directly to see what's on.";
+function buildReferenceSections(schedule) {
+  if (!Array.isArray(schedule.referenceGroups) || schedule.referenceGroups.length === 0) return null;
+  const highlights = schedule.referenceHighlights || {};
+  const eventsByTitle = {};
+  for (const g of (highlights.groups || [])) eventsByTitle[g.title] = g.events || [];
+  return {
+    refreshedAt: highlights.refreshedAt || null,
+    groups: schedule.referenceGroups.map(g => ({ title: g.title, links: g.links || [], events: eventsByTitle[g.title] || [] })),
+    unreadable: schedule.referenceUnreadable || []
+  };
+}
+function refEventField(e, field, hebrew) {
+  return (hebrew && e.he && e.he[field]) || e[field] || '';
+}
+function refEventMeta(e, hebrew) {
+  return [refEventField(e, 'dates', hebrew), refEventField(e, 'venue', hebrew)].filter(Boolean).join(' · ');
+}
+function buildReferenceSectionsText(sections, hebrew) {
+  let text = `\nWhat's On — Coming Up\n${REF_HIGHLIGHTS_INTRO}\n`;
+  if (sections.refreshedAt) text += `Last updated ${formatLongDateLabel(sections.refreshedAt.slice(0, 10))}.\n`;
+  for (const g of sections.groups) {
+    text += `\n  ${g.title}\n`;
+    for (const e of g.events) {
+      const meta = refEventMeta(e, hebrew);
+      text += `   - ${refEventField(e, 'title', hebrew)}${meta ? ` (${meta})` : ''}\n     ${e.url}\n`;
+    }
+    if (g.events.length === 0) text += `   Nothing new listed this week.\n`;
+    g.links.forEach(l => { text += `   ${l.name}: ${l.url}\n`; });
+  }
+  if (sections.unreadable.length > 0) {
+    text += `\n${REF_UNREADABLE_TITLE}\n${REF_UNREADABLE_INTRO}\n`;
+    sections.unreadable.forEach(l => { text += `  ${l.name}: ${l.url}\n`; });
+  }
+  return text;
+}
+
 // Plain-text fallback for clients that don't render HTML. A daily report is
 // one day, so the date only needs to appear once, in the header — Day: lines
 // only earn their place when a report actually spans more than one day.
@@ -1161,7 +1207,7 @@ function parseReferenceLinks(referenceLinks) {
 // Weekly shows the summary only, never the underlying day-by-day articles —
 // those still get collected internally (the summary is extracted from them),
 // just never surfaced on their own for a weekly report.
-function buildRawReportText(schedule, run, sourceWebsites = {}) {
+function buildRawReportText(schedule, run, sourceWebsites = {}, hebrew = false) {
   const days = run.runType === 'weekly' ? [] : (run.days || []);
   const isMultiDay = days.length > 1;
   const topics = run.topics || schedule.topics || [];
@@ -1193,7 +1239,10 @@ function buildRawReportText(schedule, run, sourceWebsites = {}) {
         sourceLinks.forEach(s => { text += `  ${s.name}: ${s.websiteUrl}\n`; });
       }
     }
-    if (schedule.includeReferenceLinks) {
+    const refSections = schedule.includeReferenceLinks ? buildReferenceSections(schedule) : null;
+    if (refSections) {
+      text += buildReferenceSectionsText(refSections, hebrew);
+    } else if (schedule.includeReferenceLinks) {
       const refLinks = parseReferenceLinks(schedule.referenceLinks);
       if (refLinks.length > 0) {
         text += `\nReference Links\nThese sites don't publish an automatic feed, so this report can't pull live articles from them — listed here for manual reference only.\n`;
@@ -1307,7 +1356,31 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
           ${sourceLinks.map(s => `<p style="font-size:13px;margin:0 0 4px;font-family:${sans};"><a href="${escapeHtml(s.websiteUrl)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(s.name)} ↗</a></p>`).join('')}`;
       }
     }
-    if (schedule.includeReferenceLinks) {
+    const refSections = schedule.includeReferenceLinks ? buildReferenceSections(schedule) : null;
+    if (refSections) {
+      const label = `font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;font-family:${sans};`;
+      const note = `font-size:12px;color:#90949c;font-family:${sans};`;
+      const linkRow = links => links.map(l => `<a href="${escapeHtml(l.url)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(l.name)} ↗</a>`).join(' &nbsp;·&nbsp; ');
+      linksHtml += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:28px 0 14px;">
+          <p style="${label}margin:0 0 8px;">What's On — Coming Up</p>
+          <p style="${note}margin:0 0 4px;">${escapeHtml(REF_HIGHLIGHTS_INTRO)}</p>
+          ${refSections.refreshedAt ? `<p style="${note}margin:0 0 6px;">Last updated ${escapeHtml(formatLongDateLabel(refSections.refreshedAt.slice(0, 10)))}.</p>` : ''}`;
+      for (const g of refSections.groups) {
+        linksHtml += `<p style="font-size:13.5px;font-weight:700;color:#1c1e21;margin:18px 0 8px;font-family:${sans};">${escapeHtml(g.title)}</p>`;
+        for (const e of g.events) {
+          const meta = refEventMeta(e, rtl);
+          linksHtml += `<p${contentDir} style="font-size:13.5px;line-height:1.45;margin:0 0 7px;font-family:${sans};${contentAlign}"><a href="${escapeHtml(e.url)}" style="color:#3e5c76;text-decoration:none;font-weight:600;">${escapeHtml(refEventField(e, 'title', rtl))} ↗</a>${meta ? `<br><span style="font-size:12.5px;color:#6b7078;">${escapeHtml(meta)}</span>` : ''}</p>`;
+        }
+        if (g.events.length === 0) linksHtml += `<p style="${note}margin:0 0 6px;">Nothing new listed this week.</p>`;
+        if (g.links.length > 0) linksHtml += `<p style="font-size:12px;color:#90949c;margin:8px 0 0;font-family:${sans};">More at: ${linkRow(g.links)}</p>`;
+      }
+      if (refSections.unreadable.length > 0) {
+        linksHtml += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:24px 0 14px;">
+          <p style="${label}margin:0 0 8px;">${escapeHtml(REF_UNREADABLE_TITLE)}</p>
+          <p style="${note}margin:0 0 10px;">${escapeHtml(REF_UNREADABLE_INTRO)}</p>
+          <p style="font-size:13px;margin:0;font-family:${sans};">${linkRow(refSections.unreadable)}</p>`;
+      }
+    } else if (schedule.includeReferenceLinks) {
       const refLinks = parseReferenceLinks(schedule.referenceLinks);
       if (refLinks.length > 0) {
         linksHtml += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:28px 0 14px;">
@@ -1487,7 +1560,7 @@ async function sendReportEmail(schedule, run) {
       const hebrewRun = await translateRunToHebrew(run, translateAi, schedule.createdBy, schedule.createdByEmail);
       await transporter.sendMail({
         from: `PressWatch <${OWNER_EMAIL}>`, to: heRecipients.join(', '), subject,
-        text: buildRawReportText(schedule, hebrewRun, sourceWebsites),
+        text: buildRawReportText(schedule, hebrewRun, sourceWebsites, true),
         html: buildReportHtml(schedule, hebrewRun, true, sourceWebsites)
       });
     } catch (e) {
@@ -2598,6 +2671,74 @@ async function aggregateWeeklyFromDailyRuns(scheduleId, schedule, weeklyPeriodEn
   };
 }
 
+// Refresh follows the schedule's weekly-report day when it has one;
+// otherwise every 7 days. Checked only at the schedule's daily hour, right
+// before that day's report, so the report carries the fresh highlights.
+function referenceHighlightsDue(schedule, now) {
+  if (!schedule.includeReferenceLinks || !Array.isArray(schedule.referenceGroups) || schedule.referenceGroups.length === 0) return false;
+  const last = schedule.referenceHighlights?.refreshedAt;
+  if (!last) return true;
+  if (last.slice(0, 10) === now.toISOString().slice(0, 10)) return false;
+  if (schedule.weeklyDay) return WEEKDAYS[now.getUTCDay()] === schedule.weeklyDay;
+  return now.getTime() - new Date(last).getTime() >= 6.5 * 24 * 60 * 60 * 1000;
+}
+
+// One page read + one cheap AI call per site that has an eventsUrl, once a
+// week per schedule — never per report. Sites run in parallel so this adds
+// seconds, not minutes, to the hourly tick. Returns null (keeping last
+// week's highlights) when nothing at all could be gathered because of errors.
+async function refreshReferenceHighlights(schedule, now) {
+  const aiSettings = (await db.ref(`users/${schedule.createdBy}/ai`).once('value')).val() || {};
+  const ai = makeReportAI(aiSettings);
+  const todayIso = now.toISOString().slice(0, 10);
+  const interest = (schedule.topics || []).join(', ') || 'cultural';
+  let inputTokens = 0, outputTokens = 0, failures = 0;
+
+  const gathered = await Promise.all(schedule.referenceGroups.map(async (g) => {
+    const perSite = await Promise.all((g.links || []).filter(l => l.eventsUrl).map(async (l) => {
+      try {
+        const r = await extractSiteEvents(callAI, ai, l, todayIso, interest);
+        inputTokens += r.usage?.input_tokens || 0;
+        outputTokens += r.usage?.output_tokens || 0;
+        if (!r.readable) { failures++; console.error(`refreshReferenceHighlights: could not read ${l.eventsUrl}: ${r.reason}`); }
+        return r.events;
+      } catch (e) {
+        failures++;
+        console.error(`refreshReferenceHighlights: ${l.eventsUrl} failed:`, e.message);
+        return [];
+      }
+    }));
+    return { title: g.title, events: perSite.flat() };
+  }));
+  const seenTitles = new Set();
+  const groups = gathered.map(g => ({ title: g.title, events: mergeGroupEvents(g.events, todayIso, seenTitles) }));
+  await persistCost(schedule.createdBy, schedule.createdByEmail, ai, calcCostUsd(ai, inputTokens, outputTokens));
+
+  const allEvents = groups.flatMap(g => g.events);
+  if (allEvents.length === 0 && failures > 0) return null;
+
+  // Hebrew copy of the event text, translated once here and reused by every
+  // Hebrew email that week. A failed translation just leaves English.
+  const fields = ['title', 'dates', 'venue'];
+  const batch = [];
+  for (const e of allEvents) for (const f of fields) if (e[f]) batch.push(e[f]);
+  if (batch.length > 0) {
+    try {
+      const translateAi = makeReportAI(aiSettings, true);
+      const { translations, usage } = await translateBatch(translateAi, batch, 'Hebrew');
+      await persistCost(schedule.createdBy, schedule.createdByEmail, translateAi, calcCostUsd(translateAi, usage?.input_tokens || 0, usage?.output_tokens || 0));
+      let cursor = 0;
+      for (const e of allEvents) {
+        e.he = {};
+        for (const f of fields) if (e[f]) e.he[f] = translations[cursor++] || e[f];
+      }
+    } catch (e) {
+      console.error('refreshReferenceHighlights: Hebrew translation failed', e.message);
+    }
+  }
+  return { refreshedAt: now.toISOString(), groups };
+}
+
 exports.generateScheduledReports = onSchedule(
   { schedule: 'every 60 minutes', region: 'us-central1', memory: '512MiB', timeoutSeconds: 540, timeZone: 'Etc/UTC', secrets: [gmailAppPassword] },
   async () => {
@@ -2669,6 +2810,27 @@ exports.generateScheduledReports = onSchedule(
       // on. This is the base layer: it's what lets a broken feed show up
       // in-app within a day instead of staying silent for a week. Runs at
       // its own hour (dailyHourUtc), independent from weekly's (hourUtc). ──
+      if (now.getUTCHours() === dailyHour && referenceHighlightsDue(schedule, now)) {
+        try {
+          const claimDay = now.toISOString().slice(0, 10);
+          let claimed = false;
+          await db.ref(`schedules/${scheduleId}/referenceHighlightsClaim`).transaction(current => {
+            if (current === claimDay) return;
+            claimed = true;
+            return claimDay;
+          });
+          if (claimed) {
+            const highlights = await refreshReferenceHighlights(schedule, now);
+            if (highlights) {
+              await db.ref(`schedules/${scheduleId}/referenceHighlights`).set(highlights);
+              schedule.referenceHighlights = highlights;
+            }
+          }
+        } catch (e) {
+          console.error('refreshReferenceHighlights failed', e.message);
+        }
+      }
+
       if (now.getUTCHours() === dailyHour) {
         // Already produced today's daily report — guards against a double-fire
         // within the same due hour, not a real recurrence.

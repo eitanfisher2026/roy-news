@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.60';
+const VERSION = 'v3.61';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2804,8 +2804,53 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
           </div>
         );
       })()}
-      {(run.runType || 'daily') !== 'weekly' && schedule?.includeReferenceLinks && (() => {
-        const refLinks = (schedule.referenceLinks || '').split(',').map(s => s.trim()).filter(Boolean);
+      {(run.runType || 'daily') !== 'weekly' && schedule?.includeReferenceLinks && Array.isArray(schedule.referenceGroups) && schedule.referenceGroups.length > 0 && (() => {
+        const highlights = schedule.referenceHighlights || {};
+        const eventsByTitle = {};
+        (highlights.groups || []).forEach(g => { eventsByTitle[g.title] = g.events || []; });
+        const unreadable = schedule.referenceUnreadable || [];
+        const linkStyle = { color: '#60a5fa', fontSize: 12, textDecoration: 'none' };
+        return (
+          <div className="no-print" style={{ marginTop: 20, paddingTop: 14, borderTop: '1px solid ' + C.border }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#60a5fa', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>What's On — Coming Up</div>
+            <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>Upcoming exhibitions and events, gathered once a week from sites that don't publish an automatic feed. Follow a link for full details.</div>
+            {highlights.refreshedAt && <div style={{ fontSize: 11, color: C.faint }}>Last updated {new Date(highlights.refreshedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}.</div>}
+            {schedule.referenceGroups.map(g => {
+              const events = eventsByTitle[g.title] || [];
+              return (
+                <div key={g.title} style={{ marginTop: 14 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 6 }}>{g.title}</div>
+                  {events.map((e, i) => (
+                    <div key={i} style={{ marginBottom: 6 }}>
+                      <a href={e.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontWeight: 600 }}>{e.title} ↗</a>
+                      {(e.dates || e.venue) && <div style={{ fontSize: 11, color: '#cbd5e1' }}>{[e.dates, e.venue].filter(Boolean).join(' · ')}</div>}
+                    </div>
+                  ))}
+                  {events.length === 0 && <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>Nothing new listed this week.</div>}
+                  <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>
+                    More at: {(g.links || []).map((l, i) => (
+                      <span key={l.url}>{i > 0 && ' · '}<a href={l.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontSize: 11 }}>{l.name} ↗</a></span>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+            {unreadable.length > 0 && (
+              <div style={{ marginTop: 18, paddingTop: 12, borderTop: '1px solid ' + C.border }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#60a5fa', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>More places to check — no automatic highlights</div>
+                <div style={{ fontSize: 11, color: C.faint, marginBottom: 8 }}>These sites can't be read automatically, so nothing from them is highlighted above. Visit them directly to see what's on.</div>
+                {unreadable.map(l => (
+                  <div key={l.url} style={{ marginBottom: 3 }}>
+                    <a href={l.url} target="_blank" rel="noopener noreferrer" style={linkStyle}>{l.name} ↗</a>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+      {(run.runType || 'daily') !== 'weekly' && schedule?.includeReferenceLinks && !(Array.isArray(schedule.referenceGroups) && schedule.referenceGroups.length > 0) && (() => {
+        const refLinks =(schedule.referenceLinks || '').split(',').map(s => s.trim()).filter(Boolean);
         if (refLinks.length === 0) return null;
         return (
           <div className="no-print" style={{ marginTop: 20, paddingTop: 14, borderTop: '1px solid ' + C.border }}>

@@ -2589,6 +2589,13 @@ Weekly summary:`;
   return { text: (text || '').trim(), usage };
 }
 
+// Per-schedule opt-out for the automatic daily summary (on unless the
+// schedule explicitly stores false). The manual Summarize button and the
+// weekly summary are unaffected.
+function wantsDailySummary(schedule) {
+  return schedule.includeDailySummary !== false;
+}
+
 // On-demand only — a daily run never gets a summary automatically, unlike
 // weekly (see aggregateWeeklyFromDailyRuns below, unchanged). Deliberately a
 // separate function from generateWeeklySummary rather than a shared/
@@ -2864,7 +2871,7 @@ exports.generateScheduledReports = onSchedule(
             // a failed summary must never fail the report itself, the
             // per-source article listing is still useful without it.
             try {
-              const result = await generateDailySummary(schedule, run, ai);
+              const result = wantsDailySummary(schedule) ? await generateDailySummary(schedule, run, ai) : null;
               if (result) {
                 run.summary = result.text;
                 const summaryCostUsd = calcCostUsd(ai, result.usage?.input_tokens || 0, result.usage?.output_tokens || 0);
@@ -3017,6 +3024,7 @@ exports.createSchedule = onCall(
       weeklyDay, hourUtc: hour, dailyHourUtc: dailyHour, weeklySummaryWords, dailySummaryWords,
       sendDailyEmail: !!sendDailyEmail, sendWeeklyEmail: !!sendWeeklyEmail, emailRecipients,
       sectionedSummary: !!request.data?.sectionedSummary,
+      includeDailySummary: request.data?.includeDailySummary !== false,
       referenceLinks, includeReferenceLinks: !!request.data?.includeReferenceLinks,
       includeSourceLinks: !!request.data?.includeSourceLinks,
       enabled: true,
@@ -3049,10 +3057,11 @@ exports.updateSchedule = onCall(
     if (updates.reportTitle !== undefined) updates.reportTitle = String(updates.reportTitle || '').trim().slice(0, 60);
     if (updates.searchScope !== undefined) updates.searchScope = updates.searchScope === 'domestic' ? 'domestic' : 'global';
     if (updates.sectionedSummary !== undefined) updates.sectionedSummary = !!updates.sectionedSummary;
+    if (updates.includeDailySummary !== undefined) updates.includeDailySummary = updates.includeDailySummary !== false;
     if (updates.referenceLinks !== undefined) updates.referenceLinks = String(updates.referenceLinks || '').trim().slice(0, 2000);
     if (updates.includeReferenceLinks !== undefined) updates.includeReferenceLinks = !!updates.includeReferenceLinks;
     if (updates.includeSourceLinks !== undefined) updates.includeSourceLinks = !!updates.includeSourceLinks;
-    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope', 'sectionedSummary', 'referenceLinks', 'includeReferenceLinks', 'includeSourceLinks'];
+    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope', 'sectionedSummary', 'includeDailySummary', 'referenceLinks', 'includeReferenceLinks', 'includeSourceLinks'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
     if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');
@@ -3263,7 +3272,7 @@ exports.regenerateDailyReportNow = onCall(
     try {
       const { run, pendingDeletions } = await generateDailyReportRun(scheduleId, schedule, ai, translateAi, 'fullBody', now, shared);
       try {
-        const result = await generateDailySummary(schedule, run, ai);
+        const result = wantsDailySummary(schedule) ? await generateDailySummary(schedule, run, ai) : null;
         if (result) {
           run.summary = result.text;
           const summaryCostUsd = calcCostUsd(ai, result.usage?.input_tokens || 0, result.usage?.output_tokens || 0);
@@ -3346,7 +3355,7 @@ exports.sendReportEmailNow = onCall(
     // automatically when the report itself is built) — this just backfills
     // the rare case of an older report from before that existed, so Send
     // Now never sends without one.
-    if (!run.summary && runId) {
+    if (!run.summary && runId && wantsDailySummary(schedule)) {
       const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
       const ai = makeReportAI(aiSettingsSnap.val() || {});
       const result = await generateDailySummary(schedule, run, ai);

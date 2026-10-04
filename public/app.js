@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.61';
+const VERSION = 'v3.62';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3000,6 +3000,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [newWeeklySummaryWords, setNewWeeklySummaryWords] = useState(400);
   const [newDailySummaryWords, setNewDailySummaryWords] = useState(200);
   const [newSectionedSummary, setNewSectionedSummary] = useState(false);
+  const [newIncludeDailySummary, setNewIncludeDailySummary] = useState(true);
   const [newIncludeSourceLinks, setNewIncludeSourceLinks] = useState(false);
   const [newIncludeReferenceLinks, setNewIncludeReferenceLinks] = useState(false);
   const [newReferenceLinks, setNewReferenceLinks] = useState('');
@@ -3121,6 +3122,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [editWeeklySummaryWords, setEditWeeklySummaryWords] = useState(400);
   const [editDailySummaryWords, setEditDailySummaryWords] = useState(200);
   const [editSectionedSummary, setEditSectionedSummary] = useState(false);
+  const [editIncludeDailySummary, setEditIncludeDailySummary] = useState(true);
   const [editIncludeSourceLinks, setEditIncludeSourceLinks] = useState(false);
   const [editIncludeReferenceLinks, setEditIncludeReferenceLinks] = useState(false);
   const [editReferenceLinks, setEditReferenceLinks] = useState('');
@@ -3191,6 +3193,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditWeeklySummaryWords(s.weeklySummaryWords || 400);
     setEditDailySummaryWords(s.dailySummaryWords || 200);
     setEditSectionedSummary(!!s.sectionedSummary);
+    setEditIncludeDailySummary(s.includeDailySummary !== false);
     setEditIncludeSourceLinks(!!s.includeSourceLinks);
     setEditIncludeReferenceLinks(!!s.includeReferenceLinks);
     setEditReferenceLinks(s.referenceLinks || '');
@@ -3225,7 +3228,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       reportTitle: editReportTitle.trim(),
       topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: editSearchScope,
       weeklyDay: editWeeklyDay, hourUtc: editHourUtc, dailyHourUtc: editDailyHourUtc, weeklySummaryWords: editWeeklySummaryWords, dailySummaryWords: editDailySummaryWords,
-      sectionedSummary: editSectionedSummary,
+      sectionedSummary: editSectionedSummary, includeDailySummary: editIncludeDailySummary,
       includeSourceLinks: editIncludeSourceLinks, includeReferenceLinks: editIncludeReferenceLinks, referenceLinks: editReferenceLinks,
       sendDailyEmail: editSendDailyEmail, sendWeeklyEmail: editSendWeeklyEmail,
       emailRecipients: [
@@ -3297,7 +3300,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
         country: selectedCountry.country, countryKey: selectedCountry.countryKey, reportTitle: newReportTitle.trim(),
         sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: newSearchScope,
         weeklyDay: newWeeklyDay, hourUtc: newHourUtc, dailyHourUtc: newDailyHourUtc, weeklySummaryWords: newWeeklySummaryWords, dailySummaryWords: newDailySummaryWords,
-        sectionedSummary: newSectionedSummary,
+        sectionedSummary: newSectionedSummary, includeDailySummary: newIncludeDailySummary,
         includeSourceLinks: newIncludeSourceLinks, includeReferenceLinks: newIncludeReferenceLinks, referenceLinks: newReferenceLinks,
         sendDailyEmail: newSendDailyEmail, sendWeeklyEmail: newSendWeeklyEmail,
         emailRecipients: [
@@ -3308,7 +3311,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       setCreateMsg('✓ Schedule created');
       setShowCreate(false);
       setNewCountryKey(''); setNewSourceIds(new Set()); setNewSelectedTopics(new Set()); setNewSearchScope('global'); setEstimate(null); setNewReportTitle('');
-      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipientsEn(''); setNewEmailRecipientsHe(''); setNewWeeklySummaryWords(400); setNewDailySummaryWords(200); setNewDailyHourUtc(6); setNewSectionedSummary(false);
+      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipientsEn(''); setNewEmailRecipientsHe(''); setNewWeeklySummaryWords(400); setNewDailySummaryWords(200); setNewDailyHourUtc(6); setNewSectionedSummary(false); setNewIncludeDailySummary(true);
       await loadSchedules();
     } catch (e) {
       setCreateMsg('⚠ ' + e.message);
@@ -3715,6 +3718,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                     )}
                   </div>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 10 }}>
+                    <input type="checkbox" checked={newIncludeDailySummary} onChange={e => setNewIncludeDailySummary(e.target.checked)} /> Include a summary at the top of daily reports
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 10 }}>
                     <input type="checkbox" checked={newSectionedSummary} onChange={e => setNewSectionedSummary(e.target.checked)} /> Organize summary by topic (off = one flowing paragraph)
                   </label>
 
@@ -3851,6 +3857,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   </div>
                 )}
               </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 10 }}>
+                <input type="checkbox" checked={editIncludeDailySummary} onChange={e => setEditIncludeDailySummary(e.target.checked)} /> Include a summary at the top of daily reports
+              </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 10 }}>
                 <input type="checkbox" checked={editSectionedSummary} onChange={e => setEditSectionedSummary(e.target.checked)} /> Organize summary by topic (off = one flowing paragraph)
               </label>

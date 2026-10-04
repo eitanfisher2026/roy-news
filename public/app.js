@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.64';
+const VERSION = 'v3.65';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2776,7 +2776,9 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
         const groups = schedule.referenceGroups.map(g => ({ title: g.title, links: g.links || [], events: eventsByTitle[g.title] || [], articles: byGroup[g.title] || [] }));
         if (general.length > 0) groups.push({ title: 'General Culture', links: [], events: [], articles: general, newsOnly: true });
         const unreadable = schedule.referenceUnreadable || [];
-        const linkStyle = { color: '#60a5fa', fontSize: 12, textDecoration: 'none' };
+        const linkStyle = { color: '#60a5fa', fontSize: 12, textDecoration: 'underline' };
+        const siteUrls = {};
+        schedule.referenceGroups.forEach(g => (g.links || []).forEach(l => { siteUrls[l.name] = l.url; }));
         const partLabel = { fontSize: 10, fontWeight: 700, color: C.faint, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 6 };
         const eventsLabel = 'Coming up · updated weekly' + (highlights.refreshedAt ? ` (last updated ${new Date(highlights.refreshedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })})` : '');
         return (
@@ -2786,8 +2788,8 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
               <div style={{ color: C.faint, fontSize: 13, padding: '6px 0' }}>No new articles from the news feeds today — the upcoming events below are still current.</div>
             )}
             {groups.map(g => (
-              <div key={g.title} style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid ' + C.border }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: '#60a5fa', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>{g.title}</div>
+              <div key={g.title} style={{ marginTop: 22 }}>
+                <div style={{ fontSize: 14, fontWeight: 800, color: '#fff', background: '#1e3a5f', padding: '7px 10px', borderRadius: 5, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.6 }}>{g.title}</div>
                 {g.articles.length > 0 && (
                   <div style={{ marginBottom: g.newsOnly ? 0 : 12 }}>
                     <div style={partLabel}>Today's news · updated daily</div>
@@ -2795,7 +2797,7 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
                       <div key={ai} style={{ marginBottom: 8, padding: '8px 10px', background: '#0f1e35', borderRadius: 6 }}>
                         {a.link
                           ? <a href={a.link} target="_blank" rel="noopener noreferrer"
-                              style={{ color: '#60a5fa', fontSize: 12, fontWeight: 600, lineHeight: 1.4, textDecoration: 'none', display: 'block', marginBottom: 2 }}>{a.title} ↗</a>
+                              style={{ color: '#60a5fa', fontSize: 12, fontWeight: 600, lineHeight: 1.4, textDecoration: 'underline', display: 'block', marginBottom: 2 }}>{a.title}</a>
                           : <div style={{ fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 2 }}>{a.title}</div>
                         }
                         <div style={{ fontSize: 11, color: C.faint, marginBottom: 3 }}>{a.sourceName}</div>
@@ -2812,15 +2814,20 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
                     <div style={partLabel}>{eventsLabel}</div>
                     {g.events.map((e, i) => (
                       <div key={i} style={{ marginBottom: 6 }}>
-                        <a href={e.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontWeight: 600 }}>{e.title} ↗</a>
-                        {(e.dates || e.venue || e.site) && <div style={{ fontSize: 11, color: '#cbd5e1' }}>{[e.dates, e.venue, e.site ? `via ${e.site}` : ''].filter(Boolean).join(' · ')}</div>}
+                        <a href={e.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontWeight: 600 }}>{e.title}</a>
+                        <div style={{ fontSize: 11, color: '#cbd5e1' }}>
+                          {[e.dates, (e.venue || '').trim().toLowerCase() === (e.site || '').trim().toLowerCase() ? '' : e.venue].filter(Boolean).join(' · ')}
+                          {e.site && <span>{(e.dates || e.venue) ? ' · ' : ''}via {siteUrls[e.site]
+                            ? <a href={siteUrls[e.site]} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontSize: 11 }}>{e.site}</a>
+                            : e.site}</span>}
+                        </div>
                       </div>
                     ))}
                     {g.events.length === 0 && <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>Nothing new listed this week.</div>}
                     {g.links.length > 0 && (
                       <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.7 }}>
                         Sites followed for this group: {g.links.map((l, i) => (
-                          <span key={l.url}>{i > 0 && ' · '}<a href={l.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontSize: 11 }}>{l.name} ↗</a></span>
+                          <span key={l.url}>{i > 0 && ' · '}<a href={l.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontSize: 11 }}>{l.name}</a></span>
                         ))}
                       </div>
                     )}
@@ -2836,7 +2843,7 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
                   <div key={groupName} style={{ fontSize: 12, color: C.text, marginBottom: 5, lineHeight: 1.7 }}>
                     <span style={{ fontWeight: 600 }}>{groupName}:</span>{' '}
                     {unreadable.filter(l => (l.group || 'Other') === groupName).map((l, i) => (
-                      <span key={l.url}>{i > 0 && ' · '}<a href={l.url} target="_blank" rel="noopener noreferrer" style={linkStyle}>{l.name} ↗</a></span>
+                      <span key={l.url}>{i > 0 && ' · '}<a href={l.url} target="_blank" rel="noopener noreferrer" style={linkStyle}>{l.name}</a></span>
                     ))}
                   </div>
                 ))}

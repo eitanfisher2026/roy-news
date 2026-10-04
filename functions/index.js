@@ -1176,8 +1176,12 @@ function buildReferenceSections(schedule) {
 function refEventField(e, field, hebrew) {
   return (hebrew && e.he && e.he[field]) || e[field] || '';
 }
+function refEventVenue(e, hebrew) {
+  const same = String(e.venue || '').trim().toLowerCase() === String(e.site || '').trim().toLowerCase();
+  return same ? '' : refEventField(e, 'venue', hebrew);
+}
 function refEventMeta(e, hebrew) {
-  return [refEventField(e, 'dates', hebrew), refEventField(e, 'venue', hebrew), e.site ? `via ${e.site}` : ''].filter(Boolean).join(' · ');
+  return [refEventField(e, 'dates', hebrew), refEventVenue(e, hebrew), e.site ? `via ${e.site}` : ''].filter(Boolean).join(' · ');
 }
 const REF_GROUP_SITES_LABEL = 'Sites followed for this group';
 function groupUnreadable(list) {
@@ -1219,7 +1223,9 @@ function buildCombinedSections(schedule, run) {
   }
   const groups = sections.groups.map(g => ({ ...g, articles: byGroup[g.title] || [] }));
   if (general.length > 0) groups.push({ title: REF_GENERAL_GROUP, articles: general, events: [], links: [], newsOnly: true });
-  return { ...sections, groups };
+  const siteUrls = {};
+  sections.groups.forEach(g => g.links.forEach(l => { siteUrls[l.name] = l.url; }));
+  return { ...sections, groups, siteUrls };
 }
 function refEventsLabel(sections) {
   return sections.refreshedAt ? `${REF_EVENTS_LABEL} (last updated ${formatLongDateLabel(sections.refreshedAt.slice(0, 10))})` : REF_EVENTS_LABEL;
@@ -1380,16 +1386,16 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
   if (combined) {
     const partLabel = `font-size:10.5px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#90949c;margin:0 0 8px;font-family:${sans};`;
     const note = `font-size:12px;color:#90949c;font-family:${sans};`;
-    const linkRow = links => links.map(l => `<a href="${escapeHtml(l.url)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(l.name)} ↗</a>`).join(' &nbsp;·&nbsp; ');
+    const linkStyle = 'color:#1a56db;text-decoration:underline;';
+    const linkRow = links => links.map(l => `<a href="${escapeHtml(l.url)}" style="${linkStyle}">${escapeHtml(l.name)}</a>`).join(' &nbsp;·&nbsp; ');
     body += `<p style="${note}line-height:1.5;margin:0 0 6px;">${escapeHtml(REF_COMBINED_INTRO)}</p>`;
     combined.groups.forEach((g, gi) => {
-      body += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:${gi === 0 ? '16px' : '26px'} 0 16px;">`;
-      body += `<p style="font-size:12px;font-weight:700;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 14px;font-family:${sans};">${escapeHtml(g.title)}</p>`;
+      body += `<p style="font-size:15px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#ffffff;background:#1a3050;padding:9px 12px;border-radius:3px;margin:${gi === 0 ? '18px' : '32px'} 0 16px;font-family:${sans};">${escapeHtml(g.title)}</p>`;
       if (g.articles.length > 0) {
         body += `<p style="${partLabel}">${escapeHtml(REF_NEWS_LABEL)}</p>`;
         g.articles.forEach(a => {
           const titleHtml = a.link
-            ? `<a href="${escapeHtml(a.link)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(a.title)} ↗</a>`
+            ? `<a href="${escapeHtml(a.link)}" style="${linkStyle}">${escapeHtml(a.title)}</a>`
             : escapeHtml(a.title);
           body += `<div style="margin:0 0 14px;">`;
           body += `<p${contentDir} style="font-size:15.5px;font-weight:600;color:#1c1e21;margin:0 0 2px;line-height:1.35;font-family:${sans};${contentAlign}">${titleHtml}</p>`;
@@ -1404,8 +1410,10 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
       if (!g.newsOnly) {
         body += `<p style="${partLabel}${g.articles.length > 0 ? 'margin-top:18px;' : ''}">${escapeHtml(refEventsLabel(combined))}</p>`;
         g.events.forEach(e => {
-          const meta = refEventMeta(e, rtl);
-          body += `<p${contentDir} style="font-size:13.5px;line-height:1.45;margin:0 0 7px;font-family:${sans};${contentAlign}"><a href="${escapeHtml(e.url)}" style="color:#3e5c76;text-decoration:none;font-weight:600;">${escapeHtml(refEventField(e, 'title', rtl))} ↗</a>${meta ? `<br><span style="font-size:12.5px;color:#6b7078;">${escapeHtml(meta)}</span>` : ''}</p>`;
+          const siteUrl = combined.siteUrls[e.site];
+          const metaParts = [refEventField(e, 'dates', rtl), refEventVenue(e, rtl)].filter(Boolean).map(escapeHtml);
+          if (e.site) metaParts.push(siteUrl ? `via <a href="${escapeHtml(siteUrl)}" style="${linkStyle}">${escapeHtml(e.site)}</a>` : `via ${escapeHtml(e.site)}`);
+          body += `<p${contentDir} style="font-size:13.5px;line-height:1.45;margin:0 0 9px;font-family:${sans};${contentAlign}"><a href="${escapeHtml(e.url)}" style="${linkStyle}font-weight:600;">${escapeHtml(refEventField(e, 'title', rtl))}</a>${metaParts.length ? `<br><span style="font-size:12.5px;color:#6b7078;">${metaParts.join(' · ')}</span>` : ''}</p>`;
         });
         if (g.events.length === 0) body += `<p style="${note}margin:0 0 6px;">Nothing new listed this week.</p>`;
         if (g.links.length > 0) body += `<p style="font-size:12px;color:#90949c;line-height:1.6;margin:10px 0 0;font-family:${sans};">${REF_GROUP_SITES_LABEL}: ${linkRow(g.links)}</p>`;
@@ -1453,7 +1461,7 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
         linksHtml += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:28px 0 14px;">
           <p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 8px;font-family:${sans};">Source Websites</p>
           <p style="font-size:12px;color:#90949c;margin:0 0 10px;font-family:${sans};">The outlets this report draws from — visit them directly for the full picture beyond what's summarized above.</p>
-          ${sourceLinks.map(s => `<p style="font-size:13px;margin:0 0 4px;font-family:${sans};"><a href="${escapeHtml(s.websiteUrl)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(s.name)} ↗</a></p>`).join('')}`;
+          ${sourceLinks.map(s => `<p style="font-size:13px;margin:0 0 4px;font-family:${sans};"><a href="${escapeHtml(s.websiteUrl)}" style="${combined ? 'color:#1a56db;text-decoration:underline;' : 'color:#3e5c76;text-decoration:none;'}">${escapeHtml(s.name)}${combined ? '' : ' ↗'}</a></p>`).join('')}`;
       }
     }
     // With interest groups set up, the sites were already rendered in the body, per group.

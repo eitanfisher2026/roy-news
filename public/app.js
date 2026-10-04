@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.62';
+const VERSION = 'v3.63';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2640,6 +2640,10 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
   // them), just never surfaced on their own for a weekly report.
   const displayDays = displayRun.runType === 'weekly' ? [] : (displayRun.days || []);
   const isMultiDay = displayDays.length > 1;
+  // Set up per schedule in the database (no editing UI): articles and weekly
+  // website events are shown together under each interest group.
+  const combinedLayout = (run.runType || 'daily') !== 'weekly' && !!schedule?.includeReferenceLinks
+    && Array.isArray(schedule.referenceGroups) && schedule.referenceGroups.length > 0;
 
   // Both daily and weekly now always get a summary automatically at
   // generation time — this on-demand button only matters as a backfill for
@@ -2757,7 +2761,89 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
         </div>
       )}
 
-      {displayDays.length === 0 ? (
+      {combinedLayout && (() => {
+        const highlights = schedule.referenceHighlights || {};
+        const eventsByTitle = {};
+        (highlights.groups || []).forEach(g => { eventsByTitle[g.title] = g.events || []; });
+        const titles = new Set(schedule.referenceGroups.map(g => g.title));
+        const byGroup = {};
+        const general = [];
+        displayDays.forEach(d => (d.sources || []).forEach(s => (s.articles || []).forEach(a => {
+          const item = { ...a, sourceName: s.sourceName };
+          if (titles.has(a.group)) (byGroup[a.group] = byGroup[a.group] || []).push(item);
+          else general.push(item);
+        })));
+        const groups = schedule.referenceGroups.map(g => ({ title: g.title, links: g.links || [], events: eventsByTitle[g.title] || [], articles: byGroup[g.title] || [] }));
+        if (general.length > 0) groups.push({ title: 'General Culture', links: [], events: [], articles: general, newsOnly: true });
+        const unreadable = schedule.referenceUnreadable || [];
+        const linkStyle = { color: '#60a5fa', fontSize: 12, textDecoration: 'none' };
+        const partLabel = { fontSize: 10, fontWeight: 700, color: C.faint, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 6 };
+        const eventsLabel = 'Coming up · updated weekly' + (highlights.refreshedAt ? ` (last updated ${new Date(highlights.refreshedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })})` : '');
+        return (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.6, marginBottom: 6 }}>How to read this report: “Today's news” comes from the news feeds and is updated every day. “Coming up” is gathered from venue and festival websites and is updated once a week.</div>
+            {displayDays.length === 0 && !displayRun.summary && (
+              <div style={{ color: C.faint, fontSize: 13, padding: '6px 0' }}>No new articles from the news feeds today — the upcoming events below are still current.</div>
+            )}
+            {groups.map(g => (
+              <div key={g.title} style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid ' + C.border }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#60a5fa', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>{g.title}</div>
+                {g.articles.length > 0 && (
+                  <div style={{ marginBottom: g.newsOnly ? 0 : 12 }}>
+                    <div style={partLabel}>Today's news · updated daily</div>
+                    {g.articles.map((a, ai) => (
+                      <div key={ai} style={{ marginBottom: 8, padding: '8px 10px', background: '#0f1e35', borderRadius: 6 }}>
+                        {a.link
+                          ? <a href={a.link} target="_blank" rel="noopener noreferrer"
+                              style={{ color: '#60a5fa', fontSize: 12, fontWeight: 600, lineHeight: 1.4, textDecoration: 'none', display: 'block', marginBottom: 2 }}>{a.title} ↗</a>
+                          : <div style={{ fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 2 }}>{a.title}</div>
+                        }
+                        <div style={{ fontSize: 11, color: C.faint, marginBottom: 3 }}>{a.sourceName}</div>
+                        {a.translationFailed && (
+                          <div style={{ fontSize: 11, color: '#f59e0b', marginBottom: 3 }}>⚠ Could not translate this article right now — shown in its original language.</div>
+                        )}
+                        <div style={{ fontSize: 12, color: '#cbd5e1', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{a.text}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {!g.newsOnly && (
+                  <div>
+                    <div style={partLabel}>{eventsLabel}</div>
+                    {g.events.map((e, i) => (
+                      <div key={i} style={{ marginBottom: 6 }}>
+                        <a href={e.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontWeight: 600 }}>{e.title} ↗</a>
+                        {(e.dates || e.venue) && <div style={{ fontSize: 11, color: '#cbd5e1' }}>{[e.dates, e.venue].filter(Boolean).join(' · ')}</div>}
+                      </div>
+                    ))}
+                    {g.events.length === 0 && <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>Nothing new listed this week.</div>}
+                    {g.links.length > 0 && (
+                      <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>
+                        More at: {g.links.map((l, i) => (
+                          <span key={l.url}>{i > 0 && ' · '}<a href={l.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontSize: 11 }}>{l.name} ↗</a></span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+            {unreadable.length > 0 && (
+              <div className="no-print" style={{ marginTop: 18, paddingTop: 12, borderTop: '1px solid ' + C.border }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#60a5fa', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>More places to check — no automatic highlights</div>
+                <div style={{ fontSize: 11, color: C.faint, marginBottom: 8 }}>These sites can't be read automatically, so nothing from them is highlighted above. Visit them directly to see what's on.</div>
+                {unreadable.map(l => (
+                  <div key={l.url} style={{ marginBottom: 3 }}>
+                    <a href={l.url} target="_blank" rel="noopener noreferrer" style={linkStyle}>{l.name} ↗</a>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {combinedLayout ? null : displayDays.length === 0 ? (
         !displayRun.summary && <div style={{ color: C.faint, fontSize: 13, padding: '10px 0' }}>Nothing matched your topics today — none of your sources published anything relevant. This is normal on a quiet news day; check back tomorrow.</div>
       ) : displayDays.map((d, di) => (
         <div key={di} style={{ marginBottom: 20 }}>
@@ -2804,52 +2890,7 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
           </div>
         );
       })()}
-      {(run.runType || 'daily') !== 'weekly' && schedule?.includeReferenceLinks && Array.isArray(schedule.referenceGroups) && schedule.referenceGroups.length > 0 && (() => {
-        const highlights = schedule.referenceHighlights || {};
-        const eventsByTitle = {};
-        (highlights.groups || []).forEach(g => { eventsByTitle[g.title] = g.events || []; });
-        const unreadable = schedule.referenceUnreadable || [];
-        const linkStyle = { color: '#60a5fa', fontSize: 12, textDecoration: 'none' };
-        return (
-          <div className="no-print" style={{ marginTop: 20, paddingTop: 14, borderTop: '1px solid ' + C.border }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: '#60a5fa', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>What's On — Coming Up</div>
-            <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>Upcoming exhibitions and events, gathered once a week from sites that don't publish an automatic feed. Follow a link for full details.</div>
-            {highlights.refreshedAt && <div style={{ fontSize: 11, color: C.faint }}>Last updated {new Date(highlights.refreshedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}.</div>}
-            {schedule.referenceGroups.map(g => {
-              const events = eventsByTitle[g.title] || [];
-              return (
-                <div key={g.title} style={{ marginTop: 14 }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 6 }}>{g.title}</div>
-                  {events.map((e, i) => (
-                    <div key={i} style={{ marginBottom: 6 }}>
-                      <a href={e.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontWeight: 600 }}>{e.title} ↗</a>
-                      {(e.dates || e.venue) && <div style={{ fontSize: 11, color: '#cbd5e1' }}>{[e.dates, e.venue].filter(Boolean).join(' · ')}</div>}
-                    </div>
-                  ))}
-                  {events.length === 0 && <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>Nothing new listed this week.</div>}
-                  <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>
-                    More at: {(g.links || []).map((l, i) => (
-                      <span key={l.url}>{i > 0 && ' · '}<a href={l.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontSize: 11 }}>{l.name} ↗</a></span>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-            {unreadable.length > 0 && (
-              <div style={{ marginTop: 18, paddingTop: 12, borderTop: '1px solid ' + C.border }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: '#60a5fa', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>More places to check — no automatic highlights</div>
-                <div style={{ fontSize: 11, color: C.faint, marginBottom: 8 }}>These sites can't be read automatically, so nothing from them is highlighted above. Visit them directly to see what's on.</div>
-                {unreadable.map(l => (
-                  <div key={l.url} style={{ marginBottom: 3 }}>
-                    <a href={l.url} target="_blank" rel="noopener noreferrer" style={linkStyle}>{l.name} ↗</a>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })()}
-      {(run.runType || 'daily') !== 'weekly' && schedule?.includeReferenceLinks && !(Array.isArray(schedule.referenceGroups) && schedule.referenceGroups.length > 0) && (() => {
+      {!combinedLayout && (run.runType || 'daily') !== 'weekly' && schedule?.includeReferenceLinks && (() => {
         const refLinks =(schedule.referenceLinks || '').split(',').map(s => s.trim()).filter(Boolean);
         if (refLinks.length === 0) return null;
         return (

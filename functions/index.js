@@ -1180,6 +1180,69 @@ function refEventField(e, field, hebrew) {
 function refEventMeta(e, hebrew) {
   return [refEventField(e, 'dates', hebrew), refEventField(e, 'venue', hebrew)].filter(Boolean).join(' · ');
 }
+// Combined layout (only for a schedule with referenceGroups): the day's
+// feed articles and the weekly website events sit together under each
+// interest group, each part labeled with how often it is refreshed.
+// Articles are tagged with `group` at generation time (assignArticleGroups);
+// untagged ones — older runs, or a failed tagging call — fall into a
+// general group so nothing is ever dropped.
+const REF_GENERAL_GROUP = 'General Culture';
+const REF_COMBINED_INTRO = "How to read this report: “Today's news” comes from the news feeds and is updated every day. “Coming up” is gathered from venue and festival websites and is updated once a week.";
+const REF_NEWS_LABEL = "Today's news · updated daily";
+const REF_EVENTS_LABEL = 'Coming up · updated weekly';
+const REF_NO_NEWS_TODAY = 'No new articles from the news feeds today — the upcoming events below are still current.';
+function buildCombinedSections(schedule, run) {
+  if (run.runType === 'weekly' || !schedule.includeReferenceLinks) return null;
+  const sections = buildReferenceSections(schedule);
+  if (!sections) return null;
+  const titles = new Set(sections.groups.map(g => g.title));
+  const byGroup = {};
+  const general = [];
+  for (const d of (run.days || [])) {
+    for (const s of (d.sources || [])) {
+      for (const a of (s.articles || [])) {
+        const item = { ...a, sourceName: s.sourceName };
+        if (titles.has(a.group)) (byGroup[a.group] = byGroup[a.group] || []).push(item);
+        else general.push(item);
+      }
+    }
+  }
+  const groups = sections.groups.map(g => ({ ...g, articles: byGroup[g.title] || [] }));
+  if (general.length > 0) groups.push({ title: REF_GENERAL_GROUP, articles: general, events: [], links: [], newsOnly: true });
+  return { ...sections, groups };
+}
+function refEventsLabel(sections) {
+  return sections.refreshedAt ? `${REF_EVENTS_LABEL} (last updated ${formatLongDateLabel(sections.refreshedAt.slice(0, 10))})` : REF_EVENTS_LABEL;
+}
+function buildCombinedText(c, hebrew) {
+  let text = `${REF_COMBINED_INTRO}\n`;
+  for (const g of c.groups) {
+    text += `\n${g.title.toUpperCase()}\n`;
+    if (g.articles.length > 0) {
+      text += `  ${REF_NEWS_LABEL}\n`;
+      for (const a of g.articles) {
+        text += `   ${a.title} (${a.sourceName})\n   ${a.text}\n`;
+        if (a.translationFailed) text += `   ⚠ Could not translate this article right now — shown in its original language.\n`;
+        if (a.link) text += `   ${a.link}\n`;
+      }
+    }
+    if (!g.newsOnly) {
+      text += `  ${refEventsLabel(c)}\n`;
+      for (const e of g.events) {
+        const meta = refEventMeta(e, hebrew);
+        text += `   - ${refEventField(e, 'title', hebrew)}${meta ? ` (${meta})` : ''}\n     ${e.url}\n`;
+      }
+      if (g.events.length === 0) text += `   Nothing new listed this week.\n`;
+      g.links.forEach(l => { text += `   ${l.name}: ${l.url}\n`; });
+    }
+  }
+  if (c.unreadable.length > 0) {
+    text += `\n${REF_UNREADABLE_TITLE}\n${REF_UNREADABLE_INTRO}\n`;
+    c.unreadable.forEach(l => { text += `  ${l.name}: ${l.url}\n`; });
+  }
+  return text;
+}
+
 function buildReferenceSectionsText(sections, hebrew) {
   let text = `\nWhat's On — Coming Up\n${REF_HIGHLIGHTS_INTRO}\n`;
   if (sections.refreshedAt) text += `Last updated ${formatLongDateLabel(sections.refreshedAt.slice(0, 10))}.\n`;
@@ -1211,6 +1274,7 @@ function buildRawReportText(schedule, run, sourceWebsites = {}, hebrew = false) 
   const days = run.runType === 'weekly' ? [] : (run.days || []);
   const isMultiDay = days.length > 1;
   const topics = run.topics || schedule.topics || [];
+  const combined = buildCombinedSections(schedule, run);
   let text = `${titleCase(schedule.country)}\n`;
   if (topics.length > 0) text += `Topics: ${topics.join(', ')}\n`;
   if (run.summary) text += `\nSummary\n${run.summary.replace(/\*\*(.+?)\*\*/g, '$1')}\n`;
@@ -1218,9 +1282,10 @@ function buildRawReportText(schedule, run, sourceWebsites = {}, hebrew = false) 
   // line to the footer with nothing explaining the gap, which reads as
   // broken rather than "a quiet day" (confirmed in production 2026-09-14 —
   // Culture in Bangkok's report for 12/09 matched nothing and looked empty).
-  else if (days.length === 0) text += `\nNothing matched your topics today — none of your sources published anything relevant. This is normal on a quiet news day; check back tomorrow.\n`;
+  else if (days.length === 0) text += combined ? `\n${REF_NO_NEWS_TODAY}\n` : `\nNothing matched your topics today — none of your sources published anything relevant. This is normal on a quiet news day; check back tomorrow.\n`;
   text += '\n';
-  for (const d of days) {
+  if (combined) text += buildCombinedText(combined, hebrew);
+  for (const d of (combined ? [] : days)) {
     if (isMultiDay) text += `Day: ${formatDayLabel(d.day)}\n`;
     for (const s of d.sources || []) {
       text += `  Source: ${s.sourceName}\n`;
@@ -1239,8 +1304,10 @@ function buildRawReportText(schedule, run, sourceWebsites = {}, hebrew = false) 
         sourceLinks.forEach(s => { text += `  ${s.name}: ${s.websiteUrl}\n`; });
       }
     }
-    const refSections = schedule.includeReferenceLinks ? buildReferenceSections(schedule) : null;
-    if (refSections) {
+    const refSections = (!combined && schedule.includeReferenceLinks) ? buildReferenceSections(schedule) : null;
+    if (combined) {
+      // already rendered above, in place of the by-source listing
+    } else if (refSections) {
       text += buildReferenceSectionsText(refSections, hebrew);
     } else if (schedule.includeReferenceLinks) {
       const refLinks = parseReferenceLinks(schedule.referenceLinks);
@@ -1300,6 +1367,7 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
       ? `${formatLongDateLabel(days[0].day)} – ${formatLongDateLabel(days[days.length - 1].day)}`
       : (days[0] ? formatLongDateLabel(days[0].day) : (run.periodEnd ? formatLongDateLabel(run.periodEnd) : ''));
   const topics = run.topics || schedule.topics || [];
+  const combined = buildCombinedSections(schedule, run);
 
   const sans = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
@@ -1315,10 +1383,51 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
       // Same reasoning as buildRawReportText's text version — a daily
       // report with nothing summarized and no articles previously just
       // went straight to the footer with no explanation at all.
-      : (days.length === 0 ? `<p style="font-size:14.5px;color:#90949c;font-family:${sans};">Nothing matched your topics today — none of your sources published anything relevant. This is normal on a quiet news day; check back tomorrow.</p>` : ''));
+      : (days.length === 0 ? `<p style="font-size:14.5px;color:#90949c;font-family:${sans};">${combined ? escapeHtml(REF_NO_NEWS_TODAY) : 'Nothing matched your topics today — none of your sources published anything relevant. This is normal on a quiet news day; check back tomorrow.'}</p>` : ''));
 
   let body = '';
-  days.forEach((d, di) => {
+  if (combined) {
+    const partLabel = `font-size:10.5px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#90949c;margin:0 0 8px;font-family:${sans};`;
+    const note = `font-size:12px;color:#90949c;font-family:${sans};`;
+    const linkRow = links => links.map(l => `<a href="${escapeHtml(l.url)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(l.name)} ↗</a>`).join(' &nbsp;·&nbsp; ');
+    body += `<p style="${note}line-height:1.5;margin:0 0 6px;">${escapeHtml(REF_COMBINED_INTRO)}</p>`;
+    combined.groups.forEach((g, gi) => {
+      body += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:${gi === 0 ? '16px' : '26px'} 0 16px;">`;
+      body += `<p style="font-size:12px;font-weight:700;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 14px;font-family:${sans};">${escapeHtml(g.title)}</p>`;
+      if (g.articles.length > 0) {
+        body += `<p style="${partLabel}">${escapeHtml(REF_NEWS_LABEL)}</p>`;
+        g.articles.forEach(a => {
+          const titleHtml = a.link
+            ? `<a href="${escapeHtml(a.link)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(a.title)} ↗</a>`
+            : escapeHtml(a.title);
+          body += `<div style="margin:0 0 14px;">`;
+          body += `<p${contentDir} style="font-size:15.5px;font-weight:600;color:#1c1e21;margin:0 0 2px;line-height:1.35;font-family:${sans};${contentAlign}">${titleHtml}</p>`;
+          body += `<p style="font-size:11.5px;color:#90949c;margin:0 0 4px;font-family:${sans};">${escapeHtml(a.sourceName)}</p>`;
+          if (a.translationFailed) {
+            body += `<p style="font-size:12px;color:#b45309;margin:0 0 4px;font-family:${sans};">⚠ Could not translate this article right now — shown in its original language.</p>`;
+          }
+          body += `<p${contentDir} style="font-size:14.5px;color:#43474d;line-height:1.6;margin:0;font-family:${sans};${contentAlign}">${escapeHtml(a.text)}</p>`;
+          body += `</div>`;
+        });
+      }
+      if (!g.newsOnly) {
+        body += `<p style="${partLabel}${g.articles.length > 0 ? 'margin-top:18px;' : ''}">${escapeHtml(refEventsLabel(combined))}</p>`;
+        g.events.forEach(e => {
+          const meta = refEventMeta(e, rtl);
+          body += `<p${contentDir} style="font-size:13.5px;line-height:1.45;margin:0 0 7px;font-family:${sans};${contentAlign}"><a href="${escapeHtml(e.url)}" style="color:#3e5c76;text-decoration:none;font-weight:600;">${escapeHtml(refEventField(e, 'title', rtl))} ↗</a>${meta ? `<br><span style="font-size:12.5px;color:#6b7078;">${escapeHtml(meta)}</span>` : ''}</p>`;
+        });
+        if (g.events.length === 0) body += `<p style="${note}margin:0 0 6px;">Nothing new listed this week.</p>`;
+        if (g.links.length > 0) body += `<p style="font-size:12px;color:#90949c;margin:8px 0 0;font-family:${sans};">More at: ${linkRow(g.links)}</p>`;
+      }
+    });
+    if (combined.unreadable.length > 0) {
+      body += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:26px 0 14px;">
+          <p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 8px;font-family:${sans};">${escapeHtml(REF_UNREADABLE_TITLE)}</p>
+          <p style="${note}margin:0 0 10px;">${escapeHtml(REF_UNREADABLE_INTRO)}</p>
+          <p style="font-size:13px;margin:0;font-family:${sans};">${linkRow(combined.unreadable)}</p>`;
+    }
+  }
+  (combined ? [] : days).forEach((d, di) => {
     if (isMultiDay) {
       body += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:${di === 0 ? '0 0 22px' : '28px 0 22px'};">`;
       body += `<p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 18px;font-family:${sans};">${escapeHtml(formatDayLabel(d.day))}</p>`;
@@ -1356,8 +1465,10 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
           ${sourceLinks.map(s => `<p style="font-size:13px;margin:0 0 4px;font-family:${sans};"><a href="${escapeHtml(s.websiteUrl)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(s.name)} ↗</a></p>`).join('')}`;
       }
     }
-    const refSections = schedule.includeReferenceLinks ? buildReferenceSections(schedule) : null;
-    if (refSections) {
+    const refSections = (!combined && schedule.includeReferenceLinks) ? buildReferenceSections(schedule) : null;
+    if (combined) {
+      // already rendered in the body, in place of the by-source listing
+    } else if (refSections) {
       const label = `font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;font-family:${sans};`;
       const note = `font-size:12px;color:#90949c;font-family:${sans};`;
       const linkRow = links => links.map(l => `<a href="${escapeHtml(l.url)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(l.name)} ↗</a>`).join(' &nbsp;·&nbsp; ');
@@ -2372,6 +2483,39 @@ async function loadTopicGuidance(topicNames) {
 // it), and weekly is built by aggregating 7 of these already-stored runs
 // (see aggregateWeeklyFromDailyRuns) rather than re-running this over a week
 // pooled together.
+// One small call per daily run, only for a schedule with referenceGroups:
+// tags each matched article with the interest group it belongs under.
+// Titles plus a short excerpt are enough to pick a category, so the full
+// article text is deliberately not sent. Groups marked eventsOnly (e.g. a
+// general city-wide events listing) never receive articles.
+async function assignArticleGroups(schedule, days, ai) {
+  if (!schedule.includeReferenceLinks || !Array.isArray(schedule.referenceGroups) || schedule.referenceGroups.length === 0) return null;
+  const articles = days.flatMap(d => (d.sources || []).flatMap(s => s.articles || []));
+  if (articles.length === 0) return null;
+  const titles = schedule.referenceGroups.filter(g => !g.eventsOnly).map(g => g.title);
+  const prompt = `Assign each article below to the single best-fitting category. Use 0 when none clearly fits.
+
+Categories:
+${titles.map((t, i) => `${i + 1}. ${t}`).join('\n')}
+0. None of these
+
+Articles:
+${articles.map((a, i) => `[${i + 1}] ${a.title} — ${String(a.text || '').slice(0, 300)}`).join('\n')}
+
+Reply with ONLY a JSON object mapping each article number to a category number, e.g. {"1": 3, "2": 0}.`;
+  const { text, usage } = await callAI(ai, prompt, Math.min(200 + articles.length * 15, 2000));
+  const match = String(text || '').match(/\{[\s\S]*\}/);
+  if (match) {
+    let map = {};
+    try { map = JSON.parse(match[0]); } catch {}
+    articles.forEach((a, i) => {
+      const title = titles[Number(map[String(i + 1)]) - 1];
+      if (title) a.group = title;
+    });
+  }
+  return usage;
+}
+
 async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, contextMode, now, shared) {
   const periodEnd = yesterdayUTC();
   const { sharedSourceKeys, cache, classificationTopics } = shared;
@@ -2532,6 +2676,18 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
 
   const sourceGroups = buildDaySourceGroups(perSourceMatchData);
   const days = sourceGroups.length > 0 ? [{ day: periodEnd, sources: sourceGroups }] : [];
+
+  // A failure here only costs the grouping — untagged articles still show,
+  // under the general group.
+  try {
+    const usage = await assignArticleGroups(schedule, days, ai);
+    if (usage) {
+      await persistCost(schedule.createdBy, schedule.createdByEmail, ai, calcCostUsd(ai, usage.input_tokens || 0, usage.output_tokens || 0));
+      addSpend(usage, ai);
+    }
+  } catch (e) {
+    console.error('assignArticleGroups failed', e.message);
+  }
 
   const run = {
     scheduleId, generatedAt: now.toISOString(), periodStart: periodEnd, periodEnd, dateLabel: periodEnd,

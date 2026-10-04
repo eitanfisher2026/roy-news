@@ -1160,7 +1160,6 @@ function parseReferenceLinks(referenceLinks) {
 // [{name, url}] for sites that can't be read automatically, and
 // `referenceHighlights` is the weekly output of refreshReferenceHighlights.
 // A schedule without referenceGroups keeps the plain flat list.
-const REF_HIGHLIGHTS_INTRO = "Upcoming exhibitions and events, gathered once a week from sites that don't publish an automatic feed. Follow a link for full details.";
 const REF_UNREADABLE_TITLE = 'More places to check — no automatic highlights';
 const REF_UNREADABLE_INTRO = "These sites can't be read automatically, so nothing from them is highlighted above. Visit them directly to see what's on.";
 function buildReferenceSections(schedule) {
@@ -1178,7 +1177,18 @@ function refEventField(e, field, hebrew) {
   return (hebrew && e.he && e.he[field]) || e[field] || '';
 }
 function refEventMeta(e, hebrew) {
-  return [refEventField(e, 'dates', hebrew), refEventField(e, 'venue', hebrew)].filter(Boolean).join(' · ');
+  return [refEventField(e, 'dates', hebrew), refEventField(e, 'venue', hebrew), e.site ? `via ${e.site}` : ''].filter(Boolean).join(' · ');
+}
+const REF_GROUP_SITES_LABEL = 'Sites followed for this group';
+function groupUnreadable(list) {
+  const out = [];
+  for (const l of list) {
+    const key = l.group || 'Other';
+    let g = out.find(x => x.group === key);
+    if (!g) out.push(g = { group: key, links: [] });
+    g.links.push(l);
+  }
+  return out;
 }
 // Combined layout (only for a schedule with referenceGroups): the day's
 // feed articles and the weekly website events sit together under each
@@ -1233,31 +1243,16 @@ function buildCombinedText(c, hebrew) {
         text += `   - ${refEventField(e, 'title', hebrew)}${meta ? ` (${meta})` : ''}\n     ${e.url}\n`;
       }
       if (g.events.length === 0) text += `   Nothing new listed this week.\n`;
+      if (g.links.length > 0) text += `  ${REF_GROUP_SITES_LABEL}\n`;
       g.links.forEach(l => { text += `   ${l.name}: ${l.url}\n`; });
     }
   }
   if (c.unreadable.length > 0) {
     text += `\n${REF_UNREADABLE_TITLE}\n${REF_UNREADABLE_INTRO}\n`;
-    c.unreadable.forEach(l => { text += `  ${l.name}: ${l.url}\n`; });
-  }
-  return text;
-}
-
-function buildReferenceSectionsText(sections, hebrew) {
-  let text = `\nWhat's On — Coming Up\n${REF_HIGHLIGHTS_INTRO}\n`;
-  if (sections.refreshedAt) text += `Last updated ${formatLongDateLabel(sections.refreshedAt.slice(0, 10))}.\n`;
-  for (const g of sections.groups) {
-    text += `\n  ${g.title}\n`;
-    for (const e of g.events) {
-      const meta = refEventMeta(e, hebrew);
-      text += `   - ${refEventField(e, 'title', hebrew)}${meta ? ` (${meta})` : ''}\n     ${e.url}\n`;
+    for (const ug of groupUnreadable(c.unreadable)) {
+      text += `  ${ug.group}\n`;
+      ug.links.forEach(l => { text += `   ${l.name}: ${l.url}\n`; });
     }
-    if (g.events.length === 0) text += `   Nothing new listed this week.\n`;
-    g.links.forEach(l => { text += `   ${l.name}: ${l.url}\n`; });
-  }
-  if (sections.unreadable.length > 0) {
-    text += `\n${REF_UNREADABLE_TITLE}\n${REF_UNREADABLE_INTRO}\n`;
-    sections.unreadable.forEach(l => { text += `  ${l.name}: ${l.url}\n`; });
   }
   return text;
 }
@@ -1304,12 +1299,8 @@ function buildRawReportText(schedule, run, sourceWebsites = {}, hebrew = false) 
         sourceLinks.forEach(s => { text += `  ${s.name}: ${s.websiteUrl}\n`; });
       }
     }
-    const refSections = (!combined && schedule.includeReferenceLinks) ? buildReferenceSections(schedule) : null;
-    if (combined) {
-      // already rendered above, in place of the by-source listing
-    } else if (refSections) {
-      text += buildReferenceSectionsText(refSections, hebrew);
-    } else if (schedule.includeReferenceLinks) {
+    // With interest groups set up, the sites were already rendered above, per group.
+    if (!combined && schedule.includeReferenceLinks) {
       const refLinks = parseReferenceLinks(schedule.referenceLinks);
       if (refLinks.length > 0) {
         text += `\nReference Links\nThese sites don't publish an automatic feed, so this report can't pull live articles from them — listed here for manual reference only.\n`;
@@ -1417,14 +1408,14 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
           body += `<p${contentDir} style="font-size:13.5px;line-height:1.45;margin:0 0 7px;font-family:${sans};${contentAlign}"><a href="${escapeHtml(e.url)}" style="color:#3e5c76;text-decoration:none;font-weight:600;">${escapeHtml(refEventField(e, 'title', rtl))} ↗</a>${meta ? `<br><span style="font-size:12.5px;color:#6b7078;">${escapeHtml(meta)}</span>` : ''}</p>`;
         });
         if (g.events.length === 0) body += `<p style="${note}margin:0 0 6px;">Nothing new listed this week.</p>`;
-        if (g.links.length > 0) body += `<p style="font-size:12px;color:#90949c;margin:8px 0 0;font-family:${sans};">More at: ${linkRow(g.links)}</p>`;
+        if (g.links.length > 0) body += `<p style="font-size:12px;color:#90949c;line-height:1.6;margin:10px 0 0;font-family:${sans};">${REF_GROUP_SITES_LABEL}: ${linkRow(g.links)}</p>`;
       }
     });
     if (combined.unreadable.length > 0) {
       body += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:26px 0 14px;">
           <p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 8px;font-family:${sans};">${escapeHtml(REF_UNREADABLE_TITLE)}</p>
           <p style="${note}margin:0 0 10px;">${escapeHtml(REF_UNREADABLE_INTRO)}</p>
-          <p style="font-size:13px;margin:0;font-family:${sans};">${linkRow(combined.unreadable)}</p>`;
+          ${groupUnreadable(combined.unreadable).map(ug => `<p style="font-size:13px;line-height:1.6;margin:0 0 6px;font-family:${sans};"><span style="font-weight:600;color:#1c1e21;">${escapeHtml(ug.group)}:</span> ${linkRow(ug.links)}</p>`).join('')}`;
     }
   }
   (combined ? [] : days).forEach((d, di) => {
@@ -1465,33 +1456,8 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
           ${sourceLinks.map(s => `<p style="font-size:13px;margin:0 0 4px;font-family:${sans};"><a href="${escapeHtml(s.websiteUrl)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(s.name)} ↗</a></p>`).join('')}`;
       }
     }
-    const refSections = (!combined && schedule.includeReferenceLinks) ? buildReferenceSections(schedule) : null;
-    if (combined) {
-      // already rendered in the body, in place of the by-source listing
-    } else if (refSections) {
-      const label = `font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;font-family:${sans};`;
-      const note = `font-size:12px;color:#90949c;font-family:${sans};`;
-      const linkRow = links => links.map(l => `<a href="${escapeHtml(l.url)}" style="color:#3e5c76;text-decoration:none;">${escapeHtml(l.name)} ↗</a>`).join(' &nbsp;·&nbsp; ');
-      linksHtml += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:28px 0 14px;">
-          <p style="${label}margin:0 0 8px;">What's On — Coming Up</p>
-          <p style="${note}margin:0 0 4px;">${escapeHtml(REF_HIGHLIGHTS_INTRO)}</p>
-          ${refSections.refreshedAt ? `<p style="${note}margin:0 0 6px;">Last updated ${escapeHtml(formatLongDateLabel(refSections.refreshedAt.slice(0, 10)))}.</p>` : ''}`;
-      for (const g of refSections.groups) {
-        linksHtml += `<p style="font-size:13.5px;font-weight:700;color:#1c1e21;margin:18px 0 8px;font-family:${sans};">${escapeHtml(g.title)}</p>`;
-        for (const e of g.events) {
-          const meta = refEventMeta(e, rtl);
-          linksHtml += `<p${contentDir} style="font-size:13.5px;line-height:1.45;margin:0 0 7px;font-family:${sans};${contentAlign}"><a href="${escapeHtml(e.url)}" style="color:#3e5c76;text-decoration:none;font-weight:600;">${escapeHtml(refEventField(e, 'title', rtl))} ↗</a>${meta ? `<br><span style="font-size:12.5px;color:#6b7078;">${escapeHtml(meta)}</span>` : ''}</p>`;
-        }
-        if (g.events.length === 0) linksHtml += `<p style="${note}margin:0 0 6px;">Nothing new listed this week.</p>`;
-        if (g.links.length > 0) linksHtml += `<p style="font-size:12px;color:#90949c;margin:8px 0 0;font-family:${sans};">More at: ${linkRow(g.links)}</p>`;
-      }
-      if (refSections.unreadable.length > 0) {
-        linksHtml += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:24px 0 14px;">
-          <p style="${label}margin:0 0 8px;">${escapeHtml(REF_UNREADABLE_TITLE)}</p>
-          <p style="${note}margin:0 0 10px;">${escapeHtml(REF_UNREADABLE_INTRO)}</p>
-          <p style="font-size:13px;margin:0;font-family:${sans};">${linkRow(refSections.unreadable)}</p>`;
-      }
-    } else if (schedule.includeReferenceLinks) {
+    // With interest groups set up, the sites were already rendered in the body, per group.
+    if (!combined && schedule.includeReferenceLinks) {
       const refLinks = parseReferenceLinks(schedule.referenceLinks);
       if (refLinks.length > 0) {
         linksHtml += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:28px 0 14px;">

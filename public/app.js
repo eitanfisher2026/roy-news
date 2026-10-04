@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.63';
+const VERSION = 'v3.64';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2813,13 +2813,13 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
                     {g.events.map((e, i) => (
                       <div key={i} style={{ marginBottom: 6 }}>
                         <a href={e.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontWeight: 600 }}>{e.title} ↗</a>
-                        {(e.dates || e.venue) && <div style={{ fontSize: 11, color: '#cbd5e1' }}>{[e.dates, e.venue].filter(Boolean).join(' · ')}</div>}
+                        {(e.dates || e.venue || e.site) && <div style={{ fontSize: 11, color: '#cbd5e1' }}>{[e.dates, e.venue, e.site ? `via ${e.site}` : ''].filter(Boolean).join(' · ')}</div>}
                       </div>
                     ))}
                     {g.events.length === 0 && <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>Nothing new listed this week.</div>}
                     {g.links.length > 0 && (
-                      <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>
-                        More at: {g.links.map((l, i) => (
+                      <div style={{ fontSize: 11, color: C.faint, marginTop: 8, lineHeight: 1.7 }}>
+                        Sites followed for this group: {g.links.map((l, i) => (
                           <span key={l.url}>{i > 0 && ' · '}<a href={l.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontSize: 11 }}>{l.name} ↗</a></span>
                         ))}
                       </div>
@@ -2832,9 +2832,12 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
               <div className="no-print" style={{ marginTop: 18, paddingTop: 12, borderTop: '1px solid ' + C.border }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: '#60a5fa', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>More places to check — no automatic highlights</div>
                 <div style={{ fontSize: 11, color: C.faint, marginBottom: 8 }}>These sites can't be read automatically, so nothing from them is highlighted above. Visit them directly to see what's on.</div>
-                {unreadable.map(l => (
-                  <div key={l.url} style={{ marginBottom: 3 }}>
-                    <a href={l.url} target="_blank" rel="noopener noreferrer" style={linkStyle}>{l.name} ↗</a>
+                {[...new Set(unreadable.map(l => l.group || 'Other'))].map(groupName => (
+                  <div key={groupName} style={{ fontSize: 12, color: C.text, marginBottom: 5, lineHeight: 1.7 }}>
+                    <span style={{ fontWeight: 600 }}>{groupName}:</span>{' '}
+                    {unreadable.filter(l => (l.group || 'Other') === groupName).map((l, i) => (
+                      <span key={l.url}>{i > 0 && ' · '}<a href={l.url} target="_blank" rel="noopener noreferrer" style={linkStyle}>{l.name} ↗</a></span>
+                    ))}
                   </div>
                 ))}
               </div>

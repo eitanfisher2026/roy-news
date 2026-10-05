@@ -1392,7 +1392,7 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
   if (combined) {
     const partLabel = `font-size:10.5px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#90949c;margin:0 0 8px;font-family:${sans};`;
     const note = `font-size:12px;color:#90949c;font-family:${sans};`;
-    const linkStyle = 'color:#1a56db;text-decoration:underline;';
+    const linkStyle = 'color:#1d5fbf;text-decoration:none;';
     const linkRow = links => links.map(l => `<a href="${escapeHtml(l.url)}" style="${linkStyle}">${escapeHtml(l.name)}</a>`).join(' &nbsp;·&nbsp; ');
     body += `<p style="${note}line-height:1.5;margin:0 0 6px;">${escapeHtml(REF_COMBINED_INTRO)}</p>`;
     combined.groups.forEach((g, gi) => {
@@ -1467,7 +1467,7 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
         linksHtml += `<hr style="border:none;border-top:1px solid #e7e5e0;margin:28px 0 14px;">
           <p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 8px;font-family:${sans};">Source Websites</p>
           <p style="font-size:12px;color:#90949c;margin:0 0 10px;font-family:${sans};">The outlets this report draws from — visit them directly for the full picture beyond what's summarized above.</p>
-          ${sourceLinks.map(s => `<p style="font-size:13px;margin:0 0 4px;font-family:${sans};"><a href="${escapeHtml(s.websiteUrl)}" style="${combined ? 'color:#1a56db;text-decoration:underline;' : 'color:#3e5c76;text-decoration:none;'}">${escapeHtml(s.name)}${combined ? '' : ' ↗'}</a></p>`).join('')}`;
+          ${sourceLinks.map(s => `<p style="font-size:13px;margin:0 0 4px;font-family:${sans};"><a href="${escapeHtml(s.websiteUrl)}" style="${combined ? 'color:#1d5fbf;text-decoration:none;' : 'color:#3e5c76;text-decoration:none;'}">${escapeHtml(s.name)}${combined ? '' : ' ↗'}</a></p>`).join('')}`;
       }
     }
     // With interest groups set up, the sites were already rendered in the body, per group.

@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.66';
+const VERSION = 'v3.67';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2776,7 +2776,7 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
         const groups = schedule.referenceGroups.map(g => ({ title: g.title, links: g.links || [], events: eventsByTitle[g.title] || [], articles: byGroup[g.title] || [] }));
         if (general.length > 0) groups.push({ title: 'General Culture', links: [], events: [], articles: general, newsOnly: true });
         const unreadable = schedule.referenceUnreadable || [];
-        const linkStyle = { color: '#60a5fa', fontSize: 12, textDecoration: 'underline' };
+        const linkStyle = { color: '#60a5fa', fontSize: 12, textDecoration: 'none' };
         const siteUrls = {};
         schedule.referenceGroups.forEach(g => (g.links || []).forEach(l => { siteUrls[l.name] = l.url; }));
         const normUrl = u => String(u || '').trim().toLowerCase().replace(/^https?:\/\/(www\.)?/, '').replace(/[\/#?]+$/, '');
@@ -2798,7 +2798,7 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
                       <div key={ai} style={{ marginBottom: 8, padding: '8px 10px', background: '#0f1e35', borderRadius: 6 }}>
                         {a.link
                           ? <a href={a.link} target="_blank" rel="noopener noreferrer"
-                              style={{ color: '#60a5fa', fontSize: 12, fontWeight: 600, lineHeight: 1.4, textDecoration: 'underline', display: 'block', marginBottom: 2 }}>{a.title}</a>
+                              style={{ color: '#60a5fa', fontSize: 12, fontWeight: 600, lineHeight: 1.4, textDecoration: 'none', display: 'block', marginBottom: 2 }}>{a.title}</a>
                           : <div style={{ fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 2 }}>{a.title}</div>
                         }
                         <div style={{ fontSize: 11, color: C.faint, marginBottom: 3 }}>{a.sourceName}</div>

@@ -1190,6 +1190,20 @@ function refEventMeta(e, hebrew) {
   return [refEventField(e, 'dates', hebrew), refEventVenue(e, hebrew), e.site ? `via ${e.site}` : ''].filter(Boolean).join(' · ');
 }
 const REF_GROUP_SITES_LABEL = 'Sites followed for this group';
+function refEventKey(title) {
+  return String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+// The report generated on the day the website lists were refreshed is the
+// one worth flagging to readers — on the other days the lists are unchanged.
+function refRefreshedForRun(schedule, run) {
+  const refreshedAt = schedule.referenceHighlights?.refreshedAt;
+  return !!refreshedAt && !!run.generatedAt && run.runType !== 'weekly' && refreshedAt.slice(0, 10) === run.generatedAt.slice(0, 10);
+}
+function refRefreshNote(newCount) {
+  return newCount > 0
+    ? `Updated today: the “Coming up” lists were refreshed from the websites. ${newCount} new event${newCount === 1 ? ' is' : 's are'} marked NEW.`
+    : 'Updated today: the “Coming up” lists were refreshed from the websites.';
+}
 function groupUnreadable(list) {
   const out = [];
   for (const l of list) {
@@ -1231,13 +1245,15 @@ function buildCombinedSections(schedule, run) {
   if (general.length > 0) groups.push({ title: REF_GENERAL_GROUP, articles: general, events: [], links: [], newsOnly: true });
   const siteUrls = {};
   sections.groups.forEach(g => g.links.forEach(l => { siteUrls[l.name] = l.url; }));
-  return { ...sections, groups, siteUrls };
+  const newCount = groups.reduce((n, g) => n + g.events.filter(e => e.isNew).length, 0);
+  return { ...sections, groups, siteUrls, newCount, refreshedToday: refRefreshedForRun(schedule, run) };
 }
 function refEventsLabel(sections) {
   return sections.refreshedAt ? `${REF_EVENTS_LABEL} (last updated ${formatLongDateLabel(sections.refreshedAt.slice(0, 10))})` : REF_EVENTS_LABEL;
 }
 function buildCombinedText(c, hebrew) {
   let text = `${REF_COMBINED_INTRO}\n`;
+  if (c.refreshedToday) text += `${refRefreshNote(c.newCount)}\n`;
   for (const g of c.groups) {
     text += `\n${g.title.toUpperCase()}\n`;
     if (g.articles.length > 0) {
@@ -1252,7 +1268,7 @@ function buildCombinedText(c, hebrew) {
       text += `  ${refEventsLabel(c)}\n`;
       for (const e of g.events) {
         const meta = refEventMeta(e, hebrew);
-        text += `   - ${refEventField(e, 'title', hebrew)}${meta ? ` (${meta})` : ''}\n     ${e.url}\n`;
+        text += `   - ${e.isNew ? '[NEW] ' : ''}${refEventField(e, 'title', hebrew)}${meta ? ` (${meta})` : ''}\n     ${e.url}\n`;
       }
       if (g.events.length === 0) text += `   Nothing new listed this week.\n`;
       if (g.links.length > 0) text += `  ${REF_GROUP_SITES_LABEL}\n`;
@@ -1395,6 +1411,7 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
     const linkStyle = 'color:#1d5fbf;text-decoration:none;';
     const linkRow = links => links.map(l => `<a href="${escapeHtml(l.url)}" style="${linkStyle}">${escapeHtml(l.name)}</a>`).join(' &nbsp;·&nbsp; ');
     body += `<p style="${note}line-height:1.5;margin:0 0 6px;">${escapeHtml(REF_COMBINED_INTRO)}</p>`;
+    if (combined.refreshedToday) body += `<p style="font-size:13px;font-weight:600;color:#9a3412;background:#fff4e6;border-radius:3px;padding:8px 12px;line-height:1.5;margin:10px 0 0;font-family:${sans};">${escapeHtml(refRefreshNote(combined.newCount))}</p>`;
     combined.groups.forEach((g, gi) => {
       body += `<p style="font-size:15px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#ffffff;background:#1a3050;padding:9px 12px;border-radius:3px;margin:${gi === 0 ? '18px' : '32px'} 0 16px;font-family:${sans};">${escapeHtml(g.title)}</p>`;
       if (g.articles.length > 0) {
@@ -1419,7 +1436,7 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
           const siteUrl = sameRefUrl(combined.siteUrls[e.site], e.url) ? null : combined.siteUrls[e.site];
           const metaParts = [refEventField(e, 'dates', rtl), refEventVenue(e, rtl)].filter(Boolean).map(escapeHtml);
           if (e.site) metaParts.push(siteUrl ? `via <a href="${escapeHtml(siteUrl)}" style="${linkStyle}">${escapeHtml(e.site)}</a>` : `via ${escapeHtml(e.site)}`);
-          body += `<p${contentDir} style="font-size:13.5px;line-height:1.45;margin:0 0 9px;font-family:${sans};${contentAlign}"><a href="${escapeHtml(e.url)}" style="${linkStyle}font-weight:600;">${escapeHtml(refEventField(e, 'title', rtl))}</a>${metaParts.length ? `<br><span style="font-size:12.5px;color:#6b7078;">${metaParts.join(' · ')}</span>` : ''}</p>`;
+          body += `<p${contentDir} style="font-size:13.5px;line-height:1.45;margin:0 0 9px;font-family:${sans};${contentAlign}"><a href="${escapeHtml(e.url)}" style="${linkStyle}font-weight:600;">${escapeHtml(refEventField(e, 'title', rtl))}</a>${e.isNew ? '<span style="font-size:10px;font-weight:700;letter-spacing:0.04em;color:#ffffff;background:#d9480f;border-radius:3px;padding:1px 5px;margin-left:6px;">NEW</span>' : ''}${metaParts.length ? `<br><span style="font-size:12.5px;color:#6b7078;">${metaParts.join(' · ')}</span>` : ''}</p>`;
         });
         if (g.events.length === 0) body += `<p style="${note}margin:0 0 6px;">Nothing new listed this week.</p>`;
         if (g.links.length > 0) body += `<p style="font-size:12px;color:#90949c;line-height:1.6;margin:10px 0 0;font-family:${sans};">${REF_GROUP_SITES_LABEL}: ${linkRow(g.links)}</p>`;
@@ -1613,7 +1630,7 @@ async function sendReportEmail(schedule, run) {
   // Hebrew-locale UI from bidi-reordering the "dd/Mon" date prefix when it
   // renders the opened-message subject line (mobile/list views already
   // rendered it fine; only that one RTL-paragraph area needed the hint).
-  const subject = `‎${formatEmailDateRange(run)} ${titlePart}`;
+  const subject = `‎${formatEmailDateRange(run)} ${titlePart}${refRefreshedForRun(schedule, run) && Array.isArray(schedule.referenceGroups) && schedule.includeReferenceLinks ? ' · new events this week' : ''}`;
 
   // The run itself doesn't carry each source's website URL (only id/name/
   // lean) — only fetched when actually needed (daily report, section
@@ -2881,6 +2898,13 @@ async function refreshReferenceHighlights(schedule, now) {
     } catch (e) {
       console.error('refreshReferenceHighlights: Hebrew translation failed', e.message);
     }
+  }
+  // "New" = not in the list this refresh replaces. Nothing is marked on the
+  // very first refresh, when there is no earlier list to compare with.
+  const previous = (schedule.referenceHighlights?.groups || []).flatMap(g => g.events || []);
+  if (previous.length > 0) {
+    const previousKeys = new Set(previous.map(e => refEventKey(e.title)));
+    for (const e of allEvents) if (!previousKeys.has(refEventKey(e.title))) e.isNew = true;
   }
   return { refreshedAt: now.toISOString(), groups };
 }

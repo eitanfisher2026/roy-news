@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.68';
+const VERSION = 'v3.69';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2784,6 +2784,14 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
         const eventsLabel = 'Coming up · updated weekly' + (highlights.refreshedAt ? ` (last updated ${new Date(highlights.refreshedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })})` : '');
         return (
           <div style={{ marginBottom: 20 }}>
+            {highlights.refreshedAt && run.generatedAt && highlights.refreshedAt.slice(0, 10) === run.generatedAt.slice(0, 10) && (() => {
+              const newCount = groups.reduce((n, g) => n + g.events.filter(e => e.isNew).length, 0);
+              return (
+                <div style={{ fontSize: 12, fontWeight: 600, color: '#fdba74', background: '#3b1d0a', borderRadius: 5, padding: '7px 10px', marginBottom: 8, lineHeight: 1.5 }}>
+                  Updated today: the “Coming up” lists were refreshed from the websites.{newCount > 0 ? ` ${newCount} new event${newCount === 1 ? ' is' : 's are'} marked NEW.` : ''}
+                </div>
+              );
+            })()}
             <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.6, marginBottom: 6 }}>How to read this report: “Today's news” comes from the news feeds and is updated every day. “Coming up” is gathered from venue and festival websites and is updated once a week.</div>
             {displayDays.length === 0 && !displayRun.summary && (
               <div style={{ color: C.faint, fontSize: 13, padding: '6px 0' }}>No new articles from the news feeds today — the upcoming events below are still current.</div>
@@ -2816,6 +2824,7 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
                     {g.events.map((e, i) => (
                       <div key={i} style={{ marginBottom: 6 }}>
                         <a href={e.url} target="_blank" rel="noopener noreferrer" style={{ ...linkStyle, fontWeight: 600 }}>{e.title}</a>
+                        {e.isNew && <span style={{ fontSize: 9, fontWeight: 700, color: '#fff', background: '#d9480f', borderRadius: 3, padding: '1px 5px', marginLeft: 6, letterSpacing: 0.4 }}>NEW</span>}
                         <div style={{ fontSize: 11, color: '#cbd5e1' }}>
                           {[e.dates, (e.venue || '').trim().toLowerCase() === (e.site || '').trim().toLowerCase() ? '' : e.venue].filter(Boolean).join(' · ')}
                           {e.site && <span>{(e.dates || e.venue) ? ' · ' : ''}via {siteUrls[e.site] && normUrl(siteUrls[e.site]) !== normUrl(e.url)

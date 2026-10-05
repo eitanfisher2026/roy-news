@@ -2814,15 +2814,18 @@ async function aggregateWeeklyFromDailyRuns(scheduleId, schedule, weeklyPeriodEn
   };
 }
 
-// Refresh follows the schedule's weekly-report day when it has one;
-// otherwise every 7 days. Checked only at the schedule's daily hour, right
-// before that day's report, so the report carries the fresh highlights.
+// Refresh happens on the schedule's own referenceRefreshDay when one is set,
+// otherwise every 7 days. Deliberately independent of weeklyDay: setting a
+// weekly day also creates (and can email) a weekly summary report, which a
+// schedule may not want just to pick the refresh day. Checked only at the
+// schedule's daily hour, right before that day's report, so the report
+// carries the fresh highlights.
 function referenceHighlightsDue(schedule, now) {
   if (!schedule.includeReferenceLinks || !Array.isArray(schedule.referenceGroups) || schedule.referenceGroups.length === 0) return false;
   const last = schedule.referenceHighlights?.refreshedAt;
   if (!last) return true;
   if (last.slice(0, 10) === now.toISOString().slice(0, 10)) return false;
-  if (schedule.weeklyDay) return WEEKDAYS[now.getUTCDay()] === schedule.weeklyDay;
+  if (WEEKDAYS.includes(schedule.referenceRefreshDay)) return WEEKDAYS[now.getUTCDay()] === schedule.referenceRefreshDay;
   return now.getTime() - new Date(last).getTime() >= 6.5 * 24 * 60 * 60 * 1000;
 }
 
@@ -3194,10 +3197,11 @@ exports.updateSchedule = onCall(
     if (updates.searchScope !== undefined) updates.searchScope = updates.searchScope === 'domestic' ? 'domestic' : 'global';
     if (updates.sectionedSummary !== undefined) updates.sectionedSummary = !!updates.sectionedSummary;
     if (updates.includeDailySummary !== undefined) updates.includeDailySummary = updates.includeDailySummary !== false;
+    if (updates.referenceRefreshDay !== undefined) updates.referenceRefreshDay = WEEKDAYS.includes(updates.referenceRefreshDay) ? updates.referenceRefreshDay : '';
     if (updates.referenceLinks !== undefined) updates.referenceLinks = String(updates.referenceLinks || '').trim().slice(0, 2000);
     if (updates.includeReferenceLinks !== undefined) updates.includeReferenceLinks = !!updates.includeReferenceLinks;
     if (updates.includeSourceLinks !== undefined) updates.includeSourceLinks = !!updates.includeSourceLinks;
-    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope', 'sectionedSummary', 'includeDailySummary', 'referenceLinks', 'includeReferenceLinks', 'includeSourceLinks'];
+    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope', 'sectionedSummary', 'includeDailySummary', 'referenceRefreshDay', 'referenceLinks', 'includeReferenceLinks', 'includeSourceLinks'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
     if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');

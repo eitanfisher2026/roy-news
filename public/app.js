@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.67';
+const VERSION = 'v3.68';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -3175,6 +3175,9 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [editDailySummaryWords, setEditDailySummaryWords] = useState(200);
   const [editSectionedSummary, setEditSectionedSummary] = useState(false);
   const [editIncludeDailySummary, setEditIncludeDailySummary] = useState(true);
+  // Only for a report set up with interest groups (website events gathered weekly).
+  const [editHasReferenceGroups, setEditHasReferenceGroups] = useState(false);
+  const [editReferenceRefreshDay, setEditReferenceRefreshDay] = useState('');
   const [editIncludeSourceLinks, setEditIncludeSourceLinks] = useState(false);
   const [editIncludeReferenceLinks, setEditIncludeReferenceLinks] = useState(false);
   const [editReferenceLinks, setEditReferenceLinks] = useState('');
@@ -3246,6 +3249,8 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditDailySummaryWords(s.dailySummaryWords || 200);
     setEditSectionedSummary(!!s.sectionedSummary);
     setEditIncludeDailySummary(s.includeDailySummary !== false);
+    setEditHasReferenceGroups(Array.isArray(s.referenceGroups) && s.referenceGroups.length > 0);
+    setEditReferenceRefreshDay(s.referenceRefreshDay || '');
     setEditIncludeSourceLinks(!!s.includeSourceLinks);
     setEditIncludeReferenceLinks(!!s.includeReferenceLinks);
     setEditReferenceLinks(s.referenceLinks || '');
@@ -3289,6 +3294,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       ],
       sourceIds: [...editSelected]
     };
+    if (editHasReferenceGroups) fields.referenceRefreshDay = editReferenceRefreshDay;
     setSavingEdit(true);
     try {
       await fns.httpsCallable('updateSchedule')({ scheduleId: schedule.id, ...fields });
@@ -3876,6 +3882,16 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
               <div style={{ fontSize: 10, color: C.faint, marginTop: -6, marginBottom: 10 }}>Need a new topic, or want to change one's mode/word lists? Settings → Topics.</div>
               <SearchScopeToggle value={editSearchScope} onChange={setEditSearchScope} />
 
+              {editHasReferenceGroups && (
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Website events ("Coming up") refresh day</label>
+                  <select value={editReferenceRefreshDay} onChange={e => setEditReferenceRefreshDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%', maxWidth: 260 }}>
+                    <option value="">Every 7 days</option>
+                    {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
+                  </select>
+                  <div style={{ fontSize: 10, color: C.faint, marginTop: 4 }}>The websites are read once a week on this day, at the daily report time, and shown in every daily report. No weekly report is needed for this.</div>
+                </div>
+              )}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
                 <div style={{ flex: 1, minWidth: 130 }}>
                   <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly digest day</label>

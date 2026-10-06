@@ -42,7 +42,12 @@ self.addEventListener('fetch', (event) => {
     // cached copy is only a fallback for genuinely offline loads.
     event.respondWith(
       fetch(req).then(resp => {
-        if (resp && resp.ok) caches.open(CACHE).then(cache => cache.put(req, resp.clone()));
+        // Clone now, not inside the async callback — by then the page has
+        // started reading the original and it can no longer be cloned.
+        if (resp && resp.ok) {
+          const copy = resp.clone();
+          caches.open(CACHE).then(cache => cache.put(req, copy));
+        }
         return resp;
       }).catch(() => caches.match(req))
     );

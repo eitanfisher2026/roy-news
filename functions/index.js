@@ -1123,6 +1123,13 @@ function formatShortDate(dayStr) {
   const d = new Date(dayStr + 'T00:00:00Z');
   return `${String(d.getUTCDate()).padStart(2, '0')}/${MONTH_NAMES[d.getUTCMonth()].slice(0, 3)}`;
 }
+// A weekly events digest looks ahead, so its dates run from the day it is
+// sent to the next report a week later — not the past week its articles
+// were collected over (periodStart/periodEnd, which a news digest shows).
+function digestWeekAhead(run) {
+  const start = String(run.generatedAt || '').slice(0, 10) || addDaysUTC(run.periodEnd, 1);
+  return { start, end: addDaysUTC(start, 7) };
+}
 // Daily: one short date. Weekly: dd/Mon-dd/Mon range across the period.
 function formatEmailDateRange(run) {
   if (run.runType === 'weekly' && run.periodStart && run.periodEnd) {
@@ -1316,7 +1323,7 @@ function buildRawReportText(schedule, run, sourceWebsites = {}, hebrew = false) 
   const topics = run.topics || schedule.topics || [];
   const combined = buildCombinedSections(schedule, run);
   let text = combined
-    ? `${(schedule.reportTitle || '').trim() || titleCase(schedule.country)} — ${combined.isWeekly ? 'Weekly Report' : 'Daily Collection'}\n`
+    ? `${(schedule.reportTitle || '').trim() || titleCase(schedule.country)} — ${combined.isWeekly ? 'Weekly Report' : 'Daily Collection'}\n${combined.isWeekly ? `${formatLongDateLabel(digestWeekAhead(run).start)} – ${formatLongDateLabel(digestWeekAhead(run).end)}\n` : ''}`
     : `${titleCase(schedule.country)}\n`;
   if (topics.length > 0 && !combined) text += `Topics: ${topics.join(', ')}\n`;
   if (combined) { if (combined.articleCount === 0) text += `\n${combined.wording.noNews}\n`; }
@@ -1400,7 +1407,10 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
   const days = isWeekly ? [] : (run.days || []);
   const kind = isWeekly ? 'Weekly' : 'Daily';
   const isMultiDay = days.length > 1;
-  const dateHeader = isWeekly && run.periodStart && run.periodEnd
+  const digestWeek = isWeekly && isEventsDigest(schedule) ? digestWeekAhead(run) : null;
+  const dateHeader = digestWeek
+    ? `${formatLongDateLabel(digestWeek.start)} – ${formatLongDateLabel(digestWeek.end)}`
+    : isWeekly && run.periodStart && run.periodEnd
     ? `${formatLongDateLabel(run.periodStart)} – ${formatLongDateLabel(run.periodEnd)}`
     : isMultiDay
       ? `${formatLongDateLabel(days[0].day)} – ${formatLongDateLabel(days[days.length - 1].day)}`
@@ -1648,11 +1658,13 @@ async function sendReportEmail(schedule, run) {
   // schedule that hasn't set one, so subjects still stay distinct enough to
   // avoid the Gmail-threading collision this used to guard against.
   const titlePart = (schedule.reportTitle || '').trim() || scheduleShortTopicLabel(schedule) || titleCase(schedule.country);
+  const weekAhead = isEventsDigest(schedule) && run.runType === 'weekly' ? digestWeekAhead(run) : null;
+  const emailDatePart = weekAhead ? `${formatShortDate(weekAhead.start)}-${formatShortDate(weekAhead.end)}` : formatEmailDateRange(run);
   // Leading U+200E (left-to-right mark) — invisible, but stops Gmail's
   // Hebrew-locale UI from bidi-reordering the "dd/Mon" date prefix when it
   // renders the opened-message subject line (mobile/list views already
   // rendered it fine; only that one RTL-paragraph area needed the hint).
-  const subject = `‎${formatEmailDateRange(run)} ${titlePart}${isEventsDigest(schedule) && run.runType === 'weekly' ? ' · Weekly' : ''}`;
+  const subject = `‎${emailDatePart} ${titlePart}${isEventsDigest(schedule) && run.runType === 'weekly' ? ' · Weekly' : ''}`;
 
   // The run itself doesn't carry each source's website URL (only id/name/
   // lean) — only fetched when actually needed (daily report, section
@@ -3797,6 +3809,17 @@ exports.shareSchedule = onCall(
     if (email === (schedule.createdByEmail || '').toLowerCase()) {
       throw new HttpsError('invalid-argument', 'That email is already the owner');
     }
+    // Removing access must work for anyone listed on the schedule, including
+    // someone who has since been removed from Manage Users — the checks
+    // below are only about whether a person can be given access.
+    if (level === null) {
+      const removals = {};
+      for (const [uid, entry] of Object.entries(schedule.sharedWith || {})) {
+        if ((entry?.email || '').toLowerCase() === email) removals[`schedules/${scheduleId}/sharedWith/${uid}`] = null;
+      }
+      if (Object.keys(removals).length > 0) await db.ref().update(removals);
+      return { ok: true };
+    }
     const role = await getRole(email);
     if (!role) {
       throw new HttpsError('failed-precondition',
@@ -3809,11 +3832,7 @@ exports.shareSchedule = onCall(
         `${email} hasn't signed in to PressWatch yet.\n\nHow to fix: ask them to log in once, then share again.`
       );
     }
-    if (level === null) {
-      await db.ref(`schedules/${scheduleId}/sharedWith/${targetUid}`).remove();
-    } else {
-      await db.ref(`schedules/${scheduleId}/sharedWith/${targetUid}`).set({ email, level });
-    }
+    await db.ref(`schedules/${scheduleId}/sharedWith/${targetUid}`).set({ email, level });
     return { ok: true };
   }
 );

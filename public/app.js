@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.69';
+const VERSION = 'v3.70';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2638,17 +2638,19 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
   // Weekly only ever shows its summary, never the day-by-day articles —
   // those still get collected server-side (the summary is extracted from
   // them), just never surfaced on their own for a weekly report.
-  const displayDays = displayRun.runType === 'weekly' ? [] : (displayRun.days || []);
-  const isMultiDay = displayDays.length > 1;
-  // Set up per schedule in the database (no editing UI): articles and weekly
-  // website events are shown together under each interest group.
-  const combinedLayout = (run.runType || 'daily') !== 'weekly' && !!schedule?.includeReferenceLinks
+  // An "events digest" report (set up per schedule in the database) is a
+  // weekly report by interest group: the week's articles plus events read
+  // from websites. Unlike a news report's weekly digest, it shows its articles.
+  const combinedLayout = schedule?.reportType === 'eventsDigest'
     && Array.isArray(schedule.referenceGroups) && schedule.referenceGroups.length > 0;
+  const isWeeklyRun = (run.runType || 'daily') === 'weekly';
+  const displayDays = (displayRun.runType === 'weekly' && !combinedLayout) ? [] : (displayRun.days || []);
+  const isMultiDay = displayDays.length > 1;
 
   // Both daily and weekly now always get a summary automatically at
   // generation time — this on-demand button only matters as a backfill for
   // an older report from before that was true.
-  const canSummarize = (run.runType || 'daily') !== 'weekly' && !run.summary;
+  const canSummarize = !combinedLayout && (run.runType || 'daily') !== 'weekly' && !run.summary;
 
   async function handleSummarize() {
     setSummarizing(true);
@@ -2754,7 +2756,7 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>Topics: {run.topics.join(', ')}</div>
       )}
 
-      {displayRun.summary && (
+      {displayRun.summary && !combinedLayout && (
         <div style={{ marginBottom: 20, padding: '10px 12px', background: '#0f1e35', borderRadius: 8, border: '1px solid ' + C.border }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: '#60a5fa', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>Summary</div>
           <div style={{ fontSize: 13, color: '#cbd5e1', lineHeight: 1.7 }}><SummaryBlocks summary={displayRun.summary} /></div>
@@ -2768,7 +2770,11 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
         const titles = new Set(schedule.referenceGroups.map(g => g.title));
         const byGroup = {};
         const general = [];
-        displayDays.forEach(d => (d.sources || []).forEach(s => (s.articles || []).forEach(a => {
+        const seenLinks = new Set();
+        let articleCount = 0;
+        [...displayDays].sort((a, b) => String(b.day).localeCompare(String(a.day))).forEach(d => (d.sources || []).forEach(s => (s.articles || []).forEach(a => {
+          if (a.link) { if (seenLinks.has(a.link)) return; seenLinks.add(a.link); }
+          articleCount++;
           const item = { ...a, sourceName: s.sourceName };
           if (titles.has(a.group)) (byGroup[a.group] = byGroup[a.group] || []).push(item);
           else general.push(item);
@@ -2781,27 +2787,31 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
         schedule.referenceGroups.forEach(g => (g.links || []).forEach(l => { siteUrls[l.name] = l.url; }));
         const normUrl = u => String(u || '').trim().toLowerCase().replace(/^https?:\/\/(www\.)?/, '').replace(/[\/#?]+$/, '');
         const partLabel = { fontSize: 10, fontWeight: 700, color: C.faint, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 6 };
-        const eventsLabel = 'Coming up · updated weekly' + (highlights.refreshedAt ? ` (last updated ${new Date(highlights.refreshedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })})` : '');
+        const newCount = groups.reduce((n, g) => n + g.events.filter(e => e.isNew).length, 0);
+        const eventsLabel = 'Coming up' + (highlights.refreshedAt ? ` (as of ${new Date(highlights.refreshedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' })})` : '');
         return (
           <div style={{ marginBottom: 20 }}>
-            {highlights.refreshedAt && run.generatedAt && highlights.refreshedAt.slice(0, 10) === run.generatedAt.slice(0, 10) && (() => {
-              const newCount = groups.reduce((n, g) => n + g.events.filter(e => e.isNew).length, 0);
-              return (
-                <div style={{ fontSize: 12, fontWeight: 600, color: '#fdba74', background: '#3b1d0a', borderRadius: 5, padding: '7px 10px', marginBottom: 8, lineHeight: 1.5 }}>
-                  Updated today: the “Coming up” lists were refreshed from the websites.{newCount > 0 ? ` ${newCount} new event${newCount === 1 ? ' is' : 's are'} marked NEW.` : ''}
-                </div>
-              );
-            })()}
-            <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.6, marginBottom: 6 }}>How to read this report: “Today's news” comes from the news feeds and is updated every day. “Coming up” is gathered from venue and festival websites and is updated once a week.</div>
-            {displayDays.length === 0 && !displayRun.summary && (
-              <div style={{ color: C.faint, fontSize: 13, padding: '6px 0' }}>No new articles from the news feeds today — the upcoming events below are still current.</div>
+            <div style={{ fontSize: 11, color: C.faint, lineHeight: 1.6, marginBottom: 6 }}>
+              {isWeeklyRun
+                ? 'How to read this report: under each interest group, “This week\'s news” lists articles published over the past seven days, and “Coming up” lists events gathered from venue and festival websites when this report was prepared.'
+                : 'This is the daily collection behind the weekly report. “Today\'s news” shows the articles gathered today; “Coming up” is the events list from the last weekly report.'}
+            </div>
+            {isWeeklyRun && newCount > 0 && (
+              <div style={{ fontSize: 12, fontWeight: 600, color: '#fdba74', background: '#3b1d0a', borderRadius: 5, padding: '7px 10px', marginBottom: 8, lineHeight: 1.5 }}>
+                {newCount} event{newCount === 1 ? ' is' : 's are'} new since last week's report and marked NEW.
+              </div>
+            )}
+            {articleCount === 0 && (
+              <div style={{ color: C.faint, fontSize: 13, padding: '6px 0' }}>
+                {isWeeklyRun ? 'No new articles from the news feeds this week — the upcoming events below are current.' : 'No new articles from the news feeds today.'}
+              </div>
             )}
             {groups.map(g => (
               <div key={g.title} style={{ marginTop: 22 }}>
                 <div style={{ fontSize: 14, fontWeight: 800, color: '#fff', background: '#1e3a5f', padding: '7px 10px', borderRadius: 5, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.6 }}>{g.title}</div>
                 {g.articles.length > 0 && (
                   <div style={{ marginBottom: g.newsOnly ? 0 : 12 }}>
-                    <div style={partLabel}>Today's news · updated daily</div>
+                    <div style={partLabel}>{isWeeklyRun ? "This week's news" : "Today's news"}</div>
                     {g.articles.map((a, ai) => (
                       <div key={ai} style={{ marginBottom: 8, padding: '8px 10px', background: '#0f1e35', borderRadius: 6 }}>
                         {a.link
@@ -2895,7 +2905,7 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
 
       {/* Opt-in per schedule (off by default) and daily-only — mirrors the
           same two sections added to the emailed report. */}
-      {(run.runType || 'daily') !== 'weekly' && schedule?.includeSourceLinks && (() => {
+      {((run.runType || 'daily') !== 'weekly' || combinedLayout) && schedule?.includeSourceLinks && (() => {
         const sourceLinks = (schedule.sourceIds || []).map(id => sourceWebsites[id]).filter(s => s?.websiteUrl).sort((a, b) => a.name.localeCompare(b.name));
         if (sourceLinks.length === 0) return null;
         return (
@@ -3184,9 +3194,8 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [editDailySummaryWords, setEditDailySummaryWords] = useState(200);
   const [editSectionedSummary, setEditSectionedSummary] = useState(false);
   const [editIncludeDailySummary, setEditIncludeDailySummary] = useState(true);
-  // Only for a report set up with interest groups (website events gathered weekly).
-  const [editHasReferenceGroups, setEditHasReferenceGroups] = useState(false);
-  const [editReferenceRefreshDay, setEditReferenceRefreshDay] = useState('');
+  // Report type 'eventsDigest' (weekly, by interest group) hides the news-report-only settings.
+  const [editIsDigest, setEditIsDigest] = useState(false);
   const [editIncludeSourceLinks, setEditIncludeSourceLinks] = useState(false);
   const [editIncludeReferenceLinks, setEditIncludeReferenceLinks] = useState(false);
   const [editReferenceLinks, setEditReferenceLinks] = useState('');
@@ -3258,8 +3267,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditDailySummaryWords(s.dailySummaryWords || 200);
     setEditSectionedSummary(!!s.sectionedSummary);
     setEditIncludeDailySummary(s.includeDailySummary !== false);
-    setEditHasReferenceGroups(Array.isArray(s.referenceGroups) && s.referenceGroups.length > 0);
-    setEditReferenceRefreshDay(s.referenceRefreshDay || '');
+    setEditIsDigest(s.reportType === 'eventsDigest');
     setEditIncludeSourceLinks(!!s.includeSourceLinks);
     setEditIncludeReferenceLinks(!!s.includeReferenceLinks);
     setEditReferenceLinks(s.referenceLinks || '');
@@ -3303,7 +3311,6 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       ],
       sourceIds: [...editSelected]
     };
-    if (editHasReferenceGroups) fields.referenceRefreshDay = editReferenceRefreshDay;
     setSavingEdit(true);
     try {
       await fns.httpsCallable('updateSchedule')({ scheduleId: schedule.id, ...fields });
@@ -3891,19 +3898,14 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
               <div style={{ fontSize: 10, color: C.faint, marginTop: -6, marginBottom: 10 }}>Need a new topic, or want to change one's mode/word lists? Settings → Topics.</div>
               <SearchScopeToggle value={editSearchScope} onChange={setEditSearchScope} />
 
-              {editHasReferenceGroups && (
-                <div style={{ marginBottom: 10 }}>
-                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Website events ("Coming up") refresh day</label>
-                  <select value={editReferenceRefreshDay} onChange={e => setEditReferenceRefreshDay(e.target.value)} className="input-field" style={{ fontSize: 13, width: '100%', maxWidth: 260 }}>
-                    <option value="">Every 7 days</option>
-                    {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
-                  </select>
-                  <div style={{ fontSize: 10, color: C.faint, marginTop: 4 }}>The websites are read once a week on this day, at the daily report time, and shown in every daily report. No weekly report is needed for this.</div>
+              {editIsDigest && (
+                <div style={{ marginBottom: 12, padding: '9px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border, fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
+                  <strong style={{ color: C.text }}>Weekly events report.</strong> One email a week, organized by interest group: the week's articles from the feeds below, plus upcoming events read from the followed websites just before sending. The feeds are still collected every day in the background.
                 </div>
               )}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
                 <div style={{ flex: 1, minWidth: 130 }}>
-                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly digest day</label>
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>{editIsDigest ? 'Weekly report day' : 'Weekly digest day'}</label>
                   <select value={editWeeklyDay} onChange={e => { setEditWeeklyDay(e.target.value); if (!e.target.value) setEditSendWeeklyEmail(false); }} className="input-field" style={{ fontSize: 13, width: '100%' }}>
                     <option value="">None (daily only)</option>
                     {WEEKDAY_OPTIONS.map(d => <option key={d} value={d}>{d[0].toUpperCase()}{d.slice(1)}</option>)}
@@ -3916,16 +3918,18 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   </div>
                 )}
                 <div style={{ flex: 1, minWidth: 110 }}>
-                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily report time</label>
+                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>{editIsDigest ? 'Daily feed collection time' : 'Daily report time'}</label>
                   <LocalTimeSelect utcHour={editDailyHourUtc} onChangeUtc={setEditDailyHourUtc} />
                 </div>
-                <div style={{ flex: 1, minWidth: 140 }}>
-                  <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily summary (words)</label>
-                  <input type="number" min="50" max="1000" value={editDailySummaryWords}
-                    onChange={e => setEditDailySummaryWords(parseInt(e.target.value) || 200)}
-                    className="input-field" style={{ fontSize: 13, width: '100%' }} />
-                </div>
-                {editWeeklyDay && (
+                {!editIsDigest && (
+                  <div style={{ flex: 1, minWidth: 140 }}>
+                    <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Daily summary (words)</label>
+                    <input type="number" min="50" max="1000" value={editDailySummaryWords}
+                      onChange={e => setEditDailySummaryWords(parseInt(e.target.value) || 200)}
+                      className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                  </div>
+                )}
+                {editWeeklyDay && !editIsDigest && (
                   <div style={{ flex: 1, minWidth: 140 }}>
                     <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly summary (words)</label>
                     <input type="number" min="50" max="1000" value={editWeeklySummaryWords}
@@ -3934,35 +3938,49 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                   </div>
                 )}
               </div>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 10 }}>
-                <input type="checkbox" checked={editIncludeDailySummary} onChange={e => setEditIncludeDailySummary(e.target.checked)} /> Include a summary at the top of daily reports
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 10 }}>
-                <input type="checkbox" checked={editSectionedSummary} onChange={e => setEditSectionedSummary(e.target.checked)} /> Organize summary by topic (off = one flowing paragraph)
-              </label>
+              {!editIsDigest && (
+                <>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 10 }}>
+                    <input type="checkbox" checked={editIncludeDailySummary} onChange={e => setEditIncludeDailySummary(e.target.checked)} /> Include a summary at the top of daily reports
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 10 }}>
+                    <input type="checkbox" checked={editSectionedSummary} onChange={e => setEditSectionedSummary(e.target.checked)} /> Organize summary by topic (off = one flowing paragraph)
+                  </label>
+                </>
+              )}
 
               <div style={{ marginBottom: 14, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 8 }}>
-                  <input type="checkbox" checked={editIncludeSourceLinks} onChange={e => setEditIncludeSourceLinks(e.target.checked)} /> Include source website links (daily reports only)
+                  <input type="checkbox" checked={editIncludeSourceLinks} onChange={e => setEditIncludeSourceLinks(e.target.checked)} /> {editIsDigest ? 'List the feed sources\' websites at the end of the report' : 'Include source website links (daily reports only)'}
                 </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 6 }}>
-                  <input type="checkbox" checked={editIncludeReferenceLinks} onChange={e => setEditIncludeReferenceLinks(e.target.checked)} /> Include reference links (daily reports only)
-                </label>
-                <div style={{ fontSize: 10, color: C.faint, marginBottom: 6 }}>
-                  For sites with no RSS feed the report can't pull articles from — shown as plain links only, never read by the AI. Separate with commas.
-                </div>
-                <input value={editReferenceLinks} onChange={e => setEditReferenceLinks(e.target.value)}
-                  placeholder="e.g. https://example.com, https://another-site.com"
-                  className="input-field" style={{ fontSize: 12, width: '100%' }} />
+                {editIsDigest ? (
+                  <div style={{ fontSize: 10, color: C.faint }}>
+                    The websites read for upcoming events, and the interest groups they belong to, are managed for this report behind the scenes — ask to add, remove or regroup them.
+                  </div>
+                ) : (
+                  <>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer', marginBottom: 6 }}>
+                      <input type="checkbox" checked={editIncludeReferenceLinks} onChange={e => setEditIncludeReferenceLinks(e.target.checked)} /> Include reference links (daily reports only)
+                    </label>
+                    <div style={{ fontSize: 10, color: C.faint, marginBottom: 6 }}>
+                      For sites with no RSS feed the report can't pull articles from — shown as plain links only, never read by the AI. Separate with commas.
+                    </div>
+                    <input value={editReferenceLinks} onChange={e => setEditReferenceLinks(e.target.value)}
+                      placeholder="e.g. https://example.com, https://another-site.com"
+                      className="input-field" style={{ fontSize: 12, width: '100%' }} />
+                  </>
+                )}
               </div>
               <UtcTimeInfo hourUtc={editHourUtc} dailyHourUtc={editDailyHourUtc} open={editTimeInfoOpen} onToggle={() => setEditTimeInfoOpen(o => !o)} />
 
               <div style={{ marginBottom: 14, padding: '10px 12px', background: C.bg, borderRadius: 7, border: '1px solid ' + C.border }}>
                 <label style={{ fontSize: 12, color: C.text, fontWeight: 600, display: 'block', marginBottom: 8 }}>📧 Send by email</label>
                 <div style={{ display: 'flex', gap: 16, marginBottom: 8 }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={editSendDailyEmail} onChange={e => setEditSendDailyEmail(e.target.checked)} /> Daily
-                  </label>
+                  {!editIsDigest && (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={editSendDailyEmail} onChange={e => setEditSendDailyEmail(e.target.checked)} /> Daily
+                    </label>
+                  )}
                   {editWeeklyDay && (
                     <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.muted, cursor: 'pointer' }}>
                       <input type="checkbox" checked={editSendWeeklyEmail} onChange={e => setEditSendWeeklyEmail(e.target.checked)} /> Weekly

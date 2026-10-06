@@ -1193,16 +1193,17 @@ const REF_GROUP_SITES_LABEL = 'Sites followed for this group';
 function refEventKey(title) {
   return String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
-// The report generated on the day the website lists were refreshed is the
-// one worth flagging to readers — on the other days the lists are unchanged.
-function refRefreshedForRun(schedule, run) {
-  const refreshedAt = schedule.referenceHighlights?.refreshedAt;
-  return !!refreshedAt && !!run.generatedAt && run.runType !== 'weekly' && refreshedAt.slice(0, 10) === run.generatedAt.slice(0, 10);
+// Two kinds of scheduled report. A plain schedule is a news report (daily
+// articles by source, with summaries). reportType 'eventsDigest' is a
+// weekly report organized by interest group: the week's feed articles plus
+// events read from websites right before it is sent. Its daily runs still
+// happen — they are how the week's articles get collected, and how a broken
+// feed shows up in-app within a day — but are never emailed or summarized.
+function isEventsDigest(schedule) {
+  return schedule.reportType === 'eventsDigest' && Array.isArray(schedule.referenceGroups) && schedule.referenceGroups.length > 0;
 }
-function refRefreshNote(newCount) {
-  return newCount > 0
-    ? `Updated today: the “Coming up” lists were refreshed from the websites. ${newCount} new event${newCount === 1 ? ' is' : 's are'} marked NEW.`
-    : 'Updated today: the “Coming up” lists were refreshed from the websites.';
+function refNewNote(newCount) {
+  return `${newCount} event${newCount === 1 ? ' is' : 's are'} new since last week's report and marked NEW.`;
 }
 function groupUnreadable(list) {
   const out = [];
@@ -1221,20 +1222,35 @@ function groupUnreadable(list) {
 // untagged ones — older runs, or a failed tagging call — fall into a
 // general group so nothing is ever dropped.
 const REF_GENERAL_GROUP = 'General Culture';
-const REF_COMBINED_INTRO = "How to read this report: “Today's news” comes from the news feeds and is updated every day. “Coming up” is gathered from venue and festival websites and is updated once a week.";
-const REF_NEWS_LABEL = "Today's news · updated daily";
-const REF_EVENTS_LABEL = 'Coming up · updated weekly';
-const REF_NO_NEWS_TODAY = 'No new articles from the news feeds today — the upcoming events below are still current.';
+const REF_EVENTS_LABEL = 'Coming up';
+const REF_WORDING = {
+  weekly: {
+    intro: "How to read this report: under each interest group, “This week's news” lists articles published over the past seven days, and “Coming up” lists events gathered from venue and festival websites when this report was prepared.",
+    news: "This week's news",
+    noNews: 'No new articles from the news feeds this week — the upcoming events below are current.'
+  },
+  daily: {
+    intro: "This is the daily collection behind the weekly report. “Today's news” shows the articles gathered today; “Coming up” is the events list from the last weekly report.",
+    news: "Today's news",
+    noNews: 'No new articles from the news feeds today.'
+  }
+};
 function buildCombinedSections(schedule, run) {
-  if (run.runType === 'weekly' || !schedule.includeReferenceLinks) return null;
+  if (!isEventsDigest(schedule)) return null;
   const sections = buildReferenceSections(schedule);
   if (!sections) return null;
   const titles = new Set(sections.groups.map(g => g.title));
   const byGroup = {};
   const general = [];
-  for (const d of (run.days || [])) {
+  const seenLinks = new Set();
+  let articleCount = 0;
+  // Newest day first — in a weekly report the most recent articles matter most.
+  for (const d of [...(run.days || [])].sort((a, b) => String(b.day).localeCompare(String(a.day)))) {
     for (const s of (d.sources || [])) {
       for (const a of (s.articles || [])) {
+        // A feed can re-list the same article on a later day of the week.
+        if (a.link) { if (seenLinks.has(a.link)) continue; seenLinks.add(a.link); }
+        articleCount++;
         const item = { ...a, sourceName: s.sourceName };
         if (titles.has(a.group)) (byGroup[a.group] = byGroup[a.group] || []).push(item);
         else general.push(item);
@@ -1246,18 +1262,19 @@ function buildCombinedSections(schedule, run) {
   const siteUrls = {};
   sections.groups.forEach(g => g.links.forEach(l => { siteUrls[l.name] = l.url; }));
   const newCount = groups.reduce((n, g) => n + g.events.filter(e => e.isNew).length, 0);
-  return { ...sections, groups, siteUrls, newCount, refreshedToday: refRefreshedForRun(schedule, run) };
+  const isWeekly = run.runType === 'weekly';
+  return { ...sections, groups, siteUrls, newCount, articleCount, isWeekly, wording: REF_WORDING[isWeekly ? 'weekly' : 'daily'] };
 }
 function refEventsLabel(sections) {
-  return sections.refreshedAt ? `${REF_EVENTS_LABEL} (last updated ${formatLongDateLabel(sections.refreshedAt.slice(0, 10))})` : REF_EVENTS_LABEL;
+  return sections.refreshedAt ? `${REF_EVENTS_LABEL} (as of ${formatLongDateLabel(sections.refreshedAt.slice(0, 10))})` : REF_EVENTS_LABEL;
 }
 function buildCombinedText(c, hebrew) {
-  let text = `${REF_COMBINED_INTRO}\n`;
-  if (c.refreshedToday) text += `${refRefreshNote(c.newCount)}\n`;
+  let text = `${c.wording.intro}\n`;
+  if (c.isWeekly && c.newCount > 0) text += `${refNewNote(c.newCount)}\n`;
   for (const g of c.groups) {
     text += `\n${g.title.toUpperCase()}\n`;
     if (g.articles.length > 0) {
-      text += `  ${REF_NEWS_LABEL}\n`;
+      text += `  ${c.wording.news}\n`;
       for (const a of g.articles) {
         text += `   ${a.title} (${a.sourceName})\n   ${a.text}\n`;
         if (a.translationFailed) text += `   ⚠ Could not translate this article right now — shown in its original language.\n`;
@@ -1298,14 +1315,17 @@ function buildRawReportText(schedule, run, sourceWebsites = {}, hebrew = false) 
   const isMultiDay = days.length > 1;
   const topics = run.topics || schedule.topics || [];
   const combined = buildCombinedSections(schedule, run);
-  let text = `${titleCase(schedule.country)}\n`;
-  if (topics.length > 0) text += `Topics: ${topics.join(', ')}\n`;
-  if (run.summary) text += `\nSummary\n${run.summary.replace(/\*\*(.+?)\*\*/g, '$1')}\n`;
+  let text = combined
+    ? `${(schedule.reportTitle || '').trim() || titleCase(schedule.country)} — ${combined.isWeekly ? 'Weekly Report' : 'Daily Collection'}\n`
+    : `${titleCase(schedule.country)}\n`;
+  if (topics.length > 0 && !combined) text += `Topics: ${topics.join(', ')}\n`;
+  if (combined) { if (combined.articleCount === 0) text += `\n${combined.wording.noNews}\n`; }
+  else if (run.summary) text += `\nSummary\n${run.summary.replace(/\*\*(.+?)\*\*/g, '$1')}\n`;
   // Weekly already showed this; daily just went straight from the topics
   // line to the footer with nothing explaining the gap, which reads as
   // broken rather than "a quiet day" (confirmed in production 2026-09-14 —
   // Culture in Bangkok's report for 12/09 matched nothing and looked empty).
-  else if (days.length === 0) text += combined ? `\n${REF_NO_NEWS_TODAY}\n` : `\nNothing matched your topics today — none of your sources published anything relevant. This is normal on a quiet news day; check back tomorrow.\n`;
+  else if (days.length === 0) text += `\nNothing matched your topics today — none of your sources published anything relevant. This is normal on a quiet news day; check back tomorrow.\n`;
   text += '\n';
   if (combined) text += buildCombinedText(combined, hebrew);
   for (const d of (combined ? [] : days)) {
@@ -1319,7 +1339,7 @@ function buildRawReportText(schedule, run, sourceWebsites = {}, hebrew = false) 
       }
     }
   }
-  if (run.runType !== 'weekly') {
+  if (run.runType !== 'weekly' || combined) {
     if (schedule.includeSourceLinks) {
       const sourceLinks = buildSourceLinksList(schedule, sourceWebsites);
       if (sourceLinks.length > 0) {
@@ -1392,7 +1412,9 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
 
   // Weekly shows only the summary (no trailing rule when there's no article
   // listing to separate it from) — daily keeps both, unchanged.
-  const summaryHtml = run.summary
+  const summaryHtml = combined
+    ? (combined.articleCount === 0 ? `<p style="font-size:14.5px;color:#90949c;font-family:${sans};">${escapeHtml(combined.wording.noNews)}</p>` : '')
+    : run.summary
     ? `
           <p style="font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:#3e5c76;margin:0 0 10px;font-family:${sans};">Summary</p>
           <div style="margin:0 0 ${days.length > 0 ? '8px' : '0'};">${renderSummaryBlocks(run.summary, sans, contentDir, contentAlign)}</div>
@@ -1402,7 +1424,7 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
       // Same reasoning as buildRawReportText's text version — a daily
       // report with nothing summarized and no articles previously just
       // went straight to the footer with no explanation at all.
-      : (days.length === 0 ? `<p style="font-size:14.5px;color:#90949c;font-family:${sans};">${combined ? escapeHtml(REF_NO_NEWS_TODAY) : 'Nothing matched your topics today — none of your sources published anything relevant. This is normal on a quiet news day; check back tomorrow.'}</p>` : ''));
+      : (days.length === 0 ? `<p style="font-size:14.5px;color:#90949c;font-family:${sans};">Nothing matched your topics today — none of your sources published anything relevant. This is normal on a quiet news day; check back tomorrow.</p>` : ''));
 
   let body = '';
   if (combined) {
@@ -1410,12 +1432,12 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
     const note = `font-size:12px;color:#90949c;font-family:${sans};`;
     const linkStyle = 'color:#1d5fbf;text-decoration:none;';
     const linkRow = links => links.map(l => `<a href="${escapeHtml(l.url)}" style="${linkStyle}">${escapeHtml(l.name)}</a>`).join(' &nbsp;·&nbsp; ');
-    body += `<p style="${note}line-height:1.5;margin:0 0 6px;">${escapeHtml(REF_COMBINED_INTRO)}</p>`;
-    if (combined.refreshedToday) body += `<p style="font-size:13px;font-weight:600;color:#9a3412;background:#fff4e6;border-radius:3px;padding:8px 12px;line-height:1.5;margin:10px 0 0;font-family:${sans};">${escapeHtml(refRefreshNote(combined.newCount))}</p>`;
+    body += `<p style="${note}line-height:1.5;margin:0 0 6px;">${escapeHtml(combined.wording.intro)}</p>`;
+    if (combined.isWeekly && combined.newCount > 0) body += `<p style="font-size:13px;font-weight:600;color:#9a3412;background:#fff4e6;border-radius:3px;padding:8px 12px;line-height:1.5;margin:10px 0 0;font-family:${sans};">${escapeHtml(refNewNote(combined.newCount))}</p>`;
     combined.groups.forEach((g, gi) => {
       body += `<p style="font-size:15px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:#ffffff;background:#1a3050;padding:9px 12px;border-radius:3px;margin:${gi === 0 ? '18px' : '32px'} 0 16px;font-family:${sans};">${escapeHtml(g.title)}</p>`;
       if (g.articles.length > 0) {
-        body += `<p style="${partLabel}">${escapeHtml(REF_NEWS_LABEL)}</p>`;
+        body += `<p style="${partLabel}">${escapeHtml(combined.wording.news)}</p>`;
         g.articles.forEach(a => {
           const titleHtml = a.link
             ? `<a href="${escapeHtml(a.link)}" style="${linkStyle}">${escapeHtml(a.title)}</a>`
@@ -1477,7 +1499,7 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
   // a weekly digest is a summary-only artifact already, no per-source
   // listing to hang a "here are the sites" section off of.
   let linksHtml = '';
-  if (!isWeekly) {
+  if (!isWeekly || combined) {
     if (schedule.includeSourceLinks) {
       const sourceLinks = buildSourceLinksList(schedule, sourceWebsites);
       if (sourceLinks.length > 0) {
@@ -1506,9 +1528,9 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
       <div style="background:#ffffff;border-radius:3px;box-shadow:0 1px 2px rgba(20,22,26,0.06),0 8px 24px rgba(20,22,26,0.07);">
         <div style="padding:30px 28px 36px;font-family:${sans};">
           <p style="font-family:Georgia,'Times New Roman',serif;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#90949c;margin:0 0 16px;">PressWatch</p>
-          <p style="font-size:19px;font-weight:600;margin:0 0 3px;letter-spacing:-0.005em;color:#1c1e21;">${escapeHtml(titleCase(schedule.country))} — ${kind} Report</p>
+          <p style="font-size:19px;font-weight:600;margin:0 0 3px;letter-spacing:-0.005em;color:#1c1e21;">${combined ? `${escapeHtml((schedule.reportTitle || '').trim() || titleCase(schedule.country))} — ${isWeekly ? 'Weekly Report' : 'Daily Collection'}` : `${escapeHtml(titleCase(schedule.country))} — ${kind} Report`}</p>
           <p style="font-size:13px;color:#90949c;margin:0 0 3px;">${escapeHtml(dateHeader)}</p>
-          ${topics.length > 0 ? `<p style="font-size:13px;color:#90949c;margin:0 0 20px;">Topics: ${escapeHtml(topics.join(', '))}</p>` : ''}
+          ${topics.length > 0 && !combined ? `<p style="font-size:13px;color:#90949c;margin:0 0 20px;">Topics: ${escapeHtml(topics.join(', '))}</p>` : (combined ? '<p style="margin:0 0 17px;"></p>' : '')}
           <hr style="border:none;border-top:1px solid #e7e5e0;margin:0 0 22px;">
           ${summaryHtml}
           ${body}
@@ -1630,13 +1652,13 @@ async function sendReportEmail(schedule, run) {
   // Hebrew-locale UI from bidi-reordering the "dd/Mon" date prefix when it
   // renders the opened-message subject line (mobile/list views already
   // rendered it fine; only that one RTL-paragraph area needed the hint).
-  const subject = `‎${formatEmailDateRange(run)} ${titlePart}${refRefreshedForRun(schedule, run) && Array.isArray(schedule.referenceGroups) && schedule.includeReferenceLinks ? ' · new events this week' : ''}`;
+  const subject = `‎${formatEmailDateRange(run)} ${titlePart}${isEventsDigest(schedule) && run.runType === 'weekly' ? ' · Weekly' : ''}`;
 
   // The run itself doesn't carry each source's website URL (only id/name/
   // lean) — only fetched when actually needed (daily report, section
   // switched on) to avoid a pointless DB read on every other send.
   let sourceWebsites = {};
-  if (schedule.includeSourceLinks && run.runType !== 'weekly') {
+  if (schedule.includeSourceLinks && (run.runType !== 'weekly' || isEventsDigest(schedule))) {
     try {
       const sourcesSnap = await db.ref(`countries/${schedule.countryKey}/setup/sources`).once('value');
       for (const s of (sourcesSnap.val() || [])) sourceWebsites[s.id] = { name: s.name, websiteUrl: s.websiteUrl };
@@ -2486,8 +2508,10 @@ async function loadTopicGuidance(topicNames) {
 // article text is deliberately not sent. Groups marked eventsOnly (e.g. a
 // general city-wide events listing) never receive articles.
 async function assignArticleGroups(schedule, days, ai) {
-  if (!schedule.includeReferenceLinks || !Array.isArray(schedule.referenceGroups) || schedule.referenceGroups.length === 0) return null;
-  const articles = days.flatMap(d => (d.sources || []).flatMap(s => s.articles || []));
+  if (!isEventsDigest(schedule)) return null;
+  // Only articles not tagged yet, so the weekly pass can cheaply catch any a
+  // daily pass missed (a failed call, or runs from before tagging existed).
+  const articles = days.flatMap(d => (d.sources || []).flatMap(s => s.articles || [])).filter(a => !a.group);
   if (articles.length === 0) return null;
   const titles = schedule.referenceGroups.filter(g => !g.eventsOnly).map(g => g.title);
   const prompt = `Assign each article below to the single best-fitting category. Use 0 when none clearly fits.
@@ -2506,8 +2530,10 @@ Reply with ONLY a JSON object mapping each article number to a category number, 
     let map = {};
     try { map = JSON.parse(match[0]); } catch {}
     articles.forEach((a, i) => {
-      const title = titles[Number(map[String(i + 1)]) - 1];
-      if (title) a.group = title;
+      const answer = map[String(i + 1)];
+      // An explicit "none of these" is remembered too, so the weekly pass
+      // only re-asks about articles the model never answered for.
+      if (answer !== undefined) a.group = titles[Number(answer) - 1] || REF_GENERAL_GROUP;
     });
   }
   return usage;
@@ -2746,6 +2772,7 @@ Weekly summary:`;
 // schedule explicitly stores false). The manual Summarize button and the
 // weekly summary are unaffected.
 function wantsDailySummary(schedule) {
+  if (isEventsDigest(schedule)) return false;
   return schedule.includeDailySummary !== false;
 }
 
@@ -2807,8 +2834,22 @@ async function aggregateWeeklyFromDailyRuns(scheduleId, schedule, weeklyPeriodEn
     .sort((a, b) => a.day.localeCompare(b.day));
 
   let summary = null, costUsd = 0, inputTokens = 0, outputTokens = 0;
+  if (isEventsDigest(schedule)) {
+    try {
+      const usage = await assignArticleGroups(schedule, days, ai);
+      if (usage) {
+        inputTokens = usage.input_tokens || 0;
+        outputTokens = usage.output_tokens || 0;
+        costUsd = calcCostUsd(ai, inputTokens, outputTokens);
+        await persistCost(schedule.createdBy, schedule.createdByEmail, ai, costUsd);
+      }
+    } catch (e) {
+      console.error('assignArticleGroups (weekly) failed', e.message);
+    }
+  }
   try {
-    const result = await generateWeeklySummary(schedule, days, ai);
+    // An events digest lists the week's articles themselves; it has no summary.
+    const result = isEventsDigest(schedule) ? null : await generateWeeklySummary(schedule, days, ai);
     if (result) {
       summary = result.text;
       inputTokens = result.usage?.input_tokens || 0;
@@ -2829,21 +2870,6 @@ async function aggregateWeeklyFromDailyRuns(scheduleId, schedule, weeklyPeriodEn
     days, topics: schedule.topics || [], summary,
     runType: 'weekly', costUsd, inputTokens, outputTokens, provider: ai.type, model: ai.model, status: 'ok'
   };
-}
-
-// Refresh happens on the schedule's own referenceRefreshDay when one is set,
-// otherwise every 7 days. Deliberately independent of weeklyDay: setting a
-// weekly day also creates (and can email) a weekly summary report, which a
-// schedule may not want just to pick the refresh day. Checked only at the
-// schedule's daily hour, right before that day's report, so the report
-// carries the fresh highlights.
-function referenceHighlightsDue(schedule, now) {
-  if (!schedule.includeReferenceLinks || !Array.isArray(schedule.referenceGroups) || schedule.referenceGroups.length === 0) return false;
-  const last = schedule.referenceHighlights?.refreshedAt;
-  if (!last) return true;
-  if (last.slice(0, 10) === now.toISOString().slice(0, 10)) return false;
-  if (WEEKDAYS.includes(schedule.referenceRefreshDay)) return WEEKDAYS[now.getUTCDay()] === schedule.referenceRefreshDay;
-  return now.getTime() - new Date(last).getTime() >= 6.5 * 24 * 60 * 60 * 1000;
 }
 
 // One page read + one cheap AI call per site that has an eventsUrl, once a
@@ -2980,27 +3006,6 @@ exports.generateScheduledReports = onSchedule(
       // on. This is the base layer: it's what lets a broken feed show up
       // in-app within a day instead of staying silent for a week. Runs at
       // its own hour (dailyHourUtc), independent from weekly's (hourUtc). ──
-      if (now.getUTCHours() === dailyHour && referenceHighlightsDue(schedule, now)) {
-        try {
-          const claimDay = now.toISOString().slice(0, 10);
-          let claimed = false;
-          await db.ref(`schedules/${scheduleId}/referenceHighlightsClaim`).transaction(current => {
-            if (current === claimDay) return;
-            claimed = true;
-            return claimDay;
-          });
-          if (claimed) {
-            const highlights = await refreshReferenceHighlights(schedule, now);
-            if (highlights) {
-              await db.ref(`schedules/${scheduleId}/referenceHighlights`).set(highlights);
-              schedule.referenceHighlights = highlights;
-            }
-          }
-        } catch (e) {
-          console.error('refreshReferenceHighlights failed', e.message);
-        }
-      }
-
       if (now.getUTCHours() === dailyHour) {
         // Already produced today's daily report — guards against a double-fire
         // within the same due hour, not a real recurrence.
@@ -3052,7 +3057,7 @@ exports.generateScheduledReports = onSchedule(
             if (Object.keys(pendingDeletions).length > 0) {
               try { await db.ref().update(pendingDeletions); } catch {}
             }
-            if (schedule.sendDailyEmail) {
+            if (schedule.sendDailyEmail && !isEventsDigest(schedule)) {
               // A second, independent atomic claim, checked as late as
               // possible (right before the actual send) — belt-and-
               // suspenders on top of dailyClaimPeriod above. Confirmed
@@ -3106,6 +3111,21 @@ exports.generateScheduledReports = onSchedule(
           try {
             const aiSettingsSnap = await db.ref(`users/${schedule.createdBy}/ai`).once('value');
             const ai = makeReportAI(aiSettingsSnap.val() || {});
+            // An events digest reads its websites right before the weekly
+            // report is built, so the report carries this week's events. A
+            // failed read must not stop the report — it then goes out with
+            // the previous list, which is labeled with its own date.
+            if (isEventsDigest(schedule)) {
+              try {
+                const highlights = await refreshReferenceHighlights(schedule, now);
+                if (highlights) {
+                  await db.ref(`schedules/${scheduleId}/referenceHighlights`).set(highlights);
+                  schedule.referenceHighlights = highlights;
+                }
+              } catch (e) {
+                console.error('refreshReferenceHighlights failed', e.message);
+              }
+            }
             const weeklyRun = await aggregateWeeklyFromDailyRuns(scheduleId, schedule, periodEnd, now, ai);
             await weeklyRunRef.set(weeklyRun);
             await db.ref(`schedules/${scheduleId}`).update({ lastWeeklyRunAt: now.toISOString(), lastWeeklyRunStatus: 'ok', lastWeeklyPeriodEnd: periodEnd });
@@ -3221,11 +3241,10 @@ exports.updateSchedule = onCall(
     if (updates.searchScope !== undefined) updates.searchScope = updates.searchScope === 'domestic' ? 'domestic' : 'global';
     if (updates.sectionedSummary !== undefined) updates.sectionedSummary = !!updates.sectionedSummary;
     if (updates.includeDailySummary !== undefined) updates.includeDailySummary = updates.includeDailySummary !== false;
-    if (updates.referenceRefreshDay !== undefined) updates.referenceRefreshDay = WEEKDAYS.includes(updates.referenceRefreshDay) ? updates.referenceRefreshDay : '';
     if (updates.referenceLinks !== undefined) updates.referenceLinks = String(updates.referenceLinks || '').trim().slice(0, 2000);
     if (updates.includeReferenceLinks !== undefined) updates.includeReferenceLinks = !!updates.includeReferenceLinks;
     if (updates.includeSourceLinks !== undefined) updates.includeSourceLinks = !!updates.includeSourceLinks;
-    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope', 'sectionedSummary', 'includeDailySummary', 'referenceRefreshDay', 'referenceLinks', 'includeReferenceLinks', 'includeSourceLinks'];
+    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope', 'sectionedSummary', 'includeDailySummary', 'referenceLinks', 'includeReferenceLinks', 'includeSourceLinks'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
     if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');
@@ -3288,7 +3307,11 @@ async function sweepScheduleReportRuns(scheduleId, schedule, retentionDays) {
     // instead of 'ok', so 'ok' already implies the send succeeded whenever
     // it was attempted. Every run generated from here on stamps emailSent
     // explicitly, so this bridge stops mattering as old runs age out.
-    const emailConfirmed = run.emailSent === true ||
+    // An events digest never emails its daily runs — their durable copy is
+    // the weekly report that absorbed them, so only those already covered
+    // by a generated weekly report count as safe to delete.
+    const absorbedByWeekly = isEventsDigest(schedule) && !!schedule.lastWeeklyPeriodEnd && run.periodEnd <= schedule.lastWeeklyPeriodEnd;
+    const emailConfirmed = run.emailSent === true || absorbedByWeekly ||
       (run.emailSent === undefined && run.status === 'ok' && schedule.sendDailyEmail === true);
     if (run.status === 'ok' && emailConfirmed) {
       deletions[`reportRuns/${scheduleId}/${runId}`] = null;

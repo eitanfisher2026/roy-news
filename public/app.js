@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.71';
+const VERSION = 'v3.72';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -2763,6 +2763,12 @@ function RawScheduledRunView({ scheduleCountry, schedule, sourceWebsites = {}, d
         </div>
       )}
 
+      {!combinedLayout && !isWeeklyRun && run.relevantTotal > 0 && (
+        <div style={{ fontSize: 11, color: C.faint, marginBottom: 10 }}>
+          Showing {displayDays.reduce((n, d) => n + (d.sources || []).reduce((m, so) => m + (so.articles || []).length, 0), 0)} of {run.relevantTotal} matching articles — the daily limit is set in the report's settings.
+        </div>
+      )}
+
       {combinedLayout && (() => {
         const highlights = schedule.referenceHighlights || {};
         const eventsByTitle = {};
@@ -3070,6 +3076,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [newTimeInfoOpen, setNewTimeInfoOpen] = useState(false);
   const [newWeeklySummaryWords, setNewWeeklySummaryWords] = useState(400);
   const [newDailySummaryWords, setNewDailySummaryWords] = useState(200);
+  const [newMaxArticlesPerDay, setNewMaxArticlesPerDay] = useState(30);
   const [newSectionedSummary, setNewSectionedSummary] = useState(false);
   const [newIncludeDailySummary, setNewIncludeDailySummary] = useState(true);
   const [newIncludeSourceLinks, setNewIncludeSourceLinks] = useState(false);
@@ -3192,6 +3199,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
   const [editTimeInfoOpen, setEditTimeInfoOpen] = useState(false);
   const [editWeeklySummaryWords, setEditWeeklySummaryWords] = useState(400);
   const [editDailySummaryWords, setEditDailySummaryWords] = useState(200);
+  const [editMaxArticlesPerDay, setEditMaxArticlesPerDay] = useState(30);
   const [editSectionedSummary, setEditSectionedSummary] = useState(false);
   const [editIncludeDailySummary, setEditIncludeDailySummary] = useState(true);
   // Report type 'eventsDigest' (weekly, by interest group) hides the news-report-only settings.
@@ -3265,6 +3273,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     setEditDailyHourUtc(s.dailyHourUtc ?? s.hourUtc);
     setEditWeeklySummaryWords(s.weeklySummaryWords || 400);
     setEditDailySummaryWords(s.dailySummaryWords || 200);
+    setEditMaxArticlesPerDay(s.maxArticlesPerDay ?? 30);
     setEditSectionedSummary(!!s.sectionedSummary);
     setEditIncludeDailySummary(s.includeDailySummary !== false);
     setEditIsDigest(s.reportType === 'eventsDigest');
@@ -3301,7 +3310,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
     const fields = {
       reportTitle: editReportTitle.trim(),
       topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: editSearchScope,
-      weeklyDay: editWeeklyDay, hourUtc: editHourUtc, dailyHourUtc: editDailyHourUtc, weeklySummaryWords: editWeeklySummaryWords, dailySummaryWords: editDailySummaryWords,
+      weeklyDay: editWeeklyDay, hourUtc: editHourUtc, dailyHourUtc: editDailyHourUtc, weeklySummaryWords: editWeeklySummaryWords, dailySummaryWords: editDailySummaryWords, maxArticlesPerDay: editMaxArticlesPerDay,
       sectionedSummary: editSectionedSummary, includeDailySummary: editIncludeDailySummary,
       includeSourceLinks: editIncludeSourceLinks, includeReferenceLinks: editIncludeReferenceLinks, referenceLinks: editReferenceLinks,
       sendDailyEmail: editSendDailyEmail, sendWeeklyEmail: editSendWeeklyEmail,
@@ -3373,7 +3382,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       await fns.httpsCallable('createSchedule')({
         country: selectedCountry.country, countryKey: selectedCountry.countryKey, reportTitle: newReportTitle.trim(),
         sourceIds: [...newSourceIds], topics, contextTopics: topics.filter(t => topicRegistry[t]?.mode === 'classify'), searchScope: newSearchScope,
-        weeklyDay: newWeeklyDay, hourUtc: newHourUtc, dailyHourUtc: newDailyHourUtc, weeklySummaryWords: newWeeklySummaryWords, dailySummaryWords: newDailySummaryWords,
+        weeklyDay: newWeeklyDay, hourUtc: newHourUtc, dailyHourUtc: newDailyHourUtc, weeklySummaryWords: newWeeklySummaryWords, dailySummaryWords: newDailySummaryWords, maxArticlesPerDay: newMaxArticlesPerDay,
         sectionedSummary: newSectionedSummary, includeDailySummary: newIncludeDailySummary,
         includeSourceLinks: newIncludeSourceLinks, includeReferenceLinks: newIncludeReferenceLinks, referenceLinks: newReferenceLinks,
         sendDailyEmail: newSendDailyEmail, sendWeeklyEmail: newSendWeeklyEmail,
@@ -3385,7 +3394,7 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
       setCreateMsg('✓ Schedule created');
       setShowCreate(false);
       setNewCountryKey(''); setNewSourceIds(new Set()); setNewSelectedTopics(new Set()); setNewSearchScope('global'); setEstimate(null); setNewReportTitle('');
-      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipientsEn(''); setNewEmailRecipientsHe(''); setNewWeeklySummaryWords(400); setNewDailySummaryWords(200); setNewDailyHourUtc(6); setNewSectionedSummary(false); setNewIncludeDailySummary(true);
+      setNewSendDailyEmail(false); setNewSendWeeklyEmail(false); setNewEmailRecipientsEn(''); setNewEmailRecipientsHe(''); setNewWeeklySummaryWords(400); setNewDailySummaryWords(200); setNewMaxArticlesPerDay(30); setNewDailyHourUtc(6); setNewSectionedSummary(false); setNewIncludeDailySummary(true);
       await loadSchedules();
     } catch (e) {
       setCreateMsg('⚠ ' + e.message);
@@ -3782,6 +3791,12 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                         onChange={e => setNewDailySummaryWords(parseInt(e.target.value) || 200)}
                         className="input-field" style={{ fontSize: 13, width: '100%' }} />
                     </div>
+                  <div style={{ flex: 1, minWidth: 140 }}>
+                    <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Max articles per day (0 = no limit)</label>
+                    <input type="number" min="0" max="500" value={newMaxArticlesPerDay}
+                      onChange={e => { const n = parseInt(e.target.value, 10); setNewMaxArticlesPerDay(Number.isFinite(n) && n >= 0 ? Math.min(n, 500) : 0); }}
+                      className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                  </div>
                     {newWeeklyDay && (
                       <div style={{ flex: 1, minWidth: 140 }}>
                         <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly summary (words)</label>
@@ -3929,6 +3944,12 @@ function ScheduledReportsPanel({ user, countries, defaultOpen = false }) {
                       className="input-field" style={{ fontSize: 13, width: '100%' }} />
                   </div>
                 )}
+                  <div style={{ flex: 1, minWidth: 140 }}>
+                    <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Max articles per day (0 = no limit)</label>
+                    <input type="number" min="0" max="500" value={editMaxArticlesPerDay}
+                      onChange={e => { const n = parseInt(e.target.value, 10); setEditMaxArticlesPerDay(Number.isFinite(n) && n >= 0 ? Math.min(n, 500) : 0); }}
+                      className="input-field" style={{ fontSize: 13, width: '100%' }} />
+                  </div>
                 {editWeeklyDay && !editIsDigest && (
                   <div style={{ flex: 1, minWidth: 140 }}>
                     <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>Weekly summary (words)</label>

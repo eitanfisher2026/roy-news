@@ -111,7 +111,7 @@ function parseEvents(raw, link) {
 async function extractSiteEvents(callAI, ai, link, todayIso, interest) {
   const page = await fetchPageText(link.eventsUrl || link.url);
   if (!page.ok) return { readable: false, reason: page.reason, events: [], usage: null };
-  const { text, usage } = await callAI(ai, buildPrompt(link, page.text, todayIso, interest), 3000);
+  const { text, usage } = await callAI(ai, buildPrompt(link, page.text, todayIso, interest), 3000, { thinking: 'low' });
   return { readable: true, events: parseEvents(text, link), usage };
 }
 

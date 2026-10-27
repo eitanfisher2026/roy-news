@@ -128,6 +128,8 @@ const PRICING = {
     'gemini-3.1-pro-preview':    { in: 2.00, out: 12.00 },
     'gemini-omni-flash-preview': { in: 1.50, out: 9.00 },
     'gemini-3-flash-preview':    { in: 0.30, out: 2.50 },
+    // Introductory price through 2026-12-31; Google doubles it (1.50 / 7.50) from 2027-01-01.
+    'gemini-3.6-flash':          { in: 0.75, out: 3.75 },
   },
   openai: {
     'gpt-4o-mini':   { in: 0.15, out: 0.60 },
@@ -215,14 +217,27 @@ function makeReportAI(data, forTranslation = false) {
   return makeAI(data, forTranslation);
 }
 
-async function callAI(ai, prompt, maxTokens) {
+// opts.thinking ('minimal' | 'low') caps how much a Gemini thinking model
+// reasons before answering. That hidden reasoning is billed at the output
+// rate — confirmed 2026-10-27 that gemini-3.6-flash spent ~12x more tokens
+// thinking than answering on a simple classification. Routine, high-volume
+// calls (classification, translation) pass a cap; summaries don't. A model
+// that rejects the setting is simply called again without it.
+async function callAI(ai, prompt, maxTokens, opts = {}) {
   try {
     if (ai.type === 'gemini') {
-      const gemModel = ai.client.getGenerativeModel({ model: ai.model });
-      const result = await gemModel.generateContent(prompt);
+      const thinkingConfig = opts.thinking ? { thinkingLevel: opts.thinking } : null;
+      let result;
+      try {
+        result = await ai.client.getGenerativeModel({ model: ai.model, ...(thinkingConfig ? { generationConfig: { thinkingConfig } } : {}) }).generateContent(prompt);
+      } catch (e) {
+        if (!thinkingConfig || !/think/i.test(e.message || '')) throw e;
+        result = await ai.client.getGenerativeModel({ model: ai.model }).generateContent(prompt);
+      }
       const text = result.response.text();
       const meta = result.response.usageMetadata;
-      return { text, usage: { input_tokens: meta?.promptTokenCount || 0, output_tokens: meta?.candidatesTokenCount || 0 } };
+      // Thinking tokens are billed as output, so they count as output here too.
+      return { text, usage: { input_tokens: meta?.promptTokenCount || 0, output_tokens: (meta?.candidatesTokenCount || 0) + (meta?.thoughtsTokenCount || 0) } };
     }
     if (ai.type === 'openai') {
       const completion = await ai.client.chat.completions.create({
@@ -1026,7 +1041,7 @@ async function getTranslatedTopic(topic, language, ai, uid, email) {
   let translated = null;
   try {
     const prompt = `Translate the word or short phrase "${topic}" into ${language}. Reply with ONLY the single most natural, commonly used translation a native speaker would recognize in a news article — no explanation, no English, no quotation marks, nothing else.`;
-    const { text, usage } = await callAI(ai, prompt, 40);
+    const { text, usage } = await callAI(ai, prompt, 40, { thinking: 'minimal' });
     translated = text.trim();
     if (usage) await persistCost(uid, email, ai, calcCostUsd(ai, usage.input_tokens || 0, usage.output_tokens || 0));
     if (translated) await db.ref(dbPath).set(translated).catch(() => {});
@@ -1091,10 +1106,38 @@ function sourceIsEnglishOnly(source) {
 // with no per-topic grouping — topics are shown once, informationally, in the
 // report header instead, since the schedule's whole topic list applies to the
 // report as a whole, not to any one article. Sources are ordered alphabetically.
+// Per-report cap on how many matched articles a daily report keeps — a
+// report with hundreds of articles a day is unreadable, and every article
+// kept is also translated (twice, for Hebrew recipients) and fed into the
+// weekly summary. Unset means the default; 0 means no limit.
+const DEFAULT_MAX_ARTICLES_PER_DAY = 30;
+function maxArticlesPerDay(schedule) {
+  const v = schedule.maxArticlesPerDay;
+  if (v === undefined || v === null || v === '') return DEFAULT_MAX_ARTICLES_PER_DAY;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_MAX_ARTICLES_PER_DAY;
+}
+// Sources take turns, so one prolific outlet can't fill the whole report.
+// Within a source, articles keep their archive order.
+function allocateArticleLimit(matched, limit) {
+  const out = new Map(matched.map(m => [m.articlesKey, limit === 0 ? [...m.relevantIndices] : []]));
+  if (limit === 0) return out;
+  const queues = matched.map(m => ({ key: m.articlesKey, rest: [...m.relevantIndices] }));
+  let left = limit;
+  while (left > 0) {
+    let added = false;
+    for (const q of queues) {
+      if (left > 0 && q.rest.length > 0) { out.get(q.key).push(q.rest.shift()); left--; added = true; }
+    }
+    if (!added) break;
+  }
+  return out;
+}
+
 function buildDaySourceGroups(perSourceMatchData) {
   return perSourceMatchData
-    .map(({ source, topicKeywordMatches, translatedArticles }) => {
-      const relevantIndices = relevantIndicesFromMatches(topicKeywordMatches);
+    .map(({ source, topicKeywordMatches, translatedArticles, selectedIndices }) => {
+      const relevantIndices = selectedIndices || relevantIndicesFromMatches(topicKeywordMatches);
       return {
         sourceId: source.id, sourceName: source.name, sourceLean: source.lean,
         articles: relevantIndices.map(i => translatedArticles[i - 1])
@@ -1317,6 +1360,13 @@ function buildCombinedText(c, hebrew) {
 // Weekly shows the summary only, never the underlying day-by-day articles —
 // those still get collected internally (the summary is extracted from them),
 // just never surfaced on their own for a weekly report.
+function articleLimitNote(run) {
+  if (!run.relevantTotal || run.runType === 'weekly') return '';
+  let shown = 0;
+  for (const d of (run.days || [])) for (const s of (d.sources || [])) shown += (s.articles || []).length;
+  return `Showing ${shown} of ${run.relevantTotal} matching articles — the daily limit is set in the report's settings.`;
+}
+
 function buildRawReportText(schedule, run, sourceWebsites = {}, hebrew = false) {
   const days = run.runType === 'weekly' ? [] : (run.days || []);
   const isMultiDay = days.length > 1;
@@ -1333,6 +1383,7 @@ function buildRawReportText(schedule, run, sourceWebsites = {}, hebrew = false) 
   // broken rather than "a quiet day" (confirmed in production 2026-09-14 —
   // Culture in Bangkok's report for 12/09 matched nothing and looked empty).
   else if (days.length === 0) text += `\nNothing matched your topics today — none of your sources published anything relevant. This is normal on a quiet news day; check back tomorrow.\n`;
+  if (!combined && articleLimitNote(run)) text += `\n${articleLimitNote(run)}\n`;
   text += '\n';
   if (combined) text += buildCombinedText(combined, hebrew);
   for (const d of (combined ? [] : days)) {
@@ -1542,7 +1593,7 @@ function buildReportHtml(schedule, run, rtl = false, sourceWebsites = {}) {
           <p style="font-size:13px;color:#90949c;margin:0 0 3px;">${escapeHtml(dateHeader)}</p>
           ${topics.length > 0 && !combined ? `<p style="font-size:13px;color:#90949c;margin:0 0 20px;">Topics: ${escapeHtml(topics.join(', '))}</p>` : (combined ? '<p style="margin:0 0 17px;"></p>' : '')}
           <hr style="border:none;border-top:1px solid #e7e5e0;margin:0 0 22px;">
-          ${summaryHtml}
+          ${summaryHtml}${!combined && articleLimitNote(run) ? `<p style="font-size:12px;color:#90949c;margin:0 0 18px;font-family:${sans};">${escapeHtml(articleLimitNote(run))}</p>` : ''}
           ${body}
           ${linksHtml}
           <hr style="border:none;border-top:1px solid #e7e5e0;margin:28px 0 14px;">
@@ -1814,7 +1865,7 @@ Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], 
   const maxTokens = Math.min(300 + contextTopics.length * 150, 4000);
 
   try {
-    const { text, usage } = await callAI(ai, prompt, maxTokens);
+    const { text, usage } = await callAI(ai, prompt, maxTokens, { thinking: 'low' });
     const parsed = extractJson(text, '{') || {};
     const normalized = {};
     for (const [k, v] of Object.entries(parsed)) normalized[k.trim().toLowerCase()] = v;
@@ -1864,7 +1915,7 @@ Return ONLY valid JSON, no markdown, no explanation: { "theme name": [1, 4, 7], 
   const maxTokens = Math.min(300 + contextTopics.length * 150, 4000);
 
   try {
-    const { text, usage } = await callAI(ai, prompt, maxTokens);
+    const { text, usage } = await callAI(ai, prompt, maxTokens, { thinking: 'low' });
     const parsed = extractJson(text, '{') || {};
     const normalized = {};
     for (const [k, v] of Object.entries(parsed)) normalized[k.trim().toLowerCase()] = v;
@@ -1936,7 +1987,7 @@ ${JSON.stringify(chunk)}`;
   const totalChars = chunk.reduce((sum, t) => sum + (typeof t === 'string' ? t.length : 0), 0);
   const maxTokens = Math.min(Math.max(2000, Math.ceil(totalChars / 2) + chunk.length * 50), 16000);
 
-  const { text, usage } = await callAI(ai, prompt, maxTokens);
+  const { text, usage } = await callAI(ai, prompt, maxTokens, { thinking: 'minimal' });
   let translations = extractJson(text, '[');
   if (!Array.isArray(translations) || translations.length < chunk.length) {
     throw new Error(`translateBatch: expected at least ${chunk.length} translations, got ${Array.isArray(translations) ? translations.length : typeof translations}`);
@@ -2536,7 +2587,7 @@ Articles:
 ${articles.map((a, i) => `[${i + 1}] ${a.title} — ${String(a.text || '').slice(0, 300)}`).join('\n')}
 
 Reply with ONLY a JSON object mapping each article number to a category number, e.g. {"1": 3, "2": 0}.`;
-  const { text, usage } = await callAI(ai, prompt, Math.min(200 + articles.length * 15, 2000));
+  const { text, usage } = await callAI(ai, prompt, Math.min(200 + articles.length * 15, 2000), { thinking: 'low' });
   const match = String(text || '').match(/\{[\s\S]*\}/);
   if (match) {
     let map = {};
@@ -2573,6 +2624,7 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
   // retried run still sees the full, unpruned archive to work from.
   const pendingDeletions = {};
   const perSourceMatchData = [];
+  const matched = [];
 
   // Was hardcoded to 0 before 2026-09-08 — the run's own cost/token fields
   // never actually counted the classification or translation calls below
@@ -2656,6 +2708,21 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
       articles.forEach((a, i) => { if (!relevantSet.has(i + 1)) pendingDeletions[a._archivePath] = null; });
     }
     if (relevantIndices.length === 0) return;
+    matched.push({ source, articles, articlesKey, topicKeywordMatches, relevantIndices });
+  }));
+
+  // The daily limit is applied after classification (which has to read
+  // every article to know what matched) but before translation, so
+  // articles over the limit are never translated or shown. Pruning above
+  // still follows the full match set, exactly as before.
+  matched.sort((a, b) => String(a.source.name).localeCompare(String(b.source.name)));
+  const relevantTotal = matched.reduce((n, m) => n + m.relevantIndices.length, 0);
+  const selectedBySource = allocateArticleLimit(matched, maxArticlesPerDay(schedule));
+  const shownTotal = [...selectedBySource.values()].reduce((n, list) => n + list.length, 0);
+
+  await Promise.all(matched.map(async ({ source, articles, articlesKey, topicKeywordMatches }) => {
+    const selectedIndices = selectedBySource.get(articlesKey) || [];
+    if (selectedIndices.length === 0) return;
 
     // Only the matched articles get translated — same "only pay for what's
     // relevant" principle the old AI-summary path applied to its analysis
@@ -2667,7 +2734,7 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
     // of what's picked for classification).
     const isEnglish = sourceIsEnglishOnly(source);
     const translatedArticles = articles.map(a => ({ title: a.title, text: a.text, link: a.link }));
-    const toTranslate = isEnglish ? [] : relevantIndices;
+    const toTranslate = isEnglish ? [] : selectedIndices;
     if (toTranslate.length > 0) {
       // Cached per individual article (not per whole batch) rather than
       // per (source, exact topic set) — two schedules sharing a source
@@ -2706,7 +2773,7 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
       });
     }
 
-    perSourceMatchData.push({ source, topicKeywordMatches, translatedArticles });
+    perSourceMatchData.push({ source, topicKeywordMatches, translatedArticles, selectedIndices });
   }));
 
   const sourceGroups = buildDaySourceGroups(perSourceMatchData);
@@ -2726,7 +2793,8 @@ async function generateDailyReportRun(scheduleId, schedule, ai, translateAi, con
 
   const run = {
     scheduleId, generatedAt: now.toISOString(), periodStart: periodEnd, periodEnd, dateLabel: periodEnd,
-    days, topics, runType: 'daily', costUsd, inputTokens, outputTokens, provider: ai.type, model: ai.model, status: 'ok'
+    days, topics, runType: 'daily', costUsd, inputTokens, outputTokens, provider: ai.type, model: ai.model, status: 'ok',
+    ...(relevantTotal > shownTotal ? { relevantTotal } : {})
   };
   return { run, pendingDeletions, periodEnd };
 }
@@ -3187,6 +3255,10 @@ function sanitizeEmailList(list) {
 function clampSummaryWords(v, fallback) {
   return Math.min(Math.max(parseInt(v) || fallback, 50), 1000);
 }
+function clampArticleLimit(v) {
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? Math.min(Math.max(n, 0), 500) : DEFAULT_MAX_ARTICLES_PER_DAY;
+}
 function clampWeeklySummaryWords(v) { return clampSummaryWords(v, 400); }
 function clampDailySummaryWords(v) { return clampSummaryWords(v, 200); }
 
@@ -3220,6 +3292,7 @@ exports.createSchedule = onCall(
       sendDailyEmail: !!sendDailyEmail, sendWeeklyEmail: !!sendWeeklyEmail, emailRecipients,
       sectionedSummary: !!request.data?.sectionedSummary,
       includeDailySummary: request.data?.includeDailySummary !== false,
+      maxArticlesPerDay: clampArticleLimit(request.data?.maxArticlesPerDay),
       referenceLinks, includeReferenceLinks: !!request.data?.includeReferenceLinks,
       includeSourceLinks: !!request.data?.includeSourceLinks,
       enabled: true,
@@ -3253,10 +3326,11 @@ exports.updateSchedule = onCall(
     if (updates.searchScope !== undefined) updates.searchScope = updates.searchScope === 'domestic' ? 'domestic' : 'global';
     if (updates.sectionedSummary !== undefined) updates.sectionedSummary = !!updates.sectionedSummary;
     if (updates.includeDailySummary !== undefined) updates.includeDailySummary = updates.includeDailySummary !== false;
+    if (updates.maxArticlesPerDay !== undefined) updates.maxArticlesPerDay = clampArticleLimit(updates.maxArticlesPerDay);
     if (updates.referenceLinks !== undefined) updates.referenceLinks = String(updates.referenceLinks || '').trim().slice(0, 2000);
     if (updates.includeReferenceLinks !== undefined) updates.includeReferenceLinks = !!updates.includeReferenceLinks;
     if (updates.includeSourceLinks !== undefined) updates.includeSourceLinks = !!updates.includeSourceLinks;
-    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope', 'sectionedSummary', 'includeDailySummary', 'referenceLinks', 'includeReferenceLinks', 'includeSourceLinks'];
+    const allowed = ['sourceIds', 'topics', 'contextTopics', 'weeklyDay', 'hourUtc', 'dailyHourUtc', 'weeklySummaryWords', 'dailySummaryWords', 'reportTitle', 'enabled', 'sendDailyEmail', 'sendWeeklyEmail', 'emailRecipients', 'searchScope', 'sectionedSummary', 'includeDailySummary', 'maxArticlesPerDay', 'referenceLinks', 'includeReferenceLinks', 'includeSourceLinks'];
     const patch = {};
     for (const k of allowed) if (updates[k] !== undefined) patch[k] = updates[k];
     if (Object.keys(patch).length === 0) throw new HttpsError('invalid-argument', 'no valid fields to update');

@@ -41,6 +41,20 @@ async function getRole(email) {
   return rec ? rec.role : null;
 }
 
+// config/maintenance.paused — the admin's full stop. While paused, every
+// scheduled job (feed collection, report generation and emails, cleanups)
+// returns immediately, so no AI or email work happens and costs drop to
+// near zero. Recipients never log in, so there is no maintenance screen —
+// they are told by email instead (see setSystemPaused). Cached briefly so
+// the frequent jobs don't each pay a database read.
+let PAUSE_CACHE = { at: 0, paused: false };
+async function isSystemPaused() {
+  if (Date.now() - PAUSE_CACHE.at < 30000) return PAUSE_CACHE.paused;
+  const snap = await db.ref('config/maintenance/paused').once('value');
+  PAUSE_CACHE = { at: Date.now(), paused: snap.val() === true };
+  return PAUSE_CACHE.paused;
+}
+
 async function requireAuthorized(request) {
   if (!request.auth) throw new HttpsError('unauthenticated', 'Login required');
   const role = await getRole(request.auth.token.email);
@@ -811,6 +825,7 @@ exports.runArchiveCleanupNow = onCall(
 exports.pruneArticleArchive = onSchedule(
   { schedule: `0 ${ARCHIVE_CLEANUP_CRON_UTC_HOUR} * * *`, region: 'us-central1', memory: '256MiB', timeoutSeconds: 300, timeZone: 'Etc/UTC' },
   async () => {
+    if (await isSystemPaused()) { console.log('pruneArticleArchive: system paused, skipping'); return; }
     const snap = await db.ref('config/archiveCleanup').once('value');
     const settings = snap.val() || {};
     const enabled = settings.enabled !== undefined ? settings.enabled : ARCHIVE_CLEANUP_DEFAULTS.enabled;
@@ -2222,7 +2237,68 @@ exports.getMyRole = onCall(
     // (which can't call getRole themselves) can gate reads without exposing
     // authorizedUsers/userCosts to clients.
     await db.ref(`authorizedUids/${request.auth.uid}`).set(role ? true : null).catch(() => {});
-    return { role };
+    return { role, paused: role ? await isSystemPaused() : false };
+  }
+);
+
+// Every distinct address on any enabled report, so a person on several
+// reports is counted once.
+async function allReportRecipients() {
+  const snap = await db.ref('schedules').once('value');
+  const emails = new Set();
+  for (const s of Object.values(snap.val() || {})) {
+    if (!s.enabled) continue;
+    for (const r of normalizeRecipients(s.emailRecipients)) emails.add(r.email.trim().toLowerCase());
+  }
+  return [...emails].sort();
+}
+
+// Pauses or resumes everything. An optional message is emailed to every
+// report recipient — one separate email per person (so addresses are never
+// exposed to each other), no matter how many reports they receive.
+exports.setSystemPaused = onCall(
+  { timeoutSeconds: 300, memory: '256MiB', region: 'us-central1', secrets: [gmailAppPassword] },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    const paused = request.data?.paused === true;
+    const message = String(request.data?.message || '').trim().slice(0, 5000);
+    await db.ref('config/maintenance').update({ paused, changedAt: new Date().toISOString(), changedBy: request.auth.token.email || null });
+    PAUSE_CACHE = { at: Date.now(), paused };
+
+    let sent = 0;
+    const failed = [];
+    if (message) {
+      const recipients = await allReportRecipients();
+      const transporter = nodemailer.createTransport({ service: 'gmail', auth: { user: OWNER_EMAIL, pass: gmailAppPassword.value() } });
+      const sans = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+      const rtl = /[\u0590-\u05FF]/.test(message);
+      const paragraphs = message.split(/\n{2,}/).map(p => `<p style="font-size:15px;color:#1c1e21;line-height:1.6;margin:0 0 14px;white-space:pre-line;">${escapeHtml(p)}</p>`).join('');
+      const html = `<!doctype html><html><body style="margin:0;padding:0;background:#eef0f3;"><div style="max-width:640px;margin:0 auto;padding:32px 16px;"><div style="background:#ffffff;border-radius:3px;padding:30px 28px;font-family:${sans};"${rtl ? ' dir="rtl"' : ''}>
+        <p style="font-family:Georgia,'Times New Roman',serif;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#90949c;margin:0 0 18px;" dir="ltr">PressWatch</p>
+        ${paragraphs}
+        <hr style="border:none;border-top:1px solid #e7e5e0;margin:22px 0 12px;">
+        <p style="font-size:10px;color:#b3b6bb;margin:0;" dir="ltr">Support: <a href="mailto:${SUPPORT_EMAIL}" style="color:#b3b6bb;">${SUPPORT_EMAIL}</a> · PressWatch © ${new Date().getFullYear()}</p>
+      </div></div></body></html>`;
+      const subject = paused ? 'PressWatch — reports paused' : 'PressWatch — reports resumed';
+      for (const to of recipients) {
+        try {
+          await transporter.sendMail({ from: `PressWatch <${OWNER_EMAIL}>`, to, subject, text: message, html });
+          sent++;
+        } catch (e) {
+          console.error('setSystemPaused: email to', to, 'failed', e.message);
+          failed.push(to);
+        }
+      }
+    }
+    return { paused, sent, failed };
+  }
+);
+
+exports.getPauseRecipientCount = onCall(
+  { timeoutSeconds: 30, memory: '128MiB', region: 'us-central1' },
+  async (request) => {
+    requireAdmin(await requireAuthorized(request));
+    return { count: (await allReportRecipients()).length };
   }
 );
 
@@ -2479,6 +2555,7 @@ function targetPollMinutes(source) {
 exports.pollArchivedSources = onSchedule(
   { schedule: 'every 15 minutes', region: 'us-central1', memory: '256MiB', timeoutSeconds: 300, timeZone: 'Etc/UTC' },
   async () => {
+    if (await isSystemPaused()) { console.log('pollArchivedSources: system paused, skipping'); return; }
     const schedulesSnap = await db.ref('schedules').once('value');
     const schedules = Object.values(schedulesSnap.val() || {}).filter(s => s.enabled);
     if (schedules.length === 0) return;
@@ -3018,6 +3095,7 @@ async function refreshReferenceHighlights(schedule, now) {
 exports.generateScheduledReports = onSchedule(
   { schedule: 'every 60 minutes', region: 'us-central1', memory: '512MiB', timeoutSeconds: 540, timeZone: 'Etc/UTC', secrets: [gmailAppPassword] },
   async () => {
+    if (await isSystemPaused()) { console.log('generateScheduledReports: system paused, skipping'); return; }
     const now = new Date();
     const schedulesSnap = await db.ref('schedules').once('value');
     const schedules = schedulesSnap.val() || {};
@@ -3477,6 +3555,7 @@ exports.runReportCleanupNow = onCall(
 exports.pruneReportRuns = onSchedule(
   { schedule: `0 ${REPORT_CLEANUP_CRON_UTC_HOUR} * * *`, region: 'us-central1', memory: '256MiB', timeoutSeconds: 300, timeZone: 'Etc/UTC' },
   async () => {
+    if (await isSystemPaused()) { console.log('pruneReportRuns: system paused, skipping'); return; }
     const snap = await db.ref('schedules').once('value');
     const schedules = snap.val() || {};
     for (const [scheduleId, schedule] of Object.entries(schedules)) {

@@ -1,5 +1,5 @@
 // ─── Version ──────────────────────────────────────────────────────────────────
-const VERSION = 'v3.72';
+const VERSION = 'v3.73';
 
 // ─── Firebase config ──────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -1200,7 +1200,29 @@ const ANTHROPIC_MODELS = [
   { id: 'claude-sonnet-4-6',         label: 'Claude Sonnet 4.6 — Balanced & capable' },
 ];
 
-function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
+function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin, systemPaused, onSystemPausedChange }) {
+  const [pauseDialog, setPauseDialog] = useState(null); // null | 'pause' | 'resume'
+  const [pauseMessage, setPauseMessage] = useState('');
+  const [pauseRecipientCount, setPauseRecipientCount] = useState(null);
+  const [pauseSaving, setPauseSaving] = useState(false);
+  const [pauseResult, setPauseResult] = useState('');
+  function openPauseDialog(kind) {
+    setPauseDialog(kind); setPauseMessage(''); setPauseResult(''); setPauseRecipientCount(null);
+    fns.httpsCallable('getPauseRecipientCount')().then(r => setPauseRecipientCount(r.data.count)).catch(() => {});
+  }
+  async function setPause(on) {
+    setPauseSaving(true);
+    try {
+      const resp = await fns.httpsCallable('setSystemPaused', { timeout: 300000 })({ paused: on, message: pauseMessage });
+      onSystemPausedChange?.(!!resp.data.paused);
+      setPauseDialog(null);
+      const { sent = 0, failed = [] } = resp.data;
+      setPauseResult((on ? 'Paused.' : 'Resumed.') + (sent || failed.length ? ` Message emailed to ${sent} recipient${sent === 1 ? '' : 's'}.` : '') + (failed.length ? ` Failed: ${failed.join(', ')}` : ''));
+    } catch (e) {
+      alert('Could not change the system pause: ' + e.message);
+    }
+    setPauseSaving(false);
+  }
   const [confirm, confirmDialog] = useConfirm();
   const [settingsTab, setSettingsTab] = useState('general');
   const [persona, setPersona] = useState('');
@@ -1993,6 +2015,51 @@ function SettingsPage({ onBack, deferredInstall, user, onSignOut, isAdmin }) {
         </div>
         )}
 
+        {settingsTab === 'general' && isAdmin && (
+        <div style={{ marginBottom: 14 }}>
+          <button onClick={() => openPauseDialog(systemPaused ? 'resume' : 'pause')} disabled={pauseSaving}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: '12px 14px', background: systemPaused ? '#3b1d0a' : '#0f1e35', border: '1px solid ' + (systemPaused ? '#7c2d12' : C.border), borderRadius: 9, cursor: 'pointer', color: C.text }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 16 }}>{systemPaused ? '⏸' : '▶️'}</span>
+              <div style={{ textAlign: 'left' }}>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>Pause system</div>
+                <div style={{ fontSize: 11, color: systemPaused ? '#fdba74' : C.faint, marginTop: 1 }}>
+                  {systemPaused
+                    ? 'Paused — nothing runs: no feed collection, no reports, no emails, no AI cost'
+                    : 'Running — feeds are collected and reports are generated and emailed on schedule'}
+                </div>
+              </div>
+            </div>
+            <span style={{ fontSize: 12, fontWeight: 700, flexShrink: 0, color: systemPaused ? '#fb923c' : '#4ade80' }}>
+              {pauseSaving ? <Spinner size={12} /> : systemPaused ? 'Paused · tap to resume' : 'Running'}
+            </span>
+          </button>
+          {pauseResult && <div style={{ marginTop: 8, fontSize: 12, color: C.muted }}>{pauseResult}</div>}
+          {pauseDialog && (
+            <div style={{ marginTop: 10, padding: 14, background: C.card, borderRadius: 9, border: '1px solid ' + (pauseDialog === 'pause' ? '#7c2d12' : '#14532d') }}>
+              <div style={{ fontSize: 13, color: C.text, lineHeight: 1.6, marginBottom: 10 }}>
+                {pauseDialog === 'pause'
+                  ? 'Pause the system? Nothing will run: no feeds are collected, no reports are generated or emailed, and no AI is used. Reports for the paused days are not made up later — when you resume, scheduling continues from the next run.'
+                  : 'Resume the system? Feed collection and scheduled reports start again from their next scheduled time.'}
+              </div>
+              <label style={{ display: 'block', fontSize: 11, color: C.faint, marginBottom: 4 }}>
+                Message to all report recipients (optional){pauseRecipientCount !== null ? ` — ${pauseRecipientCount} people, one email each` : ''}
+              </label>
+              <textarea value={pauseMessage} onChange={e => setPauseMessage(e.target.value)} dir="auto"
+                placeholder={pauseDialog === 'pause' ? 'e.g. The daily reports are paused until further notice.' : 'e.g. The daily reports are back as of today.'}
+                className="input-field" style={{ fontSize: 13, width: '100%', minHeight: 90, resize: 'vertical', marginBottom: 6 }} />
+              <div style={{ fontSize: 10, color: C.faint, marginBottom: 12 }}>Leave empty to {pauseDialog} without emailing anyone.</div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button onClick={() => setPause(pauseDialog === 'pause')} disabled={pauseSaving}
+                  style={{ ...BTN(pauseDialog === 'pause' ? '#b91c1c' : '#15803d'), flex: 1, padding: '9px 14px' }}>
+                  {pauseSaving ? (pauseDialog === 'pause' ? 'Pausing…' : 'Resuming…') : (pauseDialog === 'pause' ? 'Pause' : 'Resume') + (pauseMessage.trim() ? ' and send' : '')}
+                </button>
+                <button onClick={() => setPauseDialog(null)} disabled={pauseSaving} style={{ ...SMALL_BTN, flex: 1, padding: '9px 14px' }}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+        )}
         {settingsTab === 'general' && isAdmin && (
         <div style={{ marginBottom: 28 }}>
           <button
@@ -4216,6 +4283,7 @@ function App() {
   const [confirm, confirmDialog] = useConfirm();
   const [user, setUser] = useState(undefined); // undefined=checking, null=logged out, object=logged in
   const [role, setRole] = useState(undefined); // undefined=checking, null=not authorized, 'admin'|'user'=authorized
+  const [systemPaused, setSystemPaused] = useState(false);
   const [page, setPage] = useState('main'); // 'main' = Scheduled Reports (the only content page now), 'settings' = Settings
   const deferredInstall = useRef(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -4251,6 +4319,7 @@ function App() {
       .then(r => {
         if (cancelled) return;
         setRole(r.data.role || null);
+        setSystemPaused(!!r.data.paused);
         if (r.data.role) {
           // Only write the shared, authorization-gated index once we're confirmed
           // authorized — otherwise this write races the authorizedUids mirror
@@ -4362,7 +4431,7 @@ function App() {
   // 'main' is the only content page besides Settings now — Scheduled
   // Reports is the whole app, not one destination among several.
   const content = page === 'settings'
-    ? <SettingsPage onBack={() => setPage('main')} deferredInstall={deferredInstall} user={user} onSignOut={handleSignOut} isAdmin={role === 'admin'} />
+    ? <SettingsPage onBack={() => setPage('main')} deferredInstall={deferredInstall} user={user} onSignOut={handleSignOut} isAdmin={role === 'admin'} systemPaused={systemPaused} onSystemPausedChange={setSystemPaused} />
     : (
       <div className="fade-in" style={{ maxWidth: 640, margin: '40px auto', padding: '0 20px' }}>
         <div className="panel" style={{ padding: 24 }}>
@@ -4377,6 +4446,11 @@ function App() {
   return (
     <div style={{ minHeight: '100vh', background: C.bg }}>
       {header}
+      {systemPaused && role === 'admin' && (
+        <div className="no-print" style={{ background: '#3b1d0a', borderBottom: '1px solid #7c2d12', color: '#fdba74', fontSize: 12, fontWeight: 600, textAlign: 'center', padding: '7px 16px' }}>
+          ⏸ System paused — nothing runs: no feeds are collected and no reports are generated or emailed. Resume in Settings → General.
+        </div>
+      )}
       <div style={{ minHeight: 'calc(100vh - 56px)' }}>{content}</div>
       {confirmDialog}
     </div>
